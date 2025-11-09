@@ -24,6 +24,7 @@ pub struct DashboardIndicator {
 }
 
 /// Dashboard widget - container for multiple indicators
+#[derive(Clone)]
 pub struct Dashboard {
     label: String,
     indicators: Vec<DashboardIndicator>,

@@ -3,6 +3,7 @@ use super::scrollable_container::ScrollableContainer;
 
 /// Widget for displaying players in the room using ScrollableContainer
 /// Title shows "Players [XX]" and items show individual player names
+#[derive(Clone)]
 pub struct Players {
     container: ScrollableContainer,
     count: u32,

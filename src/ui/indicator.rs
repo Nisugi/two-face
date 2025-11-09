@@ -7,6 +7,7 @@ use ratatui::{
 
 /// An indicator widget for displaying boolean status or multi-level states
 /// Used for injuries (0-6), status indicators (on/off), compass directions, etc.
+#[derive(Clone)]
 pub struct Indicator {
     label: String,
     value: u8,  // 0 = off/none, 1-6 = injury/scar levels, or 0-1 for boolean

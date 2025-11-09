@@ -72,6 +72,8 @@ struct SearchState {
     current_match_idx: usize,  // Which match is currently selected
 }
 
+// Manual Clone implementation because SearchState contains Regex (not Clone)
+// Also skip highlight_regexes and fast_matcher which contain Regex/AhoCorasick
 pub struct TextWindow {
     // Store original logical lines (for re-wrapping)
     logical_lines: VecDeque<LogicalLine>,
@@ -110,6 +112,41 @@ pub struct TextWindow {
     max_recent_links: usize,
     // Timestamp configuration
     show_timestamps: bool,
+}
+
+impl Clone for TextWindow {
+    fn clone(&self) -> Self {
+        Self {
+            logical_lines: self.logical_lines.clone(),
+            wrapped_lines: self.wrapped_lines.clone(),
+            current_line_spans: self.current_line_spans.clone(),
+            max_lines: self.max_lines,
+            scroll_offset: self.scroll_offset,
+            scroll_position: self.scroll_position,
+            last_visible_height: self.last_visible_height,
+            title: self.title.clone(),
+            last_width: self.last_width,
+            needs_rewrap: self.needs_rewrap,
+            show_border: self.show_border,
+            border_style: self.border_style.clone(),
+            border_color: self.border_color.clone(),
+            border_sides: self.border_sides.clone(),
+            background_color: self.background_color.clone(),
+            content_align: self.content_align.clone(),
+            // Skip search_state (contains Regex which doesn't implement Clone)
+            search_state: None,
+            highlights: self.highlights.clone(),
+            // Skip highlight_regexes (contains Regex)
+            highlight_regexes: vec![],
+            // Skip fast_matcher (AhoCorasick doesn't implement Clone)
+            fast_matcher: None,
+            links_enabled: self.links_enabled,
+            fast_pattern_map: self.fast_pattern_map.clone(),
+            recent_links: self.recent_links.clone(),
+            max_recent_links: self.max_recent_links,
+            show_timestamps: self.show_timestamps,
+        }
+    }
 }
 
 impl TextWindow {

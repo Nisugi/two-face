@@ -14,6 +14,7 @@ use std::collections::HashMap;
 ///   o | o  nk
 ///    / \
 ///   o   o  bk
+#[derive(Clone)]
 pub struct InjuryDoll {
     label: String,
     // Map body part name to injury level (0=none, 1-3=injury, 4-6=scar)

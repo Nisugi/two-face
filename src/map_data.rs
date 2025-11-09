@@ -41,6 +41,7 @@ pub struct MapDbRoom {
 }
 
 /// Full mapdb data
+#[derive(Clone)]
 pub struct MapDb {
     rooms: HashMap<String, MapDbRoom>, // Keyed by UID as string
     id_to_uid: HashMap<i32, i32>,      // Map room ID to UID (both IDs and UIDs can be negative for instanced/special areas)

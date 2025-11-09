@@ -6,6 +6,7 @@ use super::active_effects;
 use ratatui::buffer::Buffer;
 
 /// Enum to hold different widget types
+#[derive(Clone)]
 pub enum Widget {
     Text(TextWindow),
     Tabbed(TabbedTextWindow),
@@ -580,6 +581,7 @@ pub struct WindowConfig {
     pub scar3_color: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct WindowManager {
     windows: HashMap<String, Widget>,
     config: Vec<WindowConfig>,

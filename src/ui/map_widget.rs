@@ -8,6 +8,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct MapWidget {
     /// Current room ID we're centered on
     current_room_id: Option<String>,

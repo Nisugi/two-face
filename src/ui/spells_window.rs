@@ -19,6 +19,7 @@ pub enum BorderStyleType {
 
 /// Spells window widget - displays known spells with clickable links
 /// Content is completely replaced on each update (no scrolling, no buffer)
+#[derive(Clone)]
 pub struct SpellsWindow {
     title: String,
     show_border: bool,

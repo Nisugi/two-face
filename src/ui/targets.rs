@@ -3,6 +3,7 @@ use super::scrollable_container::ScrollableContainer;
 
 /// Widget for displaying combat targets using ScrollableContainer
 /// Title shows "Targets [XX]" and items show individual targets with status
+#[derive(Clone)]
 pub struct Targets {
     container: ScrollableContainer,
     count: u32,

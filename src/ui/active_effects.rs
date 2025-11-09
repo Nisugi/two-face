@@ -1,6 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect};
 use super::scrollable_container::ScrollableContainer;
 
+#[derive(Clone)]
 pub struct ActiveEffects {
     container: ScrollableContainer,
     effect_category: String,

@@ -13,6 +13,7 @@ pub enum TabBarPosition {
     Bottom,
 }
 
+#[derive(Clone)]
 struct TabInfo {
     name: String,
     stream: String,
@@ -21,6 +22,7 @@ struct TabInfo {
     unread_count: usize,
 }
 
+#[derive(Clone)]
 pub struct TabbedTextWindow {
     tabs: Vec<TabInfo>,
     active_tab_index: usize,

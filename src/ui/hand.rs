@@ -7,6 +7,7 @@ use ratatui::{
 
 /// Individual hand widget for left/right/spell hand
 /// Shows just icon + text for a single hand
+#[derive(Clone)]
 pub struct Hand {
     label: String,
     hand_type: HandType,

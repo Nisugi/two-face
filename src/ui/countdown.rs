@@ -7,6 +7,7 @@ use ratatui::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A countdown widget for displaying roundtime, casttime, etc.
+#[derive(Clone)]
 pub struct Countdown {
     label: String,
     end_time: u64,  // Unix timestamp when countdown ends

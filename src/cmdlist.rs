@@ -14,6 +14,7 @@ pub struct CmdListEntry {
 }
 
 /// Parser and lookup for cmdlist1.xml
+#[derive(Clone)]
 pub struct CmdList {
     entries: HashMap<String, CmdListEntry>,  // coord -> entry
 }

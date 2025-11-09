@@ -11,6 +11,7 @@ use std::collections::HashSet;
 ///   U    NW  N   NE
 ///   D    W   O   E
 ///   OUT  SW  S   SE
+#[derive(Clone)]
 pub struct Compass {
     label: String,
     directions: HashSet<String>, // Active directions

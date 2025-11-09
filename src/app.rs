@@ -166,33 +166,33 @@ impl InventoryBufferState {
 }
 
 pub struct App {
-    config: Config,
-    layout: Layout,
-    window_manager: WindowManager,
+    pub(crate) config: Config,
+    pub(crate) layout: Layout,
+    pub(crate) window_manager: WindowManager,
     command_input: CommandInput,
     search_input: CommandInput,  // Separate input for search
-    parser: XmlParser,
-    running: bool,
-    current_stream: String, // Track which stream we're currently writing to
-    discard_current_stream: bool, // If true, discard text because no window exists for current stream
-    chunk_has_main_text: bool, // Track if current chunk (since last prompt) has main stream text
-    chunk_has_silent_updates: bool, // Track if current chunk has silent updates (buffs, vitals, etc.)
-    server_time_offset: i64, // Offset between server time and local time (server_time - local_time) - used for countdown calculations to avoid clock drift
+    pub(crate) parser: XmlParser,
+    pub(crate) running: bool,
+    pub(crate) current_stream: String, // Track which stream we're currently writing to
+    pub(crate) discard_current_stream: bool, // If true, discard text because no window exists for current stream
+    pub(crate) chunk_has_main_text: bool, // Track if current chunk (since last prompt) has main stream text
+    pub(crate) chunk_has_silent_updates: bool, // Track if current chunk has silent updates (buffs, vitals, etc.)
+    pub(crate) server_time_offset: i64, // Offset between server time and local time (server_time - local_time) - used for countdown calculations to avoid clock drift
     focused_window_index: usize, // Index of currently focused window for scrolling
     resize_state: Option<ResizeState>, // Track active resize operation
     move_state: Option<MoveState>, // Track active window move operation
     input_mode: InputMode,  // Track current input mode
-    keybind_map: HashMap<(KeyCode, KeyModifiers), KeyAction>,  // Parsed keybindings
-    perf_stats: PerformanceStats,  // Performance statistics
-    show_perf_stats: bool,  // Whether to show performance stats window
-    stream_buffer: String,  // Buffer for accumulating stream text (used for combat/playerlist)
-    sound_player: Option<SoundPlayer>,  // Sound player (None if initialization failed)
+    pub(crate) keybind_map: HashMap<(KeyCode, KeyModifiers), KeyAction>,  // Parsed keybindings
+    pub(crate) perf_stats: PerformanceStats,  // Performance statistics
+    pub(crate) show_perf_stats: bool,  // Whether to show performance stats window
+    pub(crate) stream_buffer: String,  // Buffer for accumulating stream text (used for combat/playerlist)
+    pub(crate) sound_player: Option<SoundPlayer>,  // Sound player (None if initialization failed)
     highlight_form: Option<crate::ui::HighlightFormWidget>,  // Highlight form (None when not shown)
     keybind_form: Option<crate::ui::KeybindFormWidget>,  // Keybind form (None when not shown)
     selection_state: Option<SelectionState>,  // Current text selection (None when no selection)
     selection_drag_start: Option<(u16, u16)>,  // Mouse position when drag started (for detecting drag vs click)
-    cmdlist: Option<CmdList>,  // Command list for context menus (None if failed to load)
-    menu_request_counter: u32,  // Counter for menu request correlation IDs
+    pub(crate) cmdlist: Option<CmdList>,  // Command list for context menus (None if failed to load)
+    pub(crate) menu_request_counter: u32,  // Counter for menu request correlation IDs
     pending_menu_requests: HashMap<String, PendingMenuRequest>,  // counter -> (exist_id, noun)
     popup_menu: Option<crate::ui::PopupMenu>,  // Active main popup menu (None when no menu shown)
     submenu: Option<crate::ui::PopupMenu>,  // Active submenu (None when no submenu shown)
@@ -216,9 +216,9 @@ pub struct App {
     shown_bounds_warning: bool,  // Track if we've shown the out-of-bounds warning
     base_layout_name: Option<String>,  // Name of base layout for auto-save reference
     // Room tracking
-    nav_room_id: Option<String>,  // Navigation room ID (e.g., "2022628" from <nav rm='2022628'/>)
-    lich_room_id: Option<String>,  // Lich room ID (e.g., "33711" extracted from room name display)
-    room_subtitle: Option<String>,  // Room subtitle (e.g., " - Emberthorn Refuge, Bowery")
+    pub(crate) nav_room_id: Option<String>,  // Navigation room ID (e.g., "2022628" from <nav rm='2022628'/>)
+    pub(crate) lich_room_id: Option<String>,  // Lich room ID (e.g., "33711" extracted from room name display)
+    pub(crate) room_subtitle: Option<String>,  // Room subtitle (e.g., " - Emberthorn Refuge, Bowery")
     // Inventory buffer state for diff optimization
     inventory_buffer_state: InventoryBufferState,
 }

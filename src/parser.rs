@@ -123,6 +123,7 @@ impl Default for ColorStyle {
     }
 }
 
+#[derive(Clone)]
 pub struct XmlParser {
     current_stream: String,
     presets: HashMap<String, (Option<String>, Option<String>)>, // id -> (fg, bg)

@@ -142,37 +142,42 @@ async fn main() -> Result<()> {
 ///
 /// This is the new refactored code path that separates business logic from rendering.
 /// Eventually this will replace App::run() entirely.
-async fn run_experimental(_config: Config, _nomusic: bool) -> Result<()> {
+async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
     use frontend::{Frontend, TuiFrontend};
+    use core::AppCore;
     use tracing::info;
+
+    info!("Initializing App (for now, to leverage existing initialization)...");
+    let app = App::new(config, nomusic)?;
+
+    info!("Extracting AppCore from App...");
+    let mut core = AppCore::from_app(&app);
 
     info!("Initializing TUI frontend...");
     let mut frontend = TuiFrontend::new()?;
 
-    info!("Creating AppCore...");
-    // TODO: Create AppCore from config
-    // For now, just test the frontend event loop
-
     info!("Starting main event loop...");
-    let mut running = true;
     let mut frame_count = 0;
 
-    while running && frame_count < 60 {  // Test: run for 60 frames then exit
+    while core.running && frame_count < 600 {  // Test: run for 600 frames (~10 seconds) then exit
         // Poll events
         let events = frontend.poll_events()?;
         for event in events {
             match event {
                 frontend::FrontendEvent::Quit => {
                     info!("Quit event received");
-                    running = false;
+                    core.running = false;
                 }
                 frontend::FrontendEvent::Key { code, .. } => {
                     info!("Key event: {:?}", code);
                     // Test: Quit on 'q' key
                     if matches!(code, crossterm::event::KeyCode::Char('q')) {
                         info!("'q' pressed, exiting");
-                        running = false;
+                        core.running = false;
                     }
+                }
+                frontend::FrontendEvent::Resize { width, height } => {
+                    info!("Resize event: {}x{}", width, height);
                 }
                 _ => {}
             }
@@ -180,12 +185,13 @@ async fn run_experimental(_config: Config, _nomusic: bool) -> Result<()> {
 
         // TODO: Handle server messages
 
-        // Render (placeholder for now)
-        frontend.render(&() as &dyn std::any::Any)?;
+        // Render (placeholder - pass core as Any for now)
+        frontend.render(&core as &dyn std::any::Any)?;
 
         frame_count += 1;
     }
 
+    info!("Ran for {} frames", frame_count);
     info!("Cleaning up frontend...");
     frontend.cleanup()?;
 

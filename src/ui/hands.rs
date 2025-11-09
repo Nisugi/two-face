@@ -10,6 +10,7 @@ use ratatui::{
 /// L: item name here
 /// R: another item
 /// S: spell prepared
+#[derive(Clone)]
 pub struct Hands {
     label: String,
     left_hand: String,

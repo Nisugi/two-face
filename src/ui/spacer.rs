@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Style},
 };
 
+#[derive(Clone)]
 pub struct Spacer {
     background_color: Option<String>,
     transparent: bool,

@@ -19,6 +19,7 @@ pub enum BorderStyleType {
 
 /// Room window widget - displays room information with component buffering
 /// Components: room desc, room objs, room players, room exits, sprite
+#[derive(Clone)]
 pub struct RoomWindow {
     title: String,
     show_border: bool,

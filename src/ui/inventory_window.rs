@@ -19,6 +19,7 @@ pub enum BorderStyleType {
 
 /// Inventory window widget - displays worn/carried items
 /// Content is completely replaced on each update (no appending)
+#[derive(Clone)]
 pub struct InventoryWindow {
     title: String,
     show_border: bool,

@@ -13,6 +13,7 @@ pub enum TextAlignment {
 }
 
 /// A progress bar widget for displaying vitals, spell durations, etc.
+#[derive(Clone)]
 pub struct ProgressBar {
     label: String,
     current: u32,

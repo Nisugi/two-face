@@ -78,7 +78,40 @@ pub struct AppCore {
 }
 
 impl AppCore {
-    /// Create a new AppCore instance from existing App state
+    /// Create AppCore by extracting state from an initialized App
+    ///
+    /// This is a bridge method during the refactoring process. It allows us to use
+    /// App::new() for initialization while testing the new architecture.
+    ///
+    /// TODO: Eventually replace this with a direct AppCore::new()
+    pub fn from_app(app: &crate::app::App) -> Self {
+        Self {
+            config: app.config.clone(),
+            layout: app.layout.clone(),
+            window_manager: app.window_manager.clone(),
+            parser: app.parser.clone(),
+            running: app.running,
+            current_stream: app.current_stream.clone(),
+            discard_current_stream: app.discard_current_stream,
+            chunk_has_main_text: app.chunk_has_main_text,
+            chunk_has_silent_updates: app.chunk_has_silent_updates,
+            server_time_offset: app.server_time_offset,
+            stream_buffer: app.stream_buffer.clone(),
+            keybind_map: app.keybind_map.clone(),
+            perf_stats: app.perf_stats.clone(),
+            show_perf_stats: app.show_perf_stats,
+            // SoundPlayer can't be cloned (has OutputStream), so we'll skip it for now
+            // TODO: Share sound player or recreate it
+            sound_player: None,
+            cmdlist: app.cmdlist.clone(),
+            menu_request_counter: app.menu_request_counter,
+            nav_room_id: app.nav_room_id.clone(),
+            lich_room_id: app.lich_room_id.clone(),
+            room_subtitle: app.room_subtitle.clone(),
+        }
+    }
+
+    /// Create a new AppCore instance from existing components
     ///
     /// This is a temporary constructor used during the refactoring process.
     /// Eventually this will be the primary constructor that initializes everything.

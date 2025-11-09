@@ -13,6 +13,7 @@ pub struct ScrollableItem {
     pub color: Option<String>,   // Optional color override for this item (hex format)
 }
 
+#[derive(Clone)]
 pub struct ScrollableContainer {
     label: String,
     items: HashMap<String, ScrollableItem>,
