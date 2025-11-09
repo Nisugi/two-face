@@ -187,10 +187,21 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
                 }
                 frontend::FrontendEvent::Key { code, .. } => {
                     tracing::debug!("Key event: {:?}", code);
-                    // Test: Quit on 'q' key (for testing)
-                    if matches!(code, crossterm::event::KeyCode::Char('q')) {
-                        info!("'q' pressed, exiting");
-                        core.running = false;
+
+                    // Handle keyboard input for command line
+                    if let Some(command) = core.handle_key_input(code) {
+                        tracing::info!("Command entered: {}", command);
+
+                        // Process command (dot commands handled locally, game commands sent to server)
+                        if let Some(game_command) = core.process_command(command) {
+                            // Send to server
+                            if let Err(e) = command_tx.send(game_command.clone()) {
+                                tracing::error!("Failed to send command: {}", e);
+                                core.add_system_message(&format!("Failed to send: {}", e));
+                            } else {
+                                tracing::debug!("Sent command to server: {}", game_command);
+                            }
+                        }
                     }
                 }
                 frontend::FrontendEvent::Resize { width, height } => {

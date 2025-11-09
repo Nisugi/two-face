@@ -75,6 +75,12 @@ pub struct AppCore {
 
     /// Room subtitle (e.g., " - Emberthorn Refuge, Bowery")
     pub room_subtitle: Option<String>,
+
+    /// Command input buffer
+    pub command_input: String,
+
+    /// Command input cursor position
+    pub command_cursor: usize,
 }
 
 impl AppCore {
@@ -108,6 +114,8 @@ impl AppCore {
             nav_room_id: app.nav_room_id.clone(),
             lich_room_id: app.lich_room_id.clone(),
             room_subtitle: app.room_subtitle.clone(),
+            command_input: String::new(),
+            command_cursor: 0,
         }
     }
 
@@ -147,6 +155,8 @@ impl AppCore {
             nav_room_id: None,
             lich_room_id: None,
             room_subtitle: None,
+            command_input: String::new(),
+            command_cursor: 0,
         }
     }
 
@@ -533,5 +543,89 @@ impl AppCore {
         self.window_manager.update_config(window_configs);
 
         Ok(())
+    }
+
+    /// Handle keyboard input for command line
+    ///
+    /// Returns Some(command) if Enter was pressed and command should be sent
+    pub fn handle_key_input(&mut self, key: crossterm::event::KeyCode) -> Option<String> {
+        use crossterm::event::KeyCode;
+
+        match key {
+            KeyCode::Char(c) => {
+                // Insert character at cursor position
+                self.command_input.insert(self.command_cursor, c);
+                self.command_cursor += 1;
+                None
+            }
+            KeyCode::Backspace => {
+                // Delete character before cursor
+                if self.command_cursor > 0 {
+                    self.command_input.remove(self.command_cursor - 1);
+                    self.command_cursor -= 1;
+                }
+                None
+            }
+            KeyCode::Delete => {
+                // Delete character at cursor
+                if self.command_cursor < self.command_input.len() {
+                    self.command_input.remove(self.command_cursor);
+                }
+                None
+            }
+            KeyCode::Left => {
+                // Move cursor left
+                if self.command_cursor > 0 {
+                    self.command_cursor -= 1;
+                }
+                None
+            }
+            KeyCode::Right => {
+                // Move cursor right
+                if self.command_cursor < self.command_input.len() {
+                    self.command_cursor += 1;
+                }
+                None
+            }
+            KeyCode::Home => {
+                // Move cursor to start
+                self.command_cursor = 0;
+                None
+            }
+            KeyCode::End => {
+                // Move cursor to end
+                self.command_cursor = self.command_input.len();
+                None
+            }
+            KeyCode::Enter => {
+                // Send command
+                let command = self.command_input.clone();
+                self.command_input.clear();
+                self.command_cursor = 0;
+
+                if !command.is_empty() {
+                    Some(command)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Process a command (either dot command or game command)
+    ///
+    /// Returns Some(command) if it should be sent to the server
+    pub fn process_command(&mut self, command: String) -> Option<String> {
+        if command.starts_with('.') {
+            // Dot command - handle locally
+            if let Err(e) = self.handle_dot_command(&command) {
+                self.add_system_message(&format!("Error: {}", e));
+            }
+            None
+        } else {
+            // Regular command - send to server
+            Some(command)
+        }
     }
 }

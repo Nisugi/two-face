@@ -155,8 +155,52 @@ impl Frontend for TuiFrontend {
                 }
             }
 
-            // TODO: Render command input (needs CommandInput in AppCore)
-            // TODO: Render popup forms/browsers (needs InputMode and popup state in AppCore)
+            // Render simple command input at the bottom
+            // Calculate position: bottom of terminal, full width
+            if terminal_area.height > 0 {
+                use ratatui::widgets::{Block, Borders, Paragraph};
+                use ratatui::style::{Style, Color as RatColor};
+                use ratatui::text::{Line, Span};
+
+                let cmd_area = Rect::new(
+                    0,
+                    terminal_area.height.saturating_sub(1),
+                    terminal_area.width,
+                    1,
+                );
+
+                // Build command line with cursor
+                let mut spans = vec![];
+
+                // Add prompt
+                spans.push(Span::styled("> ", Style::default().fg(RatColor::Green)));
+
+                // Add text before cursor
+                if core.command_cursor > 0 {
+                    spans.push(Span::raw(&core.command_input[..core.command_cursor]));
+                }
+
+                // Add cursor
+                let cursor_char = if core.command_cursor < core.command_input.len() {
+                    core.command_input.chars().nth(core.command_cursor).unwrap().to_string()
+                } else {
+                    " ".to_string()
+                };
+                spans.push(Span::styled(
+                    cursor_char,
+                    Style::default().fg(RatColor::Black).bg(RatColor::White)
+                ));
+
+                // Add text after cursor
+                if core.command_cursor + 1 < core.command_input.len() {
+                    spans.push(Span::raw(&core.command_input[core.command_cursor + 1..]));
+                }
+
+                let line = Line::from(spans);
+                let paragraph = Paragraph::new(line);
+
+                f.render_widget(paragraph, cmd_area);
+            }
         })?;
 
         Ok(())
