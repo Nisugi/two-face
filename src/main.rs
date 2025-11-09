@@ -2,6 +2,7 @@ mod app;
 mod validator;
 mod cmdlist;
 mod config;
+mod core;
 mod frontend;
 mod map_data;
 mod network;
