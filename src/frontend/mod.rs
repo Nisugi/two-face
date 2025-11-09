@@ -4,8 +4,10 @@
 //! It provides a unified interface for event polling, rendering, and cleanup.
 
 pub mod events;
+pub mod tui;
 
 pub use events::FrontendEvent;
+pub use tui::TuiFrontend;
 use anyhow::Result;
 
 /// Frontend trait - must be implemented by both TUI and GUI frontends

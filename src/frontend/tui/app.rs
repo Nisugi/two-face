@@ -1,0 +1,135 @@
+use crate::frontend::{Frontend, FrontendEvent};
+use crate::core::AppCore;
+use anyhow::{Context, Result};
+use crossterm::{
+    event::{self, Event, KeyEventKind, DisableMouseCapture, EnableMouseCapture},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    Terminal,
+};
+use std::io;
+use std::time::Duration;
+
+/// TUI Frontend using ratatui
+///
+/// This frontend renders the application using ratatui (terminal UI library)
+/// and handles events via crossterm.
+pub struct TuiFrontend {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    poll_timeout: Duration,
+}
+
+impl TuiFrontend {
+    /// Create a new TUI frontend
+    ///
+    /// Initializes terminal in raw mode, enables mouse capture, and enters alternate screen.
+    pub fn new() -> Result<Self> {
+        // Setup terminal
+        enable_raw_mode().context("Failed to enable raw mode")?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .context("Failed to setup terminal")?;
+
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
+        terminal.hide_cursor()?;
+
+        Ok(Self {
+            terminal,
+            poll_timeout: Duration::from_millis(16), // ~60 FPS
+        })
+    }
+
+    /// Set poll timeout (for controlling frame rate)
+    pub fn set_poll_timeout(&mut self, timeout: Duration) {
+        self.poll_timeout = timeout;
+    }
+
+    /// Convert crossterm event to FrontendEvent
+    fn convert_event(event: Event) -> Option<FrontendEvent> {
+        match event {
+            Event::Key(key_event) => {
+                // Only process key press events (ignore repeats and releases for now)
+                if key_event.kind != KeyEventKind::Press {
+                    return None;
+                }
+                Some(FrontendEvent::Key {
+                    code: key_event.code,
+                    modifiers: key_event.modifiers,
+                })
+            }
+            Event::Mouse(mouse_event) => {
+                Some(FrontendEvent::Mouse {
+                    kind: mouse_event.kind,
+                    x: mouse_event.column,
+                    y: mouse_event.row,
+                    modifiers: mouse_event.modifiers,
+                })
+            }
+            Event::Resize(w, h) => {
+                Some(FrontendEvent::Resize {
+                    width: w,
+                    height: h,
+                })
+            }
+            Event::Paste(text) => {
+                Some(FrontendEvent::Paste { text })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Frontend for TuiFrontend {
+    fn poll_events(&mut self) -> Result<Vec<FrontendEvent>> {
+        let mut events = Vec::new();
+
+        // Poll events with timeout
+        while event::poll(self.poll_timeout)? {
+            if let Ok(ev) = event::read() {
+                if let Some(frontend_event) = Self::convert_event(ev) {
+                    events.push(frontend_event);
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
+    fn render(&mut self, _core: &dyn std::any::Any) -> Result<()> {
+        // TODO: Implement rendering using core state
+        // For now, just draw an empty frame to keep terminal happy
+        self.terminal.draw(|f| {
+            // Placeholder: will render windows, command input, etc. using core state
+            let _ = f;
+        })?;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        // Restore terminal
+        disable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn size(&self) -> (u16, u16) {
+        let size = self.terminal.size().unwrap_or_default();
+        (size.width, size.height)
+    }
+}
+
+impl Drop for TuiFrontend {
+    fn drop(&mut self) {
+        // Ensure terminal is restored even if cleanup() wasn't called
+        let _ = self.cleanup();
+    }
+}
