@@ -211,10 +211,11 @@ impl AppCore {
                 for element in elements {
                     match element {
                         ParsedElement::Text { content, fg_color, bg_color, bold, span_type, link_data, .. } => {
-                            if self.discard_current_stream || content.is_empty() {
+                            if self.discard_current_stream {
                                 continue;
                             }
 
+                            // Add text even if empty (for proper line breaks)
                             self.add_text_to_current_stream(StyledText {
                                 content,
                                 fg: fg_color.and_then(|c| Self::parse_hex_color(&c)),
@@ -296,6 +297,10 @@ impl AppCore {
                         _ => {}
                     }
                 }
+
+                // Finish the line after processing all elements from this server line
+                // Each line from the server represents one logical line that needs wrapping
+                self.finish_current_line();
             }
         }
 
