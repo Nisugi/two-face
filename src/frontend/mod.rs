@@ -32,14 +32,15 @@ pub trait Frontend {
     /// The frontend should read from app state to get current state and render appropriately.
     ///
     /// # Arguments
-    /// - `app` - Reference to the application (will be AppCore after refactor)
+    /// - `app` - Mutable reference to the application (allows widgets to update state during render)
     ///
     /// # Returns
     /// - `Ok(())` - Render successful
     /// - `Err(...)` - If rendering failed
     ///
-    /// TODO: Change to use AppCore once extracted from App
-    fn render(&mut self, app: &dyn std::any::Any) -> Result<()>;
+    /// Note: Mutable reference is required because some widgets update internal state
+    /// during rendering (e.g., countdown timers calculate current time)
+    fn render(&mut self, app: &mut dyn std::any::Any) -> Result<()>;
 
     /// Cleanup and shutdown the frontend
     ///

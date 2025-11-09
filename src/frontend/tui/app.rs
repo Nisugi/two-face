@@ -99,13 +99,66 @@ impl Frontend for TuiFrontend {
         Ok(events)
     }
 
-    fn render(&mut self, _core: &dyn std::any::Any) -> Result<()> {
-        // TODO: Implement rendering using core state
-        // For now, just draw an empty frame to keep terminal happy
+    fn render(&mut self, core: &mut dyn std::any::Any) -> Result<()> {
+        use crate::core::AppCore;
+        use ratatui::layout::Rect;
+
+        // Downcast to mutable AppCore
+        let core = core
+            .downcast_mut::<AppCore>()
+            .expect("render() called with wrong type - expected AppCore");
+
         self.terminal.draw(|f| {
-            // Placeholder: will render windows, command input, etc. using core state
-            let _ = f;
+            // Calculate window layouts
+            let terminal_area = f.area();
+
+            // For now, use all available space for windows (no command input in experimental mode yet)
+            let window_layouts = core.window_manager.calculate_layout(terminal_area);
+
+            // Render all windows in order
+            let window_names = core.window_manager.get_window_names();
+
+            for (idx, name) in window_names.iter().enumerate() {
+                if let Some(rect) = window_layouts.get(name) {
+                    // Skip windows that are completely out of bounds
+                    if rect.y >= terminal_area.height || rect.x >= terminal_area.width {
+                        continue;
+                    }
+
+                    // Clip windows that extend beyond terminal bounds
+                    let clipped_rect = if rect.y + rect.height > terminal_area.height
+                        || rect.x + rect.width > terminal_area.width {
+                        let clipped_height = rect.height.min(terminal_area.height.saturating_sub(rect.y));
+                        let clipped_width = rect.width.min(terminal_area.width.saturating_sub(rect.x));
+
+                        if clipped_height > 0 && clipped_width > 0 {
+                            Rect::new(rect.x, rect.y, clipped_width, clipped_height)
+                        } else {
+                            continue; // Skip if clipped to zero size
+                        }
+                    } else {
+                        *rect
+                    };
+
+                    // Render the window (no focus indicator, no selection for now)
+                    if let Some(window) = core.window_manager.get_window(name) {
+                        window.render_with_focus(
+                            clipped_rect,
+                            f.buffer_mut(),
+                            false, // No focus highlighting in experimental mode yet
+                            core.server_time_offset,
+                            None,  // No selection state yet
+                            "#ffffff", // Placeholder selection color
+                            idx,
+                        );
+                    }
+                }
+            }
+
+            // TODO: Render command input (needs CommandInput in AppCore)
+            // TODO: Render popup forms/browsers (needs InputMode and popup state in AppCore)
         })?;
+
         Ok(())
     }
 

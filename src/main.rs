@@ -185,8 +185,8 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
 
         // TODO: Handle server messages
 
-        // Render (placeholder - pass core as Any for now)
-        frontend.render(&core as &dyn std::any::Any)?;
+        // Render (pass mutable core to allow widget state updates during render)
+        frontend.render(&mut core as &mut dyn std::any::Any)?;
 
         frame_count += 1;
     }
