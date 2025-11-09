@@ -1,14 +1,14 @@
 use crate::cmdlist::CmdList;
 use crate::config::{Config, KeyAction, Layout};
 use crate::network::ServerMessage;
-use crate::parser::{ParsedElement, XmlParser};
+use crate::parser::XmlParser;
 use crate::performance::PerformanceStats;
 use crate::sound::SoundPlayer;
-use crate::ui::WindowManager;
+use crate::ui::{WindowManager, StyledText, SpanType};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::style::Color;
 use std::collections::HashMap;
-use tracing::info;
 
 /// Core application state (frontend-agnostic)
 ///
@@ -155,10 +155,185 @@ impl AppCore {
     /// This method processes XML data from the game server, parses it,
     /// and routes text to appropriate windows.
     ///
-    /// TODO: Move implementation from App::handle_server_message()
-    pub fn handle_server_message(&mut self, _msg: ServerMessage) -> Result<()> {
-        // TODO: Implementation will be moved from App in next step
+    /// Simplified implementation for experimental mode (Milestone 6.4)
+    /// TODO: Add remaining functionality from App::handle_server_message()
+    pub fn handle_server_message(&mut self, msg: ServerMessage) -> Result<()> {
+        use crate::parser::ParsedElement;
+        use crate::ui::StyledText;
+        use crate::ui::SpanType;
+        use ratatui::style::Color;
+
+        match msg {
+            ServerMessage::Connected => {
+                tracing::info!("Connected to server");
+                self.add_system_message("Connected to Lich");
+
+                // Play startup music if enabled
+                if self.config.ui.startup_music {
+                    if let Some(ref player) = self.sound_player {
+                        if let Err(e) = player.play_from_sounds_dir(&self.config.ui.startup_music_file, Some(0.5)) {
+                            tracing::warn!("Failed to play startup_music: {}", e);
+                        }
+                    }
+                }
+            }
+            ServerMessage::Disconnected => {
+                tracing::info!("Disconnected from server");
+                self.add_system_message("Disconnected from Lich");
+                self.running = false;
+            }
+            ServerMessage::Text(line) => {
+                // Track network bytes received
+                self.perf_stats.record_bytes_received(line.len() as u64);
+
+                // Handle empty lines
+                if line.is_empty() {
+                    self.add_text_to_current_stream(StyledText {
+                        content: String::new(),
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                        span_type: SpanType::Normal,
+                        link_data: None,
+                    });
+                    self.finish_current_line();
+                    return Ok(());
+                }
+
+                // Parse XML
+                let parse_start = std::time::Instant::now();
+                let elements = self.parser.parse_line(&line);
+                let parse_duration = parse_start.elapsed();
+                self.perf_stats.record_parse(parse_duration);
+                self.perf_stats.record_elements_parsed(elements.len() as u64);
+
+                // Process elements
+                for element in elements {
+                    match element {
+                        ParsedElement::Text { content, fg_color, bg_color, bold, span_type, link_data, .. } => {
+                            if self.discard_current_stream || content.is_empty() {
+                                continue;
+                            }
+
+                            self.add_text_to_current_stream(StyledText {
+                                content,
+                                fg: fg_color.and_then(|c| Self::parse_hex_color(&c)),
+                                bg: bg_color.and_then(|c| Self::parse_hex_color(&c)),
+                                bold,
+                                span_type,
+                                link_data,
+                            });
+                        }
+                        ParsedElement::Prompt { text, .. } => {
+                            // Reset to main stream
+                            self.current_stream = "main".to_string();
+                            self.discard_current_stream = false;
+
+                            // Show prompt
+                            if !text.trim().is_empty() {
+                                for ch in text.chars() {
+                                    let char_str = ch.to_string();
+                                    let color = self.config.colors.prompt_colors
+                                        .iter()
+                                        .find(|pc| pc.character == char_str)
+                                        .and_then(|pc| {
+                                            pc.fg.as_ref().or(pc.color.as_ref())
+                                                .and_then(|color_str| Self::parse_hex_color(color_str))
+                                        })
+                                        .unwrap_or(Color::DarkGray);
+
+                                    self.add_text_to_current_stream(StyledText {
+                                        content: char_str,
+                                        fg: Some(color),
+                                        bg: None,
+                                        bold: false,
+                                        span_type: SpanType::Normal,
+                                        link_data: None,
+                                    });
+                                }
+                            }
+                        }
+                        ParsedElement::StreamPush { id } => {
+                            self.current_stream = id.clone();
+                            if !self.window_manager.has_window_for_stream(&id) {
+                                self.discard_current_stream = true;
+                            } else {
+                                self.discard_current_stream = false;
+                            }
+                        }
+                        ParsedElement::StreamPop => {
+                            self.current_stream = "main".to_string();
+                            self.discard_current_stream = false;
+                        }
+                        ParsedElement::ProgressBar { id, value, max, text } => {
+                            // Handle progress bar updates
+                            let window_id = match id.as_str() {
+                                "pbarStance" => "stance",
+                                "mindState" => "mindstate",
+                                "encumlevel" => "encumbrance",
+                                _ => &id,
+                            };
+
+                            if let Some(window) = self.window_manager.get_window(window_id) {
+                                if !text.is_empty() {
+                                    window.set_progress_with_text(value, max, Some(text));
+                                } else {
+                                    window.set_progress(value, max);
+                                }
+                            }
+                        }
+                        ParsedElement::RoundTime { value } => {
+                            if let Some(window) = self.window_manager.get_window("roundtime") {
+                                window.set_countdown(value as u64);
+                            }
+                        }
+                        ParsedElement::CastTime { value } => {
+                            if let Some(window) = self.window_manager.get_window("casttime") {
+                                window.set_countdown(value as u64);
+                            }
+                        }
+                        // TODO: Add more element handlers as needed
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Add text to the current stream's window
+    fn add_text_to_current_stream(&mut self, text: StyledText) {
+        if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
+            if let Some(window) = self.window_manager.get_window(&window_name) {
+                window.add_text(text);
+            }
+        }
+    }
+
+    /// Finish the current line in all windows
+    fn finish_current_line(&mut self) {
+        // Get terminal width for wrapping (default to 120 if we can't get it)
+        let inner_width = 120u16.saturating_sub(2);
+
+        if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
+            if let Some(window) = self.window_manager.get_window(&window_name) {
+                window.finish_line(inner_width);
+            }
+        }
+    }
+
+    /// Parse hex color string to ratatui Color
+    fn parse_hex_color(hex: &str) -> Option<Color> {
+        if !hex.starts_with('#') || hex.len() != 7 {
+            return None;
+        }
+
+        let r = u8::from_str_radix(&hex[1..3], 16).ok()?;
+        let g = u8::from_str_radix(&hex[3..5], 16).ok()?;
+        let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
+
+        Some(Color::Rgb(r, g, b))
     }
 
     /// Handle a dot command (local command not sent to server)
@@ -174,10 +349,25 @@ impl AppCore {
     /// Add a system message to the main window
     ///
     /// System messages are local notifications (e.g., "Layout saved", "Window created")
-    ///
-    /// TODO: Move implementation from App::add_system_message()
-    pub fn add_system_message(&mut self, _message: &str) {
-        // TODO: Implementation will be moved from App in next step
+    pub fn add_system_message(&mut self, message: &str) {
+        use crate::ui::StyledText;
+        use crate::ui::SpanType;
+        use ratatui::style::Color;
+
+        // Add message to main window
+        if let Some(window) = self.window_manager.get_window("main") {
+            window.add_text(StyledText {
+                content: format!("[VellumFE] {}", message),
+                fg: Some(Color::Yellow),
+                bg: None,
+                bold: false,
+                span_type: SpanType::Normal,
+                link_data: None,
+            });
+            window.finish_line(120);
+        }
+
+        tracing::info!("System message: {}", message);
     }
 
     /// Check and auto-resize layout if terminal is smaller than designed size

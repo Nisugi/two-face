@@ -145,10 +145,11 @@ async fn main() -> Result<()> {
 async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
     use frontend::{Frontend, TuiFrontend};
     use core::AppCore;
+    use network::LichConnection;
     use tracing::info;
 
     info!("Initializing App (for now, to leverage existing initialization)...");
-    let app = App::new(config, nomusic)?;
+    let app = App::new(config.clone(), nomusic)?;
 
     info!("Extracting AppCore from App...");
     let mut core = AppCore::from_app(&app);
@@ -156,10 +157,26 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
     info!("Initializing TUI frontend...");
     let mut frontend = TuiFrontend::new()?;
 
-    info!("Starting main event loop...");
-    let mut frame_count = 0;
+    // Connect to Lich server
+    info!("Connecting to {}:{}", config.connection.host, config.connection.port);
 
-    while core.running && frame_count < 600 {  // Test: run for 600 frames (~10 seconds) then exit
+    // Create channels for server communication
+    let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Spawn connection task
+    let host = config.connection.host.clone();
+    let port = config.connection.port;
+    tokio::spawn(async move {
+        if let Err(e) = LichConnection::start(&host, port, server_tx, command_rx).await {
+            tracing::error!("Connection error: {}", e);
+        }
+    });
+
+    info!("Starting main event loop...");
+
+    // Event loop (no frame limit - runs until quit)
+    loop {
         // Poll events
         let events = frontend.poll_events()?;
         for event in events {
@@ -169,29 +186,36 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
                     core.running = false;
                 }
                 frontend::FrontendEvent::Key { code, .. } => {
-                    info!("Key event: {:?}", code);
-                    // Test: Quit on 'q' key
+                    tracing::debug!("Key event: {:?}", code);
+                    // Test: Quit on 'q' key (for testing)
                     if matches!(code, crossterm::event::KeyCode::Char('q')) {
                         info!("'q' pressed, exiting");
                         core.running = false;
                     }
                 }
                 frontend::FrontendEvent::Resize { width, height } => {
-                    info!("Resize event: {}x{}", width, height);
+                    tracing::debug!("Resize event: {}x{}", width, height);
                 }
                 _ => {}
             }
         }
 
-        // TODO: Handle server messages
+        // Handle server messages (non-blocking)
+        while let Ok(msg) = server_rx.try_recv() {
+            if let Err(e) = core.handle_server_message(msg) {
+                tracing::error!("Error handling server message: {}", e);
+            }
+        }
 
         // Render (pass mutable core to allow widget state updates during render)
         frontend.render(&mut core as &mut dyn std::any::Any)?;
 
-        frame_count += 1;
+        // Exit if not running
+        if !core.running {
+            break;
+        }
     }
 
-    info!("Ran for {} frames", frame_count);
     info!("Cleaning up frontend...");
     frontend.cleanup()?;
 
