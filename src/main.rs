@@ -53,6 +53,10 @@ struct Args {
     /// Comma-separated list of sizes to test (e.g., 80x24,100x30,140x40)
     #[arg(long, value_name = "WxH[,WxH...]", required = false)]
     sizes: Option<String>,
+
+    /// Use experimental refactored architecture (AppCore + TuiFrontend)
+    #[arg(long, default_value = "false")]
+    experimental: bool,
 }
 
 #[tokio::main]
@@ -121,13 +125,71 @@ async fn main() -> Result<()> {
     }
 
     // Create and run the application
-    let mut app = App::new(config, args.nomusic)?;
+    if args.experimental {
+        tracing::info!("🧪 Running in EXPERIMENTAL mode (new architecture)");
+        run_experimental(config, args.nomusic).await?;
+    } else {
+        tracing::info!("Running in STABLE mode (old App)");
+        let mut app = App::new(config, args.nomusic)?;
+        app.check_and_auto_resize()?;
+        app.run().await?;
+    }
 
-    // Auto-shrink layout if terminal is smaller than designed size
-    app.check_and_auto_resize()?;
+    Ok(())
+}
 
-    app.run().await?;
+/// Experimental main loop using new architecture (AppCore + TuiFrontend)
+///
+/// This is the new refactored code path that separates business logic from rendering.
+/// Eventually this will replace App::run() entirely.
+async fn run_experimental(_config: Config, _nomusic: bool) -> Result<()> {
+    use frontend::{Frontend, TuiFrontend};
+    use tracing::info;
 
+    info!("Initializing TUI frontend...");
+    let mut frontend = TuiFrontend::new()?;
+
+    info!("Creating AppCore...");
+    // TODO: Create AppCore from config
+    // For now, just test the frontend event loop
+
+    info!("Starting main event loop...");
+    let mut running = true;
+    let mut frame_count = 0;
+
+    while running && frame_count < 60 {  // Test: run for 60 frames then exit
+        // Poll events
+        let events = frontend.poll_events()?;
+        for event in events {
+            match event {
+                frontend::FrontendEvent::Quit => {
+                    info!("Quit event received");
+                    running = false;
+                }
+                frontend::FrontendEvent::Key { code, .. } => {
+                    info!("Key event: {:?}", code);
+                    // Test: Quit on 'q' key
+                    if matches!(code, crossterm::event::KeyCode::Char('q')) {
+                        info!("'q' pressed, exiting");
+                        running = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // TODO: Handle server messages
+
+        // Render (placeholder for now)
+        frontend.render(&() as &dyn std::any::Any)?;
+
+        frame_count += 1;
+    }
+
+    info!("Cleaning up frontend...");
+    frontend.cleanup()?;
+
+    info!("Experimental mode completed successfully!");
     Ok(())
 }
 
