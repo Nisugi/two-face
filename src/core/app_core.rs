@@ -340,9 +340,73 @@ impl AppCore {
     ///
     /// Dot commands are local to the client (e.g., .quit, .addwindow, .settings)
     ///
-    /// TODO: Move implementation from App::handle_dot_command()
-    pub fn handle_dot_command(&mut self, _command: &str) -> Result<()> {
-        // TODO: Implementation will be moved from App in next step
+    /// Simplified implementation for experimental mode (Milestone 6.5)
+    /// TODO: Add remaining commands from App::handle_dot_command()
+    pub fn handle_dot_command(&mut self, command: &str) -> Result<()> {
+        let parts: Vec<&str> = command[1..].split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        match parts[0] {
+            "quit" | "q" => {
+                self.running = false;
+                self.add_system_message("Exiting...");
+            }
+            "savelayout" => {
+                let name = parts.get(1).unwrap_or(&"default");
+                let terminal_size = crossterm::terminal::size().ok();
+                match self.layout.save(name, terminal_size, false) {
+                    Ok(_) => self.add_system_message(&format!("Layout saved as '{}'", name)),
+                    Err(e) => self.add_system_message(&format!("Failed to save layout: {}", e)),
+                }
+            }
+            "loadlayout" => {
+                let name = parts.get(1).unwrap_or(&"default");
+                let layout_path = crate::config::Config::layout_path(name)?;
+                match crate::config::Layout::load_from_file(&layout_path) {
+                    Ok(new_layout) => {
+                        self.layout = new_layout;
+                        self.add_system_message(&format!("Layout '{}' loaded", name));
+                        self.update_window_manager_config()?;
+                    }
+                    Err(e) => self.add_system_message(&format!("Failed to load layout: {}", e)),
+                }
+            }
+            "layouts" => {
+                match crate::config::Config::list_layouts() {
+                    Ok(layouts) => {
+                        if layouts.is_empty() {
+                            self.add_system_message("No saved layouts");
+                        } else {
+                            self.add_system_message(&format!("Saved layouts: {}", layouts.join(", ")));
+                        }
+                    }
+                    Err(e) => self.add_system_message(&format!("Failed to list layouts: {}", e)),
+                }
+            }
+            "windows" | "listwindows" => {
+                let window_names = self.window_manager.get_window_names();
+                if window_names.is_empty() {
+                    self.add_system_message("No windows");
+                } else {
+                    self.add_system_message(&format!("Windows ({}): {}", window_names.len(), window_names.join(", ")));
+                }
+            }
+            "help" => {
+                self.add_system_message("Available commands (experimental mode):");
+                self.add_system_message("  .quit / .q - Exit application");
+                self.add_system_message("  .savelayout [name] - Save current layout");
+                self.add_system_message("  .loadlayout [name] - Load saved layout");
+                self.add_system_message("  .layouts - List saved layouts");
+                self.add_system_message("  .windows - List active windows");
+                self.add_system_message("  .help - Show this help");
+            }
+            _ => {
+                self.add_system_message(&format!("Unknown command: .{} (try .help)", parts[0]));
+            }
+        }
+
         Ok(())
     }
 
@@ -380,9 +444,67 @@ impl AppCore {
 
     /// Update window manager configuration after layout changes
     ///
-    /// TODO: Move implementation from App::update_window_manager_config()
+    /// Simplified implementation for experimental mode
+    /// TODO: Add full implementation from App::update_window_manager_config()
     pub fn update_window_manager_config(&mut self) -> Result<()> {
-        // TODO: Implementation will be moved from App in next step
+        use crate::ui::WindowConfig;
+
+        // Convert layout window definitions to window manager configs
+        let window_configs: Vec<WindowConfig> = self.layout
+            .windows
+            .iter()
+            .map(|w| WindowConfig {
+                name: w.name.clone(),
+                widget_type: w.widget_type.clone(),
+                streams: w.streams.clone(),
+                row: w.row,
+                col: w.col,
+                rows: w.rows,
+                cols: w.cols,
+                buffer_size: w.buffer_size,
+                show_border: w.show_border,
+                border_style: w.border_style.clone(),
+                border_color: w.border_color.clone(),
+                border_sides: w.border_sides.clone(),
+                title: w.title.clone(),
+                content_align: w.content_align.clone(),
+                background_color: w.background_color.clone(),
+                bar_fill: w.bar_fill.clone(),
+                bar_background: w.bar_background.clone(),
+                text_color: w.text_color.clone(),
+                transparent_background: w.transparent_background,
+                countdown_icon: Some(self.config.ui.countdown_icon.clone()),
+                indicator_colors: w.indicator_colors.clone(),
+                dashboard_layout: w.dashboard_layout.clone(),
+                dashboard_indicators: w.dashboard_indicators.clone(),
+                dashboard_spacing: w.dashboard_spacing,
+                dashboard_hide_inactive: w.dashboard_hide_inactive,
+                visible_count: w.visible_count,
+                effect_category: w.effect_category.clone(),
+                tabs: w.tabs.clone(),
+                tab_bar_position: w.tab_bar_position.clone(),
+                tab_active_color: w.tab_active_color.clone(),
+                tab_inactive_color: w.tab_inactive_color.clone(),
+                tab_unread_color: w.tab_unread_color.clone(),
+                tab_unread_prefix: w.tab_unread_prefix.clone(),
+                hand_icon: w.hand_icon.clone(),
+                compass_active_color: w.compass_active_color.clone(),
+                compass_inactive_color: w.compass_inactive_color.clone(),
+                show_timestamps: w.show_timestamps,
+                numbers_only: Some(w.numbers_only),
+                injury_default_color: w.injury_default_color.clone(),
+                injury1_color: w.injury1_color.clone(),
+                injury2_color: w.injury2_color.clone(),
+                injury3_color: w.injury3_color.clone(),
+                scar1_color: w.scar1_color.clone(),
+                scar2_color: w.scar2_color.clone(),
+                scar3_color: w.scar3_color.clone(),
+            })
+            .collect();
+
+        // Update window manager with new configs
+        self.window_manager.update_config(window_configs);
+
         Ok(())
     }
 }
