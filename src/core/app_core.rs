@@ -309,21 +309,43 @@ impl AppCore {
 
     /// Add text to the current stream's window
     fn add_text_to_current_stream(&mut self, text: StyledText) {
+        use crate::ui::Widget;
+
         if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
             if let Some(window) = self.window_manager.get_window(&window_name) {
-                window.add_text(text);
+                // Check if it's a tabbed window - use stream-aware method
+                match window {
+                    Widget::Tabbed(tabbed) => {
+                        tabbed.add_text_to_stream(&self.current_stream, text);
+                    }
+                    _ => {
+                        // Regular text window
+                        window.add_text(text);
+                    }
+                }
             }
         }
     }
 
     /// Finish the current line in all windows
     fn finish_current_line(&mut self) {
+        use crate::ui::Widget;
+
         // Get terminal width for wrapping (default to 120 if we can't get it)
         let inner_width = 120u16.saturating_sub(2);
 
         if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
             if let Some(window) = self.window_manager.get_window(&window_name) {
-                window.finish_line(inner_width);
+                // Check if it's a tabbed window - use stream-aware method
+                match window {
+                    Widget::Tabbed(tabbed) => {
+                        tabbed.finish_line_for_stream(&self.current_stream, inner_width);
+                    }
+                    _ => {
+                        // Regular text window
+                        window.finish_line(inner_width);
+                    }
+                }
             }
         }
     }
