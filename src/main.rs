@@ -175,10 +175,21 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
 
     info!("Starting main event loop...");
 
+    // Track last countdown update for periodic timer rendering
+    let mut last_countdown_update = std::time::Instant::now();
+    let countdown_update_interval = std::time::Duration::from_millis(1000); // Update countdown timers every second
+
     // Event loop with frame rate limiting
     loop {
         // Poll events (use config poll_timeout for frame limiting)
         let events = frontend.poll_events()?;
+
+        // Check if countdown timers need updating
+        let now = std::time::Instant::now();
+        if now.duration_since(last_countdown_update) >= countdown_update_interval {
+            core.needs_render = true; // Force render for countdown timer updates
+            last_countdown_update = now;
+        }
 
         // Track if we need to render this frame
         let mut had_events = !events.is_empty();
