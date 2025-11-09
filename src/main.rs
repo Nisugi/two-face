@@ -175,15 +175,20 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
 
     info!("Starting main event loop...");
 
-    // Event loop (no frame limit - runs until quit)
+    // Event loop with frame rate limiting
     loop {
-        // Poll events
+        // Poll events (use config poll_timeout for frame limiting)
         let events = frontend.poll_events()?;
+
+        // Track if we need to render this frame
+        let mut had_events = !events.is_empty();
+
         for event in events {
             match event {
                 frontend::FrontendEvent::Quit => {
                     info!("Quit event received");
                     core.running = false;
+                    core.needs_render = true;
                 }
                 frontend::FrontendEvent::Key { code, .. } => {
                     tracing::debug!("Key event: {:?}", code);
@@ -206,6 +211,7 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
                 }
                 frontend::FrontendEvent::Resize { width, height } => {
                     tracing::debug!("Resize event: {}x{}", width, height);
+                    core.needs_render = true;
                 }
                 _ => {}
             }
@@ -216,10 +222,14 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
             if let Err(e) = core.handle_server_message(msg) {
                 tracing::error!("Error handling server message: {}", e);
             }
+            had_events = true;
         }
 
-        // Render (pass mutable core to allow widget state updates during render)
-        frontend.render(&mut core as &mut dyn std::any::Any)?;
+        // Only render if state changed
+        if core.needs_render {
+            frontend.render(&mut core as &mut dyn std::any::Any)?;
+            core.needs_render = false; // Clear the dirty flag
+        }
 
         // Exit if not running
         if !core.running {

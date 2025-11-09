@@ -81,6 +81,9 @@ pub struct AppCore {
 
     /// Command input cursor position
     pub command_cursor: usize,
+
+    /// Dirty flag - true if state changed and needs re-render
+    pub needs_render: bool,
 }
 
 impl AppCore {
@@ -116,6 +119,7 @@ impl AppCore {
             room_subtitle: app.room_subtitle.clone(),
             command_input: String::new(),
             command_cursor: 0,
+            needs_render: true, // Initial render needed
         }
     }
 
@@ -157,6 +161,7 @@ impl AppCore {
             room_subtitle: None,
             command_input: String::new(),
             command_cursor: 0,
+            needs_render: true, // Initial render needed
         }
     }
 
@@ -177,6 +182,7 @@ impl AppCore {
             ServerMessage::Connected => {
                 tracing::info!("Connected to server");
                 self.add_system_message("Connected to Lich");
+                self.needs_render = true;
 
                 // Play startup music if enabled
                 if self.config.ui.startup_music {
@@ -191,6 +197,7 @@ impl AppCore {
                 tracing::info!("Disconnected from server");
                 self.add_system_message("Disconnected from Lich");
                 self.running = false;
+                self.needs_render = true;
             }
             ServerMessage::Text(line) => {
                 // Track network bytes received
@@ -311,6 +318,9 @@ impl AppCore {
                 // Finish the line after processing all elements from this server line
                 // Each line from the server represents one logical line that needs wrapping
                 self.finish_current_line();
+
+                // Mark as needing render after processing server text
+                self.needs_render = true;
             }
         }
 
@@ -468,6 +478,7 @@ impl AppCore {
             window.finish_line(120);
         }
 
+        self.needs_render = true;
         tracing::info!("System message: {}", message);
     }
 
@@ -556,6 +567,7 @@ impl AppCore {
                 // Insert character at cursor position
                 self.command_input.insert(self.command_cursor, c);
                 self.command_cursor += 1;
+                self.needs_render = true;
                 None
             }
             KeyCode::Backspace => {
@@ -563,6 +575,7 @@ impl AppCore {
                 if self.command_cursor > 0 {
                     self.command_input.remove(self.command_cursor - 1);
                     self.command_cursor -= 1;
+                    self.needs_render = true;
                 }
                 None
             }
@@ -570,6 +583,7 @@ impl AppCore {
                 // Delete character at cursor
                 if self.command_cursor < self.command_input.len() {
                     self.command_input.remove(self.command_cursor);
+                    self.needs_render = true;
                 }
                 None
             }
@@ -577,6 +591,7 @@ impl AppCore {
                 // Move cursor left
                 if self.command_cursor > 0 {
                     self.command_cursor -= 1;
+                    self.needs_render = true;
                 }
                 None
             }
@@ -584,17 +599,20 @@ impl AppCore {
                 // Move cursor right
                 if self.command_cursor < self.command_input.len() {
                     self.command_cursor += 1;
+                    self.needs_render = true;
                 }
                 None
             }
             KeyCode::Home => {
                 // Move cursor to start
                 self.command_cursor = 0;
+                self.needs_render = true;
                 None
             }
             KeyCode::End => {
                 // Move cursor to end
                 self.command_cursor = self.command_input.len();
+                self.needs_render = true;
                 None
             }
             KeyCode::Enter => {
@@ -602,6 +620,7 @@ impl AppCore {
                 let command = self.command_input.clone();
                 self.command_input.clear();
                 self.command_cursor = 0;
+                self.needs_render = true;
 
                 if !command.is_empty() {
                     Some(command)
