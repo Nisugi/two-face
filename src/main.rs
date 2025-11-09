@@ -181,6 +181,13 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
 
     // Event loop with frame rate limiting
     loop {
+        // Render first (like stable VellumFE) - shows previous frame while processing new data
+        // This creates smooth incremental updates during message floods
+        if core.needs_render {
+            frontend.render(&mut core as &mut dyn std::any::Any)?;
+            core.needs_render = false;
+        }
+
         // Poll events (use config poll_timeout for frame limiting)
         let events = frontend.poll_events()?;
 
@@ -190,9 +197,6 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
             core.needs_render = true; // Force render for countdown timer updates
             last_countdown_update = now;
         }
-
-        // Track if we need to render this frame
-        let mut had_events = !events.is_empty();
 
         for event in events {
             match event {
@@ -228,18 +232,12 @@ async fn run_experimental(config: Config, nomusic: bool) -> Result<()> {
             }
         }
 
-        // Handle server messages (non-blocking)
+        // Handle server messages (non-blocking) - process ALL available messages
+        // Render happens at top of next loop iteration, creating smooth incremental display
         while let Ok(msg) = server_rx.try_recv() {
             if let Err(e) = core.handle_server_message(msg) {
                 tracing::error!("Error handling server message: {}", e);
             }
-            had_events = true;
-        }
-
-        // Only render if state changed
-        if core.needs_render {
-            frontend.render(&mut core as &mut dyn std::any::Any)?;
-            core.needs_render = false; // Clear the dirty flag
         }
 
         // Exit if not running
