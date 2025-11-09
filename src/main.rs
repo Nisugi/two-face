@@ -12,6 +12,7 @@ mod selection;
 mod sound;
 mod ui;
 mod widget_state;
+mod widgets;
 
 use anyhow::Result;
 use app::App;
