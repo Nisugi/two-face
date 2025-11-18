@@ -1,10 +1,18 @@
+//! Configuration loader/writer plus strongly typed settings structures.
+//!
+//! This module deserializes every TOML blob we ship (config, highlights,
+//! keybinds, colors, layouts, etc.), exposes helpers for resolving per-character
+//! overrides, and persists edits that come from the UI.
+
 use anyhow::{Context, Result};
+use crossterm::event::{KeyCode, KeyModifiers};
+use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use crossterm::event::{KeyCode, KeyModifiers};
-use include_dir::{include_dir, Dir};
+
+pub mod menu_keybind_validator;
 
 // Embed default configuration files at compile time
 const DEFAULT_CONFIG: &str = include_str!("../defaults/config.toml");
@@ -20,24 +28,66 @@ static SOUNDS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/defaults/sounds")
 // Keep embedded default layout for fallback
 const LAYOUT_DEFAULT: &str = include_str!("../defaults/layouts/layout.toml");
 
+/// Widget category for organizing windows in menus
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WidgetCategory {
+    ProgressBar,
+    TextWindow,
+    Countdown,
+    Hand,
+    ActiveEffects,
+    Other,
+}
+
+impl WidgetCategory {
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::ProgressBar => "Progress Bars",
+            Self::TextWindow => "Text Windows",
+            Self::Countdown => "Countdowns",
+            Self::Hand => "Hands",
+            Self::ActiveEffects => "Active Effects",
+            Self::Other => "Other",
+        }
+    }
+
+    pub fn from_widget_type(widget_type: &str) -> Self {
+        match widget_type {
+            "progress" => Self::ProgressBar,
+            "text" => Self::TextWindow,
+            "countdown" => Self::Countdown,
+            "hand" => Self::Hand,
+            "active_effects" => Self::ActiveEffects,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Top-level configuration object aggregated from multiple TOML files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub connection: ConnectionConfig,
     pub ui: UiConfig,
-    #[serde(skip)]  // Loaded from separate highlights.toml file
+    #[serde(skip)] // Loaded from separate highlights.toml file
     pub highlights: HashMap<String, HighlightPattern>,
-    #[serde(skip)]  // Loaded from separate keybinds.toml file
+    #[serde(skip)] // Loaded from separate keybinds.toml file
     pub keybinds: HashMap<String, KeyBindAction>,
     #[serde(default)]
     pub sound: SoundConfig,
     #[serde(default)]
+    pub tts: TtsConfig,
+    #[serde(default)]
     pub event_patterns: HashMap<String, EventPattern>,
     #[serde(default)]
     pub layout_mappings: Vec<LayoutMapping>,
-    #[serde(skip)]  // Don't serialize/deserialize this - it's set at runtime
-    pub character: Option<String>,  // Character name for character-specific saving
-    #[serde(skip)]  // Loaded from separate colors.toml file (includes color_palette)
-    pub colors: ColorConfig,  // All color configuration (presets, prompt_colors, ui colors, spell colors, color_palette)
+    #[serde(skip)] // Don't serialize/deserialize this - it's set at runtime
+    pub character: Option<String>, // Character name for character-specific saving
+    #[serde(skip)] // Loaded from separate colors.toml file (includes color_palette)
+    pub colors: ColorConfig, // All color configuration (presets, prompt_colors, ui colors, spell colors, color_palette)
+    #[serde(default)] // Use defaults for menu keybinds
+    pub menu_keybinds: MenuKeybinds, // Keybinds for menu system (browsers, forms, editors)
+    #[serde(default = "default_theme_name")] // Default to "dark" theme
+    pub active_theme: String, // Currently active theme name
 }
 
 /// Terminal size range to layout mapping
@@ -47,14 +97,16 @@ pub struct LayoutMapping {
     pub min_height: u16,
     pub max_width: u16,
     pub max_height: u16,
-    pub layout: String,  // Layout name (e.g., "compact1", "half_screen")
+    pub layout: String, // Layout name (e.g., "compact1", "half_screen")
 }
 
 impl LayoutMapping {
     /// Check if terminal size matches this mapping
     pub fn matches(&self, width: u16, height: u16) -> bool {
-        width >= self.min_width && width <= self.max_width &&
-        height >= self.min_height && height <= self.max_height
+        width >= self.min_width
+            && width <= self.max_width
+            && height >= self.min_height
+            && height <= self.max_height
     }
 }
 
@@ -62,8 +114,8 @@ impl LayoutMapping {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaletteColor {
     pub name: String,
-    pub color: String,  // Hex color code
-    pub category: String,  // Color family: "red", "blue", "green", etc.
+    pub color: String,    // Hex color code
+    pub category: String, // Color family: "red", "blue", "green", etc.
     #[serde(default)]
     pub favorite: bool,
 }
@@ -101,31 +153,44 @@ pub struct PromptColor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpellColorRange {
-    pub spells: Vec<u32>,           // List of spell IDs (e.g., [101, 107, 120, 140, 150])
+    pub spells: Vec<u32>, // List of spell IDs (e.g., [101, 107, 120, 140, 150])
     #[serde(default)]
-    pub color: String,              // Legacy field: bar color (for backward compatibility)
+    pub color: String, // Legacy field: bar color (for backward compatibility)
     #[serde(default)]
-    pub bar_color: Option<String>,  // Progress bar fill color (e.g., "#00ffff")
+    pub bar_color: Option<String>, // Progress bar fill color (e.g., "#00ffff")
     #[serde(default)]
     pub text_color: Option<String>, // Text color on filled portion (default: white)
     #[serde(default)]
-    pub bg_color: Option<String>,   // Background/unfilled portion color (default: black)
+    pub bg_color: Option<String>, // Background/unfilled portion color (default: black)
+}
+
+#[derive(Debug, Clone)]
+pub struct SpellColorStyle {
+    pub bar_color: Option<String>,
+    pub text_color: Option<String>,
 }
 
 impl SpellColorRange {
-    /// Get the effective bar color (prefer bar_color, fall back to color for backward compatibility)
-    pub fn get_bar_color(&self) -> &str {
-        self.bar_color.as_deref().unwrap_or(&self.color)
-    }
+    pub fn style(&self) -> SpellColorStyle {
+        let bar_color = self
+            .bar_color
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                let legacy = self.color.trim();
+                if legacy.is_empty() {
+                    None
+                } else {
+                    Some(self.color.clone())
+                }
+            });
 
-    /// Get the effective text color (default to white if not set)
-    pub fn get_text_color(&self) -> &str {
-        self.text_color.as_deref().unwrap_or("#ffffff")
-    }
+        let text_color = self.text_color.clone().filter(|s| !s.trim().is_empty());
 
-    /// Get the effective background color (default to black if not set)
-    pub fn get_bg_color(&self) -> &str {
-        self.bg_color.as_deref().unwrap_or("#000000")
+        SpellColorStyle {
+            bar_color,
+            text_color,
+        }
     }
 }
 
@@ -135,17 +200,17 @@ pub struct UiColors {
     #[serde(default = "default_command_echo_color")]
     pub command_echo_color: String,
     #[serde(default = "default_border_color_default")]
-    pub border_color: String,  // Default border color for all widgets
+    pub border_color: String, // Default border color for all widgets
     #[serde(default = "default_focused_border_color")]
-    pub focused_border_color: String,  // Border color for focused/active windows
+    pub focused_border_color: String, // Border color for focused/active windows
     #[serde(default = "default_text_color_default")]
-    pub text_color: String,    // Default text color for all widgets
+    pub text_color: String, // Default text color for all widgets
     #[serde(default = "default_background_color")]
-    pub background_color: String,  // Default background color for all widgets
+    pub background_color: String, // Default background color for all widgets
     #[serde(default = "default_selection_bg_color")]
-    pub selection_bg_color: String,  // Text selection background color
+    pub selection_bg_color: String, // Text selection background color
     #[serde(default = "default_textarea_background")]
-    pub textarea_background: String,  // Background color for input textareas in forms/browsers
+    pub textarea_background: String, // Background color for input textareas in forms/browsers
 }
 
 /// Color configuration - separate file (colors.toml)
@@ -201,10 +266,10 @@ impl ColorConfig {
         let colors_path = Config::colors_path(character)?;
 
         if colors_path.exists() {
-            let contents = fs::read_to_string(&colors_path)
-                .context("Failed to read colors.toml")?;
-            let mut colors: ColorConfig = toml::from_str(&contents)
-                .context("Failed to parse colors.toml")?;
+            let contents =
+                fs::read_to_string(&colors_path).context("Failed to read colors.toml")?;
+            let mut colors: ColorConfig =
+                toml::from_str(&contents).context("Failed to parse colors.toml")?;
 
             // Merge defaults for missing color_palette (for backward compatibility)
             if colors.color_palette.is_empty() {
@@ -222,10 +287,8 @@ impl ColorConfig {
     /// Save colors to colors.toml for a character
     pub fn save(&self, character: Option<&str>) -> Result<()> {
         let colors_path = Config::colors_path(character)?;
-        let contents = toml::to_string_pretty(self)
-            .context("Failed to serialize colors")?;
-        fs::write(&colors_path, contents)
-            .context("Failed to write colors.toml")?;
+        let contents = toml::to_string_pretty(self).context("Failed to serialize colors")?;
+        fs::write(&colors_path, contents).context("Failed to write colors.toml")?;
         Ok(())
     }
 }
@@ -236,25 +299,47 @@ impl Config {
     pub fn load_highlights(character: Option<&str>) -> Result<HashMap<String, HighlightPattern>> {
         let highlights_path = Self::highlights_path(character)?;
 
-        if highlights_path.exists() {
-            let contents = fs::read_to_string(&highlights_path)
-                .context("Failed to read highlights.toml")?;
-            let highlights: HashMap<String, HighlightPattern> = toml::from_str(&contents)
-                .context("Failed to parse highlights.toml")?;
-            Ok(highlights)
+        let mut highlights = if highlights_path.exists() {
+            let contents =
+                fs::read_to_string(&highlights_path).context("Failed to read highlights.toml")?;
+            let highlights: HashMap<String, HighlightPattern> =
+                toml::from_str(&contents).context("Failed to parse highlights.toml")?;
+            highlights
         } else {
             // Return defaults from embedded file
-            Ok(toml::from_str(DEFAULT_HIGHLIGHTS).unwrap_or_default())
+            toml::from_str(DEFAULT_HIGHLIGHTS).unwrap_or_default()
+        };
+
+        // Compile all regex patterns for performance
+        Self::compile_highlight_patterns(&mut highlights);
+
+        Ok(highlights)
+    }
+
+    /// Compile regex patterns for all highlights (performance optimization)
+    pub fn compile_highlight_patterns(highlights: &mut HashMap<String, HighlightPattern>) {
+        for (name, pattern) in highlights.iter_mut() {
+            if !pattern.fast_parse {
+                // Only compile regex for non-fast_parse patterns
+                match regex::Regex::new(&pattern.pattern) {
+                    Ok(regex) => {
+                        pattern.compiled_regex = Some(regex);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to compile regex for highlight '{}': {}", name, e);
+                        pattern.compiled_regex = None;
+                    }
+                }
+            }
         }
     }
 
     /// Save highlights to highlights.toml for a character
     fn save_highlights(&self, character: Option<&str>) -> Result<()> {
         let highlights_path = Self::highlights_path(character)?;
-        let contents = toml::to_string_pretty(&self.highlights)
-            .context("Failed to serialize highlights")?;
-        fs::write(&highlights_path, contents)
-            .context("Failed to write highlights.toml")?;
+        let contents =
+            toml::to_string_pretty(&self.highlights).context("Failed to serialize highlights")?;
+        fs::write(&highlights_path, contents).context("Failed to write highlights.toml")?;
         Ok(())
     }
 
@@ -263,10 +348,10 @@ impl Config {
         let keybinds_path = Self::keybinds_path(character)?;
 
         if keybinds_path.exists() {
-            let contents = fs::read_to_string(&keybinds_path)
-                .context("Failed to read keybinds.toml")?;
-            let keybinds: HashMap<String, KeyBindAction> = toml::from_str(&contents)
-                .context("Failed to parse keybinds.toml")?;
+            let contents =
+                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
+            let keybinds: HashMap<String, KeyBindAction> =
+                toml::from_str(&contents).context("Failed to parse keybinds.toml")?;
             Ok(keybinds)
         } else {
             // Return defaults from embedded file
@@ -277,270 +362,691 @@ impl Config {
     /// Save keybinds to keybinds.toml for a character
     fn save_keybinds(&self, character: Option<&str>) -> Result<()> {
         let keybinds_path = Self::keybinds_path(character)?;
-        let contents = toml::to_string_pretty(&self.keybinds)
-            .context("Failed to serialize keybinds")?;
-        fs::write(&keybinds_path, contents)
-            .context("Failed to write keybinds.toml")?;
+        let contents =
+            toml::to_string_pretty(&self.keybinds).context("Failed to serialize keybinds")?;
+        fs::write(&keybinds_path, contents).context("Failed to write keybinds.toml")?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowDef {
-    pub name: String,
-    #[serde(default = "default_widget_type")]
-    pub widget_type: String,  // "text", "indicator", "progress", "countdown", "injury"
-    pub streams: Vec<String>,
-    // Explicit positioning and sizing - each window owns its row/col dimensions
-    #[serde(default)]
-    pub row: u16,         // Starting row position (0-based)
-    #[serde(default)]
-    pub col: u16,         // Starting column position (0-based)
-    #[serde(default = "default_rows")]
-    pub rows: u16,        // Height in rows (this window owns these rows)
-    #[serde(default = "default_cols")]
-    pub cols: u16,        // Width in columns (this window owns these columns)
-    // Buffer and display options
-    #[serde(default = "default_buffer_size")]
-    pub buffer_size: usize,
-    #[serde(default = "default_show_border")]
-    pub show_border: bool,
-    #[serde(default)]
-    pub border_style: Option<String>,  // "single", "double", "rounded", "thick"
-    #[serde(default)]
-    pub border_color: Option<String>,
-    #[serde(default)]
-    pub border_sides: Option<Vec<String>>,  // ["top", "bottom", "left", "right"] - None means all
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub content_align: Option<String>,  // "top-left", "top-right", "bottom-left", "bottom-right", "center" - alignment of content within widget area
-    #[serde(default)]
-    pub background_color: Option<String>,  // Background color for the entire widget area (works for all widget types)
-    #[serde(default, alias = "bar_color")]
-    pub bar_fill: Option<String>,  // Filled portion color for progress bar (if widget_type is "progress")
-    #[serde(default, alias = "bar_background_color")]
-    pub bar_background: Option<String>,  // Unfilled portion color for progress bar
-    #[serde(default = "default_transparent_background")]
-    pub transparent_background: bool,  // If true, unfilled portions are transparent
-    #[serde(default)]
-    pub locked: bool,  // If true, window cannot be moved or resized with mouse
-    #[serde(default)]
-    pub indicator_colors: Option<Vec<String>>,  // Colors for indicator states [off, on] or [none, 1-6]
-    #[serde(default)]
-    pub dashboard_layout: Option<String>,  // Dashboard layout: "horizontal", "vertical", "grid_2x2", etc.
-    #[serde(default)]
-    pub dashboard_indicators: Option<Vec<DashboardIndicatorDef>>,  // List of indicators for dashboard
-    #[serde(default)]
-    pub dashboard_spacing: Option<u16>,  // Spacing between dashboard indicators
-    #[serde(default)]
-    pub dashboard_hide_inactive: Option<bool>,  // Hide inactive indicators in dashboard
-    #[serde(default)]
-    pub visible_count: Option<usize>,  // For scrollable containers: how many items to show
-    #[serde(default)]
-    pub effect_category: Option<String>,  // For active_effects: "ActiveSpells", "Buffs", "Debuffs", "Cooldowns"
-    // Tabbed window configuration
-    #[serde(default)]
-    pub tabs: Option<Vec<TabConfig>>,  // If set, creates tabbed window (widget_type should be "tabbed")
-    #[serde(default)]
-    pub tab_bar_position: Option<String>,  // "top" or "bottom"
-    #[serde(default)]
-    pub tab_active_color: Option<String>,  // Color for active tab
-    #[serde(default)]
-    pub tab_inactive_color: Option<String>,  // Color for inactive tabs
-    #[serde(default)]
-    pub tab_unread_color: Option<String>,  // Color for tabs with unread messages
-    #[serde(default)]
-    pub tab_unread_prefix: Option<String>,  // Prefix for tabs with unread (e.g., "* ")
-    // Hand widget configuration
-    #[serde(default)]
-    pub hand_icon: Option<String>,  // Icon for hand widgets (e.g., "L:", "R:", "S:")
-    #[serde(default)]
-    pub text_color: Option<String>,  // Text color for hand widgets and progress bars
-    // Countdown widget configuration
-    #[serde(default)]
-    pub countdown_icon: Option<String>,  // Icon for countdown widgets (overrides global default)
-    // Compass widget configuration
-    #[serde(default)]
-    pub compass_active_color: Option<String>,    // Color for available exits (default: #00ff00)
-    #[serde(default)]
-    pub compass_inactive_color: Option<String>,  // Color for unavailable exits (default: #333333)
-    // Timestamp configuration
-    #[serde(default)]
-    pub show_timestamps: Option<bool>,  // Show timestamps at end of lines (e.g., [7:08 AM])
-    // Layout resizing constraints
-    #[serde(default)]
-    pub min_rows: Option<u16>,  // Minimum height (enforced during resize)
-    #[serde(default)]
-    pub max_rows: Option<u16>,  // Maximum height (enforced during resize)
-    #[serde(default)]
-    pub min_cols: Option<u16>,  // Minimum width (enforced during resize)
-    #[serde(default)]
-    pub max_cols: Option<u16>,  // Maximum width (enforced during resize)
-    // Progress bar display options
-    #[serde(default = "default_false")]
-    pub numbers_only: bool,  // For progress bars: strip words, show only numbers (e.g., "health 325/326" -> "325/326")
-    #[serde(default)]
-    pub progress_id: Option<String>,  // ID for progress bar updates (e.g., "health", "mana", "stance")
-    #[serde(default)]
-    pub countdown_id: Option<String>,  // ID for countdown updates (e.g., "roundtime", "casttime", "stuntime")
-    #[serde(default)]
-    pub effect_default_color: Option<String>,  // Default color for effects without explicit color
-    // Injury doll color configuration
-    #[serde(default)]
-    pub injury_default_color: Option<String>,  // Default/none injury color (index 0)
-    #[serde(default)]
-    pub injury1_color: Option<String>,  // Injury level 1 color
-    #[serde(default)]
-    pub injury2_color: Option<String>,  // Injury level 2 color
-    #[serde(default)]
-    pub injury3_color: Option<String>,  // Injury level 3 color
-    #[serde(default)]
-    pub scar1_color: Option<String>,  // Scar level 1 color
-    #[serde(default)]
-    pub scar2_color: Option<String>,  // Scar level 2 color
-    #[serde(default)]
-    pub scar3_color: Option<String>,  // Scar level 3 color
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabConfig {
-    pub name: String,    // Tab display name
-    pub stream: String,  // Stream to route to this tab
+    pub name: String,   // Tab display name
+    pub stream: String, // Stream to route to this tab
     #[serde(default)]
-    pub show_timestamps: Option<bool>,  // Show timestamps at end of lines for this tab
+    pub show_timestamps: Option<bool>, // Show timestamps at end of lines for this tab
 }
 
-impl Default for WindowDef {
+/// Border sides configuration - which borders to show
+/// Serializes to/from array of strings in TOML: ["left", "right", "top", "bottom"]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "Vec<String>", into = "Vec<String>")]
+pub struct BorderSides {
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+impl Default for BorderSides {
     fn default() -> Self {
         Self {
-            name: "new_window".to_string(),
-            widget_type: default_widget_type(),
-            streams: Vec::new(),
-            row: 0,
-            col: 0,
-            rows: default_rows(),
-            cols: default_cols(),
-            buffer_size: default_buffer_size(),
-            show_border: default_show_border(),
-            border_style: None,
-            border_color: None,
-            border_sides: None,
-            title: None,
-            content_align: None,
-            background_color: None,
-            bar_fill: None,
-            bar_background: None,
-            text_color: None,
-            transparent_background: default_transparent_background(),
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            show_timestamps: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            progress_id: None,
-            countdown_id: None,
-            effect_default_color: None,
-            injury_default_color: None,
-            injury1_color: None,
-            injury2_color: None,
-            injury3_color: None,
-            scar1_color: None,
-            scar2_color: None,
-            scar3_color: None,
+            top: true,
+            bottom: true,
+            left: true,
+            right: true,
         }
     }
 }
 
+// Convert from TOML array format ["left", "right"] to BorderSides struct
+impl From<Vec<String>> for BorderSides {
+    fn from(sides: Vec<String>) -> Self {
+        let mut border = Self {
+            top: false,
+            bottom: false,
+            left: false,
+            right: false,
+        };
+
+        for side in sides {
+            match side.to_lowercase().as_str() {
+                "top" => border.top = true,
+                "bottom" => border.bottom = true,
+                "left" => border.left = true,
+                "right" => border.right = true,
+                _ => {} // Ignore unknown sides
+            }
+        }
+
+        border
+    }
+}
+
+// Convert from BorderSides struct to TOML array format
+impl From<BorderSides> for Vec<String> {
+    fn from(border: BorderSides) -> Self {
+        let mut sides = Vec::new();
+        if border.top {
+            sides.push("top".to_string());
+        }
+        if border.bottom {
+            sides.push("bottom".to_string());
+        }
+        if border.left {
+            sides.push("left".to_string());
+        }
+        if border.right {
+            sides.push("right".to_string());
+        }
+        sides
+    }
+}
+
+impl BorderSides {
+    /// True if any side is enabled
+    pub fn any(&self) -> bool {
+        self.top || self.bottom || self.left || self.right
+    }
+}
+
+impl WindowBase {
+    fn horizontal_border_units_for(show: bool, sides: &BorderSides) -> u16 {
+        if !show {
+            return 0;
+        }
+        (sides.top as u16) + (sides.bottom as u16)
+    }
+
+    fn vertical_border_units_for(show: bool, sides: &BorderSides) -> u16 {
+        if !show {
+            return 0;
+        }
+        (sides.left as u16) + (sides.right as u16)
+    }
+
+    /// Number of rows consumed by borders (top + bottom)
+    pub fn horizontal_border_units(&self) -> u16 {
+        Self::horizontal_border_units_for(self.show_border, &self.border_sides)
+    }
+
+    /// Number of columns consumed by borders (left + right)
+    pub fn vertical_border_units(&self) -> u16 {
+        Self::vertical_border_units_for(self.show_border, &self.border_sides)
+    }
+
+    /// Rows available for the widget's interior content
+    pub fn content_rows(&self) -> u16 {
+        self.rows.saturating_sub(self.horizontal_border_units())
+    }
+
+    /// Columns available for the widget's interior content
+    pub fn content_cols(&self) -> u16 {
+        self.cols.saturating_sub(self.vertical_border_units())
+    }
+
+    /// Apply new border visibility/sides while keeping interior size the same.
+    pub fn apply_border_configuration(&mut self, show_border: bool, border_sides: BorderSides) {
+        let prev_horizontal = self.horizontal_border_units();
+        let prev_vertical = self.vertical_border_units();
+
+        let mut content_rows = self.rows.saturating_sub(prev_horizontal);
+        if content_rows == 0 {
+            content_rows = 1;
+        }
+        let mut content_cols = self.cols.saturating_sub(prev_vertical);
+        if content_cols == 0 {
+            content_cols = 1;
+        }
+
+        self.show_border = show_border && border_sides.any();
+        self.border_sides = border_sides;
+
+        let new_horizontal =
+            Self::horizontal_border_units_for(self.show_border, &self.border_sides);
+        let new_vertical = Self::vertical_border_units_for(self.show_border, &self.border_sides);
+
+        self.rows = content_rows + new_horizontal;
+        self.cols = content_cols + new_vertical;
+
+        if let Some(min_rows) = self.min_rows {
+            if self.rows < min_rows {
+                self.rows = min_rows;
+            }
+        } else if self.rows == 0 {
+            self.rows = 1;
+        }
+        if let Some(max_rows) = self.max_rows {
+            if self.rows > max_rows {
+                self.rows = max_rows;
+            }
+        }
+
+        if let Some(min_cols) = self.min_cols {
+            if self.cols < min_cols {
+                self.cols = min_cols;
+            }
+        } else if self.cols == 0 {
+            self.cols = 1;
+        }
+        if let Some(max_cols) = self.max_cols {
+            if self.cols > max_cols {
+                self.cols = max_cols;
+            }
+        }
+    }
+}
+
+/// Base configuration shared by ALL widget types
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowBase {
+    pub name: String,
+    #[serde(default)]
+    pub row: u16,
+    #[serde(default)]
+    pub col: u16,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
+    #[serde(default = "default_show_border")]
+    pub show_border: bool,
+    #[serde(default = "default_border_style")]
+    pub border_style: String, // "single", "double", "rounded", "thick", "plain"
+    #[serde(default)]
+    pub border_sides: BorderSides,
+    #[serde(default)]
+    pub border_color: Option<String>,
+    #[serde(default = "default_show_title")]
+    pub show_title: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub background_color: Option<String>,
+    #[serde(default)]
+    pub text_color: Option<String>,
+    #[serde(default = "default_transparent_background")]
+    pub transparent_background: bool,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub min_rows: Option<u16>,
+    #[serde(default)]
+    pub max_rows: Option<u16>,
+    #[serde(default)]
+    pub min_cols: Option<u16>,
+    #[serde(default)]
+    pub max_cols: Option<u16>,
+    /// Whether this window is currently visible (defaults to true for backwards compatibility)
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+/// Text widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextWidgetData {
+    #[serde(default)]
+    pub streams: Vec<String>,
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+}
+
+/// Room widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomWidgetData {
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+
+    /// Component visibility toggles (default: all true)
+    #[serde(default = "default_true")]
+    pub show_desc: bool,
+
+    #[serde(default = "default_true")]
+    pub show_objs: bool,
+
+    #[serde(default = "default_true")]
+    pub show_players: bool,
+
+    #[serde(default = "default_true")]
+    pub show_exits: bool,
+
+    /// Display the room name within the window content (useful when borders are hidden)
+    #[serde(default = "default_false")]
+    pub show_name: bool,
+}
+
+/// Command input widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CommandInputWidgetData {
+    #[serde(default)]
+    pub text_color: Option<String>,
+    #[serde(default)]
+    pub cursor_color: Option<String>,
+    #[serde(default)]
+    pub cursor_background_color: Option<String>,
+}
+
+/// Inventory widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InventoryWidgetData {
+    #[serde(default)]
+    pub streams: Vec<String>,
+    #[serde(default)]
+    pub buffer_size: usize,
+}
+
+/// TabbedText widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabbedTextWidgetData {
+    #[serde(default)]
+    pub tabs: Vec<TabbedTextTab>,
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+}
+
+/// Tab configuration for TabbedText widget
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabbedTextTab {
+    pub name: String,
+    #[serde(default)]
+    pub streams: Vec<String>,
+    #[serde(default)]
+    pub show_timestamps: Option<bool>,
+}
+
+/// Progress bar widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgressWidgetData {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// Countdown timer widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CountdownWidgetData {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub icon: Option<char>,
+}
+
+/// Compass widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompassWidgetData {
+    #[serde(default)]
+    pub active_color: Option<String>, // Color for available exits (default: green)
+    #[serde(default)]
+    pub inactive_color: Option<String>, // Color for unavailable exits (default: dark gray)
+}
+
+/// Injury doll widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InjuryDollWidgetData {
+    #[serde(default)]
+    pub injury_default_color: Option<String>, // Level 0: none (default: #333333)
+    #[serde(default)]
+    pub injury1_color: Option<String>, // Level 1: injury 1 (default: #aa5500)
+    #[serde(default)]
+    pub injury2_color: Option<String>, // Level 2: injury 2 (default: #ff8800)
+    #[serde(default)]
+    pub injury3_color: Option<String>, // Level 3: injury 3 (default: #ff0000)
+    #[serde(default)]
+    pub scar1_color: Option<String>, // Level 4: scar 1 (default: #999999)
+    #[serde(default)]
+    pub scar2_color: Option<String>, // Level 5: scar 2 (default: #777777)
+    #[serde(default)]
+    pub scar3_color: Option<String>, // Level 6: scar 3 (default: #555555)
+}
+
+/// Indicator widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndicatorWidgetData {
+    #[serde(default)]
+    pub default_status: Option<String>,
+    #[serde(default)]
+    pub default_color: Option<String>,
+}
+
+/// Dashboard widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardWidgetData {
+    // No extra fields currently - displays character stats
+}
+
+/// Hand widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandWidgetData {
+    // No extra fields currently
+}
+
+/// Active effects widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveEffectsWidgetData {
+    pub category: String, // "Buffs", "Debuffs", "Cooldowns", "ActiveSpells"
+}
+
+/// Targets widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TargetsWidgetData {
+    // No extra fields currently
+}
+
+/// Players widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayersWidgetData {
+    // No extra fields currently
+}
+
+/// Spacer widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpacerWidgetData {
+    // No extra fields currently
+}
+
+/// Spells window widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpellsWidgetData {
+    // No extra fields currently - uses "spells" stream
+}
+
+/// Window definition - enum with widget-specific variants
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "widget_type")]
+pub enum WindowDef {
+    #[serde(rename = "text")]
+    Text {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: TextWidgetData,
+    },
+
+    #[serde(rename = "tabbedtext")]
+    TabbedText {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: TabbedTextWidgetData,
+    },
+
+    #[serde(rename = "room")]
+    Room {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: RoomWidgetData,
+    },
+
+    #[serde(rename = "inventory")]
+    Inventory {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: InventoryWidgetData,
+    },
+
+    #[serde(rename = "command_input")]
+    CommandInput {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: CommandInputWidgetData,
+    },
+
+    #[serde(rename = "progress")]
+    Progress {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: ProgressWidgetData,
+    },
+
+    #[serde(rename = "countdown")]
+    Countdown {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: CountdownWidgetData,
+    },
+
+    #[serde(rename = "compass")]
+    Compass {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: CompassWidgetData,
+    },
+
+    #[serde(rename = "injury_doll")]
+    InjuryDoll {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: InjuryDollWidgetData,
+    },
+
+    #[serde(rename = "indicator")]
+    Indicator {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: IndicatorWidgetData,
+    },
+
+    #[serde(rename = "dashboard")]
+    Dashboard {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: DashboardWidgetData,
+    },
+
+    #[serde(rename = "hand")]
+    Hand {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: HandWidgetData,
+    },
+
+    #[serde(rename = "active_effects")]
+    ActiveEffects {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: ActiveEffectsWidgetData,
+    },
+
+    #[serde(rename = "targets")]
+    Targets {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: TargetsWidgetData,
+    },
+
+    #[serde(rename = "players")]
+    Players {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: PlayersWidgetData,
+    },
+
+    #[serde(rename = "spacer")]
+    Spacer {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: SpacerWidgetData,
+    },
+
+    #[serde(rename = "spells")]
+    Spells {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: SpellsWidgetData,
+    },
+}
+
 impl WindowDef {
+    /// Get the window name
+    pub fn name(&self) -> &str {
+        match self {
+            WindowDef::Text { base, .. } => &base.name,
+            WindowDef::TabbedText { base, .. } => &base.name,
+            WindowDef::Room { base, .. } => &base.name,
+            WindowDef::Inventory { base, .. } => &base.name,
+            WindowDef::CommandInput { base, .. } => &base.name,
+            WindowDef::Progress { base, .. } => &base.name,
+            WindowDef::Countdown { base, .. } => &base.name,
+            WindowDef::Compass { base, .. } => &base.name,
+            WindowDef::Indicator { base, .. } => &base.name,
+            WindowDef::Dashboard { base, .. } => &base.name,
+            WindowDef::InjuryDoll { base, .. } => &base.name,
+            WindowDef::Hand { base, .. } => &base.name,
+            WindowDef::ActiveEffects { base, .. } => &base.name,
+            WindowDef::Targets { base, .. } => &base.name,
+            WindowDef::Players { base, .. } => &base.name,
+            WindowDef::Spacer { base, .. } => &base.name,
+            WindowDef::Spells { base, .. } => &base.name,
+        }
+    }
+
+    /// Get the widget type as a string
+    pub fn widget_type(&self) -> &str {
+        match self {
+            WindowDef::Text { .. } => "text",
+            WindowDef::TabbedText { .. } => "tabbedtext",
+            WindowDef::Room { .. } => "room",
+            WindowDef::Inventory { .. } => "inventory",
+            WindowDef::CommandInput { .. } => "command_input",
+            WindowDef::Progress { .. } => "progress",
+            WindowDef::Countdown { .. } => "countdown",
+            WindowDef::Compass { .. } => "compass",
+            WindowDef::Indicator { .. } => "indicator",
+            WindowDef::Dashboard { .. } => "dashboard",
+            WindowDef::InjuryDoll { .. } => "injury_doll",
+            WindowDef::Hand { .. } => "hand",
+            WindowDef::ActiveEffects { .. } => "active_effects",
+            WindowDef::Targets { .. } => "targets",
+            WindowDef::Players { .. } => "players",
+            WindowDef::Spacer { .. } => "spacer",
+            WindowDef::Spells { .. } => "spells",
+        }
+    }
+
+    /// Get a reference to the base configuration
+    pub fn base(&self) -> &WindowBase {
+        match self {
+            WindowDef::Text { base, .. } => base,
+            WindowDef::TabbedText { base, .. } => base,
+            WindowDef::Room { base, .. } => base,
+            WindowDef::Inventory { base, .. } => base,
+            WindowDef::CommandInput { base, .. } => base,
+            WindowDef::Progress { base, .. } => base,
+            WindowDef::Countdown { base, .. } => base,
+            WindowDef::Compass { base, .. } => base,
+            WindowDef::Indicator { base, .. } => base,
+            WindowDef::Dashboard { base, .. } => base,
+            WindowDef::InjuryDoll { base, .. } => base,
+            WindowDef::Hand { base, .. } => base,
+            WindowDef::ActiveEffects { base, .. } => base,
+            WindowDef::Targets { base, .. } => base,
+            WindowDef::Players { base, .. } => base,
+            WindowDef::Spacer { base, .. } => base,
+            WindowDef::Spells { base, .. } => base,
+        }
+    }
+
+    /// Get a mutable reference to the base configuration
+    pub fn base_mut(&mut self) -> &mut WindowBase {
+        match self {
+            WindowDef::Text { base, .. } => base,
+            WindowDef::TabbedText { base, .. } => base,
+            WindowDef::Room { base, .. } => base,
+            WindowDef::Inventory { base, .. } => base,
+            WindowDef::CommandInput { base, .. } => base,
+            WindowDef::Progress { base, .. } => base,
+            WindowDef::Countdown { base, .. } => base,
+            WindowDef::Compass { base, .. } => base,
+            WindowDef::Indicator { base, .. } => base,
+            WindowDef::Dashboard { base, .. } => base,
+            WindowDef::InjuryDoll { base, .. } => base,
+            WindowDef::Hand { base, .. } => base,
+            WindowDef::ActiveEffects { base, .. } => base,
+            WindowDef::Targets { base, .. } => base,
+            WindowDef::Players { base, .. } => base,
+            WindowDef::Spacer { base, .. } => base,
+            WindowDef::Spells { base, .. } => base,
+        }
+    }
+
     /// Resolve an optional string field with three-state logic:
     /// - None = use provided default
     /// - Some("-") = explicitly empty (return None)
     /// - Some(value) = use value
     pub fn resolve_optional_string(field: &Option<String>, default: &str) -> Option<String> {
         match field {
-            None => Some(default.to_string()),  // Use default
-            Some(s) if s == "-" => None,        // Explicitly empty
-            Some(s) => Some(s.clone()),         // Use value
+            None => Some(default.to_string()), // Use default
+            Some(s) if s == "-" => None,       // Explicitly empty
+            Some(s) => Some(s.clone()),        // Use value
         }
     }
 
     /// Get the effective border color (with global default fallback)
     pub fn get_border_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.border_color, &colors.ui.border_color)
+        Self::resolve_optional_string(&self.base().border_color, &colors.ui.border_color)
     }
 
     /// Get the effective text color (with global default fallback)
     pub fn get_text_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.text_color, &colors.ui.text_color)
+        Self::resolve_optional_string(&self.base().text_color, &colors.ui.text_color)
     }
 
-    /// Get the effective border style (with global default fallback)
-    pub fn get_border_style(&self, ui_config: &UiConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.border_style, &ui_config.border_style)
+    /// Get the effective border style
+    pub fn get_border_style(&self) -> &str {
+        &self.base().border_style
     }
 
     /// Get the effective background color (with global default fallback)
     pub fn get_background_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.background_color, &colors.ui.background_color)
+        Self::resolve_optional_string(&self.base().background_color, &colors.ui.background_color)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardIndicatorDef {
-    pub id: String,              // e.g., "poisoned", "diseased"
-    pub icon: String,            // Unicode icon character
-    pub colors: Vec<String>,     // [off_color, on_color]
+    pub id: String,          // e.g., "poisoned", "diseased"
+    pub icon: String,        // Unicode icon character
+    pub colors: Vec<String>, // [off_color, on_color]
 }
 
 /// Parse border sides configuration into ratatui Borders bitflags
-pub fn parse_border_sides(sides: &Option<Vec<String>>) -> ratatui::widgets::Borders {
+pub fn parse_border_sides(sides: &BorderSides) -> ratatui::widgets::Borders {
     use ratatui::widgets::Borders;
 
-    match sides {
-        None => Borders::ALL,  // Default: all borders
-        Some(list) if list.is_empty() => Borders::NONE,  // Empty list means no borders
-        Some(list) => {
-            let mut borders = Borders::empty();
-            for side in list {
-                match side.to_lowercase().as_str() {
-                    "top" => borders |= Borders::TOP,
-                    "bottom" => borders |= Borders::BOTTOM,
-                    "left" => borders |= Borders::LEFT,
-                    "right" => borders |= Borders::RIGHT,
-                    "all" => return Borders::ALL,
-                    "none" => return Borders::NONE,
-                    _ => {
-                        tracing::warn!("Invalid border side '{}', ignoring", side);
-                    }
-                }
-            }
-            // If no valid sides were specified, default to ALL
-            if borders.is_empty() {
-                Borders::ALL
-            } else {
-                borders
-            }
-        }
+    let mut borders = Borders::empty();
+    if sides.top {
+        borders |= Borders::TOP;
+    }
+    if sides.bottom {
+        borders |= Borders::BOTTOM;
+    }
+    if sides.left {
+        borders |= Borders::LEFT;
+    }
+    if sides.right {
+        borders |= Borders::RIGHT;
+    }
+
+    if borders.is_empty() {
+        Borders::ALL // Fallback if somehow all are false
+    } else {
+        borders
     }
 }
 
@@ -557,6 +1063,10 @@ fn default_cols() -> u16 {
 }
 
 fn default_show_border() -> bool {
+    true
+}
+
+fn default_show_title() -> bool {
     true
 }
 
@@ -582,16 +1092,16 @@ pub struct UiConfig {
     #[serde(default)]
     pub layout: LayoutConfig,
     #[serde(default = "default_border_style")]
-    pub border_style: String,  // Default border style: "single", "double", "rounded", "thick", "none"
+    pub border_style: String, // Default border style: "single", "double", "rounded", "thick", "none"
     #[serde(default = "default_countdown_icon")]
-    pub countdown_icon: String,  // Unicode character for countdown blocks (e.g., "\u{f0c8}")
+    pub countdown_icon: String, // Unicode character for countdown blocks (e.g., "\u{f0c8}")
     #[serde(default = "default_poll_timeout_ms")]
-    pub poll_timeout_ms: u64,  // Event poll timeout in milliseconds (lower = higher FPS, higher CPU)
+    pub poll_timeout_ms: u64, // Event poll timeout in milliseconds (lower = higher FPS, higher CPU)
     // Startup music settings
     #[serde(default = "default_startup_music")]
-    pub startup_music: bool,  // Play startup music on connection
+    pub startup_music: bool, // Play startup music on connection
     #[serde(default = "default_startup_music_file")]
-    pub startup_music_file: String,  // Sound file to play on startup (without extension)
+    pub startup_music_file: String, // Sound file to play on startup (without extension)
     // Text selection settings
     #[serde(default = "default_selection_enabled")]
     pub selection_enabled: bool,
@@ -599,10 +1109,10 @@ pub struct UiConfig {
     pub selection_respect_window_boundaries: bool,
     // Drag and drop settings
     #[serde(default = "default_drag_modifier_key")]
-    pub drag_modifier_key: String,  // Modifier key required for drag and drop (e.g., "ctrl", "alt", "shift")
+    pub drag_modifier_key: String, // Modifier key required for drag and drop (e.g., "ctrl", "alt", "shift")
     // Command history settings
     #[serde(default = "default_min_command_length")]
-    pub min_command_length: usize,  // Minimum command length to save to history (commands shorter than this are not saved)
+    pub min_command_length: usize, // Minimum command length to save to history (commands shorter than this are not saved)
     // Performance stats settings
     #[serde(default = "default_perf_stats_x")]
     pub perf_stats_x: u16,
@@ -627,11 +1137,13 @@ pub struct LayoutConfig {
 pub struct Layout {
     pub windows: Vec<WindowDef>,
     #[serde(default)]
-    pub terminal_width: Option<u16>,   // Designed terminal width (for resize calculations)
+    pub terminal_width: Option<u16>, // Designed terminal width (for resize calculations)
     #[serde(default)]
-    pub terminal_height: Option<u16>,  // Designed terminal height (for resize calculations)
+    pub terminal_height: Option<u16>, // Designed terminal height (for resize calculations)
     #[serde(default)]
-    pub base_layout: Option<String>,   // Reference to base layout (for auto layouts)
+    pub base_layout: Option<String>, // Reference to base layout (for auto layouts)
+    #[serde(default)]
+    pub theme: Option<String>, // Theme applied when this layout was saved
 }
 
 /// Content alignment within widget area (used when borders are removed)
@@ -666,17 +1178,31 @@ impl ContentAlign {
 
     /// Calculate offset for rendering content within a larger area
     /// Returns (row_offset, col_offset)
-    pub fn calculate_offset(&self, content_width: u16, content_height: u16, area_width: u16, area_height: u16) -> (u16, u16) {
+    pub fn calculate_offset(
+        &self,
+        content_width: u16,
+        content_height: u16,
+        area_width: u16,
+        area_height: u16,
+    ) -> (u16, u16) {
         let row_offset = match self {
             ContentAlign::TopLeft | ContentAlign::Top | ContentAlign::TopRight => 0,
-            ContentAlign::Left | ContentAlign::Center | ContentAlign::Right => (area_height.saturating_sub(content_height)) / 2,
-            ContentAlign::BottomLeft | ContentAlign::Bottom | ContentAlign::BottomRight => area_height.saturating_sub(content_height),
+            ContentAlign::Left | ContentAlign::Center | ContentAlign::Right => {
+                (area_height.saturating_sub(content_height)) / 2
+            }
+            ContentAlign::BottomLeft | ContentAlign::Bottom | ContentAlign::BottomRight => {
+                area_height.saturating_sub(content_height)
+            }
         };
 
         let col_offset = match self {
             ContentAlign::TopLeft | ContentAlign::Left | ContentAlign::BottomLeft => 0,
-            ContentAlign::Top | ContentAlign::Center | ContentAlign::Bottom => (area_width.saturating_sub(content_width)) / 2,
-            ContentAlign::TopRight | ContentAlign::Right | ContentAlign::BottomRight => area_width.saturating_sub(content_width),
+            ContentAlign::Top | ContentAlign::Center | ContentAlign::Bottom => {
+                (area_width.saturating_sub(content_width)) / 2
+            }
+            ContentAlign::TopRight | ContentAlign::Right | ContentAlign::BottomRight => {
+                area_width.saturating_sub(content_width)
+            }
         };
 
         (row_offset, col_offset)
@@ -693,30 +1219,34 @@ pub struct HighlightPattern {
     #[serde(default, skip_serializing_if = "is_false")]
     pub bold: bool,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub color_entire_line: bool,  // If true, apply colors to entire line, not just matched text
+    pub color_entire_line: bool, // If true, apply colors to entire line, not just matched text
     #[serde(default, skip_serializing_if = "is_false")]
-    pub fast_parse: bool,  // If true, split pattern on | and use Aho-Corasick for literal matching
+    pub fast_parse: bool, // If true, split pattern on | and use Aho-Corasick for literal matching
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>,  // Sound file to play when pattern matches
+    pub sound: Option<String>, // Sound file to play when pattern matches
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sound_volume: Option<f32>,  // Volume override for this sound (0.0 to 1.0)
+    pub sound_volume: Option<f32>, // Volume override for this sound (0.0 to 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,  // Category for grouping highlights (e.g., "Combat", "Healing", "Death")
+    pub category: Option<String>, // Category for grouping highlights (e.g., "Combat", "Healing", "Death")
+
+    // Performance optimization: cache compiled regex (not serialized)
+    #[serde(skip)]
+    pub compiled_regex: Option<regex::Regex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventPattern {
-    pub pattern: String,           // Regex pattern to match
-    pub event_type: String,        // Event type: "stun", "webbed", "prone", etc.
-    pub action: EventAction,       // Action to perform: set/clear/increment
+    pub pattern: String,     // Regex pattern to match
+    pub event_type: String,  // Event type: "stun", "webbed", "prone", etc.
+    pub action: EventAction, // Action to perform: set/clear/increment
     #[serde(default)]
-    pub duration: u32,             // Duration in seconds (0 = don't change)
+    pub duration: u32, // Duration in seconds (0 = don't change)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_capture: Option<usize>,  // Regex capture group for duration (1-based)
+    pub duration_capture: Option<usize>, // Regex capture group for duration (1-based)
     #[serde(default = "default_duration_multiplier")]
-    pub duration_multiplier: f32,  // Multiply captured duration (e.g., 5.0 for rounds->seconds)
+    pub duration_multiplier: f32, // Multiply captured duration (e.g., 5.0 for rounds->seconds)
     #[serde(default = "default_enabled")]
-    pub enabled: bool,             // Can disable without deleting
+    pub enabled: bool, // Can disable without deleting
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -733,17 +1263,21 @@ impl Default for EventAction {
     }
 }
 
-fn default_duration_multiplier() -> f32 { 1.0 }
-fn default_enabled() -> bool { true }
+fn default_duration_multiplier() -> f32 {
+    1.0
+}
+fn default_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoundConfig {
     #[serde(default = "default_sound_enabled")]
     pub enabled: bool,
     #[serde(default = "default_sound_volume")]
-    pub volume: f32,  // Master volume (0.0 to 1.0)
+    pub volume: f32, // Master volume (0.0 to 1.0)
     #[serde(default = "default_sound_cooldown")]
-    pub cooldown_ms: u64,  // Cooldown between same sound plays (milliseconds)
+    pub cooldown_ms: u64, // Cooldown between same sound plays (milliseconds)
 }
 
 fn default_sound_enabled() -> bool {
@@ -755,7 +1289,7 @@ fn default_sound_volume() -> f32 {
 }
 
 fn default_sound_cooldown() -> u64 {
-    500  // 500ms default cooldown
+    500 // 500ms default cooldown
 }
 
 impl Default for SoundConfig {
@@ -768,6 +1302,70 @@ impl Default for SoundConfig {
     }
 }
 
+/// Text-to-Speech Configuration
+///
+/// Controls accessibility features for visually impaired users.
+/// When disabled (default), has zero performance impact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtsConfig {
+    #[serde(default = "default_tts_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_tts_voice")]
+    pub voice: Option<String>, // Voice name (None = system default)
+    #[serde(default = "default_tts_rate")]
+    pub rate: f32, // Speech rate (0.5 to 2.0, 1.0 = normal)
+    #[serde(default = "default_tts_volume")]
+    pub volume: f32, // Volume (0.0 to 1.0)
+    #[serde(default = "default_tts_speak_thoughts")]
+    pub speak_thoughts: bool, // Automatically speak thought window
+    #[serde(default = "default_tts_speak_whispers")]
+    pub speak_whispers: bool, // Automatically speak whispers
+    #[serde(default = "default_tts_speak_main")]
+    pub speak_main: bool, // Automatically speak main window
+}
+
+fn default_tts_enabled() -> bool {
+    false // Disabled by default (opt-in)
+}
+
+fn default_tts_voice() -> Option<String> {
+    None // Use system default voice
+}
+
+fn default_tts_rate() -> f32 {
+    1.0 // Normal speech rate
+}
+
+fn default_tts_volume() -> f32 {
+    1.0 // Full volume
+}
+
+fn default_tts_speak_thoughts() -> bool {
+    true // Thoughts are high priority for screen reader users
+}
+
+fn default_tts_speak_whispers() -> bool {
+    true // Whispers are important communications
+}
+
+fn default_tts_speak_main() -> bool {
+    false // Main window can be overwhelming, off by default
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tts_enabled(),
+            voice: default_tts_voice(),
+            rate: default_tts_rate(),
+            volume: default_tts_volume(),
+            speak_thoughts: default_tts_speak_thoughts(),
+            speak_whispers: default_tts_speak_whispers(),
+            speak_main: default_tts_speak_main(),
+        }
+    }
+}
+
 // Helper function for serde skip_serializing_if
 fn is_false(b: &bool) -> bool {
     !b
@@ -776,13 +1374,13 @@ fn is_false(b: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum KeyBindAction {
-    Action(String),          // Just an action: "cursor_word_left"
-    Macro(MacroAction),      // A macro with text
+    Action(String),     // Just an action: "cursor_word_left"
+    Macro(MacroAction), // A macro with text
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacroAction {
-    pub macro_text: String,  // e.g., "sw\r" for southwest movement
+    pub macro_text: String, // e.g., "sw\r" for southwest movement
 }
 
 /// Actions that can be bound to keys
@@ -821,8 +1419,301 @@ pub enum KeyAction {
     // Debug/Performance actions
     TogglePerformanceStats,
 
+    // TTS (Text-to-Speech) actions - Accessibility
+    TtsNext,           // Next message (sequential, includes read)
+    TtsPrevious,       // Previous message (sequential, includes read)
+    TtsNextUnread,     // Skip to next unread message
+    TtsStop,           // Stop current speech (keeps position)
+    TtsMuteToggle,     // Toggle TTS mute on/off
+    TtsIncreaseRate,   // Increase speech rate by 0.1
+    TtsDecreaseRate,   // Decrease speech rate by 0.1
+    TtsIncreaseVolume, // Increase volume by 0.1
+    TtsDecreaseVolume, // Decrease volume by 0.1
+
     // Macro - send literal text
     SendMacro(String),
+}
+
+/// Keybinds for menu system (popups, browsers, forms, editors)
+/// These are separate from game keybinds and only active when menus have focus
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MenuKeybinds {
+    // Navigation
+    #[serde(default = "default_navigate_up")]
+    pub navigate_up: String,
+    #[serde(default = "default_navigate_down")]
+    pub navigate_down: String,
+    #[serde(default = "default_navigate_left")]
+    pub navigate_left: String,
+    #[serde(default = "default_navigate_right")]
+    pub navigate_right: String,
+    #[serde(default = "default_page_up")]
+    pub page_up: String,
+    #[serde(default = "default_page_down")]
+    pub page_down: String,
+    #[serde(default = "default_home")]
+    pub home: String,
+    #[serde(default = "default_end")]
+    pub end: String,
+
+    // Field Navigation
+    #[serde(default = "default_next_field")]
+    pub next_field: String,
+    #[serde(default = "default_previous_field")]
+    pub previous_field: String,
+
+    // Actions
+    #[serde(default = "default_select")]
+    pub select: String,
+    #[serde(default = "default_cancel")]
+    pub cancel: String,
+    #[serde(default = "default_save")]
+    pub save: String,
+    #[serde(default = "default_delete")]
+    pub delete: String,
+
+    // Text Editing (Clipboard)
+    #[serde(default = "default_select_all")]
+    pub select_all: String,
+    #[serde(default = "default_copy")]
+    pub copy: String,
+    #[serde(default = "default_cut")]
+    pub cut: String,
+    #[serde(default = "default_paste")]
+    pub paste: String,
+
+    // Toggles/Cycling
+    #[serde(default = "default_toggle")]
+    pub toggle: String,
+
+    // Reordering (WindowEditor)
+    #[serde(default = "default_move_up")]
+    pub move_up: String,
+    #[serde(default = "default_move_down")]
+    pub move_down: String,
+
+    // List Management (WindowEditor)
+    #[serde(default = "default_add")]
+    pub add: String,
+    #[serde(default = "default_edit")]
+    pub edit: String,
+}
+
+// Default keybind functions
+fn default_navigate_up() -> String {
+    "Up".to_string()
+}
+fn default_navigate_down() -> String {
+    "Down".to_string()
+}
+fn default_navigate_left() -> String {
+    "Left".to_string()
+}
+fn default_navigate_right() -> String {
+    "Right".to_string()
+}
+fn default_page_up() -> String {
+    "PageUp".to_string()
+}
+fn default_page_down() -> String {
+    "PageDown".to_string()
+}
+fn default_home() -> String {
+    "Home".to_string()
+}
+fn default_end() -> String {
+    "End".to_string()
+}
+fn default_next_field() -> String {
+    "Tab".to_string()
+}
+fn default_previous_field() -> String {
+    "Shift+Tab".to_string()
+}
+fn default_select() -> String {
+    "Enter".to_string()
+}
+fn default_cancel() -> String {
+    "Esc".to_string()
+}
+fn default_save() -> String {
+    "Ctrl+S".to_string()
+}
+fn default_delete() -> String {
+    "Delete".to_string()
+}
+fn default_select_all() -> String {
+    "Ctrl+A".to_string()
+}
+fn default_copy() -> String {
+    "Ctrl+C".to_string()
+}
+fn default_cut() -> String {
+    "Ctrl+X".to_string()
+}
+fn default_paste() -> String {
+    "Ctrl+V".to_string()
+}
+fn default_toggle() -> String {
+    "Space".to_string()
+}
+fn default_move_up() -> String {
+    "Shift+Up".to_string()
+}
+fn default_move_down() -> String {
+    "Shift+Down".to_string()
+}
+fn default_add() -> String {
+    "A".to_string()
+}
+fn default_edit() -> String {
+    "E".to_string()
+}
+
+impl Default for MenuKeybinds {
+    fn default() -> Self {
+        Self {
+            navigate_up: default_navigate_up(),
+            navigate_down: default_navigate_down(),
+            navigate_left: default_navigate_left(),
+            navigate_right: default_navigate_right(),
+            page_up: default_page_up(),
+            page_down: default_page_down(),
+            home: default_home(),
+            end: default_end(),
+            next_field: default_next_field(),
+            previous_field: default_previous_field(),
+            select: default_select(),
+            cancel: default_cancel(),
+            save: default_save(),
+            delete: default_delete(),
+            select_all: default_select_all(),
+            copy: default_copy(),
+            cut: default_cut(),
+            paste: default_paste(),
+            toggle: default_toggle(),
+            move_up: default_move_up(),
+            move_down: default_move_down(),
+            add: default_add(),
+            edit: default_edit(),
+        }
+    }
+}
+
+impl MenuKeybinds {
+    /// Resolve a KeyEvent to a MenuAction based on the current context
+    pub fn resolve_action(
+        &self,
+        key: crossterm::event::KeyEvent,
+        context: crate::core::menu_actions::ActionContext,
+    ) -> crate::core::menu_actions::MenuAction {
+        use crate::core::menu_actions::{key_event_to_string, ActionContext, MenuAction};
+
+        let key_str = key_event_to_string(key);
+
+        // Special handling for BackTab (Shift+Tab)
+        if matches!(key.code, crossterm::event::KeyCode::BackTab) {
+            if key_str == self.previous_field || "Shift+Tab" == self.previous_field {
+                return MenuAction::PreviousField;
+            }
+        }
+
+        // Context-specific bindings first (override general bindings)
+        match context {
+            ActionContext::Dropdown => {
+                // In dropdown, Up/Down cycle through options instead of navigating
+                if key_str == self.navigate_up {
+                    return MenuAction::NavigateUp; // Will be interpreted as cycle prev
+                }
+                if key_str == self.navigate_down {
+                    return MenuAction::NavigateDown; // Will be interpreted as cycle next
+                }
+            }
+            ActionContext::TextInput => {
+                // Clipboard operations only valid in text input
+                if key_str == self.select_all {
+                    return MenuAction::SelectAll;
+                }
+                if key_str == self.copy {
+                    return MenuAction::Copy;
+                }
+                if key_str == self.cut {
+                    return MenuAction::Cut;
+                }
+                if key_str == self.paste {
+                    return MenuAction::Paste;
+                }
+            }
+            _ => {}
+        }
+
+        // Global menu keybindings
+        if key_str == self.cancel {
+            return MenuAction::Cancel;
+        }
+        if key_str == self.save {
+            return MenuAction::Save;
+        }
+        if key_str == self.select {
+            return MenuAction::Select;
+        }
+        if key_str == self.delete {
+            return MenuAction::Delete;
+        }
+
+        if key_str == self.navigate_up {
+            return MenuAction::NavigateUp;
+        }
+        if key_str == self.navigate_down {
+            return MenuAction::NavigateDown;
+        }
+        if key_str == self.navigate_left {
+            return MenuAction::NavigateLeft;
+        }
+        if key_str == self.navigate_right {
+            return MenuAction::NavigateRight;
+        }
+        if key_str == self.page_up {
+            return MenuAction::PageUp;
+        }
+        if key_str == self.page_down {
+            return MenuAction::PageDown;
+        }
+        if key_str == self.home {
+            return MenuAction::Home;
+        }
+        if key_str == self.end {
+            return MenuAction::End;
+        }
+
+        if key_str == self.next_field {
+            return MenuAction::NextField;
+        }
+        if key_str == self.previous_field {
+            return MenuAction::PreviousField;
+        }
+
+        if key_str == self.toggle {
+            return MenuAction::Toggle;
+        }
+
+        if key_str == self.move_up {
+            return MenuAction::MoveUp;
+        }
+        if key_str == self.move_down {
+            return MenuAction::MoveDown;
+        }
+
+        if key_str == self.add {
+            return MenuAction::Add;
+        }
+        if key_str == self.edit {
+            return MenuAction::Edit;
+        }
+
+        // No matching keybind
+        MenuAction::None
+    }
 }
 
 impl KeyAction {
@@ -851,6 +1742,16 @@ impl KeyAction {
             "prev_search_match" => Some(Self::PrevSearchMatch),
             "clear_search" => Some(Self::ClearSearch),
             "toggle_performance_stats" => Some(Self::TogglePerformanceStats),
+            "tts_next" => Some(Self::TtsNext),
+            "tts_previous" => Some(Self::TtsPrevious),
+            "tts_next_unread" => Some(Self::TtsNextUnread),
+            "tts_stop" => Some(Self::TtsStop),
+            "tts_pause_resume" => Some(Self::TtsStop), // Legacy support
+            "tts_mute_toggle" => Some(Self::TtsMuteToggle),
+            "tts_increase_rate" => Some(Self::TtsIncreaseRate),
+            "tts_decrease_rate" => Some(Self::TtsDecreaseRate),
+            "tts_increase_volume" => Some(Self::TtsIncreaseVolume),
+            "tts_decrease_volume" => Some(Self::TtsDecreaseVolume),
             _ => None,
         }
     }
@@ -860,7 +1761,11 @@ impl KeyAction {
 pub fn parse_key_string(key_str: &str) -> Option<(KeyCode, KeyModifiers)> {
     // Special case: "num_+" contains a '+' but it's not a modifier separator
     // If the string is exactly a numpad key (no modifiers), handle it first
-    if key_str.starts_with("num_") && !key_str.contains("shift+") && !key_str.contains("ctrl+") && !key_str.contains("alt+") {
+    if key_str.starts_with("num_")
+        && !key_str.contains("shift+")
+        && !key_str.contains("ctrl+")
+        && !key_str.contains("alt+")
+    {
         let key_code = match key_str {
             "num_0" => KeyCode::Keypad0,
             "num_1" => KeyCode::Keypad1,
@@ -1000,11 +1905,11 @@ fn default_background_color() -> String {
 }
 
 fn default_startup_music() -> bool {
-    true  // Enable by default - nostalgic easter egg
+    true // Enable by default - nostalgic easter egg
 }
 
 fn default_startup_music_file() -> String {
-    "wizard_music".to_string()  // Default to wizard_music for nostalgia
+    "wizard_music".to_string() // Default to wizard_music for nostalgia
 }
 
 /// Get default keybindings (based on ProfanityFE defaults)
@@ -1012,51 +1917,186 @@ pub fn default_keybinds() -> HashMap<String, KeyBindAction> {
     let mut map = HashMap::new();
 
     // Basic command input
-    map.insert("enter".to_string(), KeyBindAction::Action("send_command".to_string()));
-    map.insert("left".to_string(), KeyBindAction::Action("cursor_left".to_string()));
-    map.insert("right".to_string(), KeyBindAction::Action("cursor_right".to_string()));
-    map.insert("ctrl+left".to_string(), KeyBindAction::Action("cursor_word_left".to_string()));
-    map.insert("ctrl+right".to_string(), KeyBindAction::Action("cursor_word_right".to_string()));
-    map.insert("home".to_string(), KeyBindAction::Action("cursor_home".to_string()));
-    map.insert("end".to_string(), KeyBindAction::Action("cursor_end".to_string()));
-    map.insert("backspace".to_string(), KeyBindAction::Action("cursor_backspace".to_string()));
-    map.insert("delete".to_string(), KeyBindAction::Action("cursor_delete".to_string()));
+    map.insert(
+        "enter".to_string(),
+        KeyBindAction::Action("send_command".to_string()),
+    );
+    map.insert(
+        "left".to_string(),
+        KeyBindAction::Action("cursor_left".to_string()),
+    );
+    map.insert(
+        "right".to_string(),
+        KeyBindAction::Action("cursor_right".to_string()),
+    );
+    map.insert(
+        "ctrl+left".to_string(),
+        KeyBindAction::Action("cursor_word_left".to_string()),
+    );
+    map.insert(
+        "ctrl+right".to_string(),
+        KeyBindAction::Action("cursor_word_right".to_string()),
+    );
+    map.insert(
+        "home".to_string(),
+        KeyBindAction::Action("cursor_home".to_string()),
+    );
+    map.insert(
+        "end".to_string(),
+        KeyBindAction::Action("cursor_end".to_string()),
+    );
+    map.insert(
+        "backspace".to_string(),
+        KeyBindAction::Action("cursor_backspace".to_string()),
+    );
+    map.insert(
+        "delete".to_string(),
+        KeyBindAction::Action("cursor_delete".to_string()),
+    );
 
     // Window management
-    map.insert("tab".to_string(), KeyBindAction::Action("switch_current_window".to_string()));
-    map.insert("alt+page_up".to_string(), KeyBindAction::Action("scroll_current_window_up_one".to_string()));
-    map.insert("alt+page_down".to_string(), KeyBindAction::Action("scroll_current_window_down_one".to_string()));
-    map.insert("page_up".to_string(), KeyBindAction::Action("scroll_current_window_up_page".to_string()));
-    map.insert("page_down".to_string(), KeyBindAction::Action("scroll_current_window_down_page".to_string()));
+    map.insert(
+        "tab".to_string(),
+        KeyBindAction::Action("switch_current_window".to_string()),
+    );
+    map.insert(
+        "alt+page_up".to_string(),
+        KeyBindAction::Action("scroll_current_window_up_one".to_string()),
+    );
+    map.insert(
+        "alt+page_down".to_string(),
+        KeyBindAction::Action("scroll_current_window_down_one".to_string()),
+    );
+    map.insert(
+        "page_up".to_string(),
+        KeyBindAction::Action("scroll_current_window_up_page".to_string()),
+    );
+    map.insert(
+        "page_down".to_string(),
+        KeyBindAction::Action("scroll_current_window_down_page".to_string()),
+    );
 
     // Command history
-    map.insert("up".to_string(), KeyBindAction::Action("previous_command".to_string()));
-    map.insert("down".to_string(), KeyBindAction::Action("next_command".to_string()));
+    map.insert(
+        "up".to_string(),
+        KeyBindAction::Action("previous_command".to_string()),
+    );
+    map.insert(
+        "down".to_string(),
+        KeyBindAction::Action("next_command".to_string()),
+    );
 
     // Search
-    map.insert("ctrl+f".to_string(), KeyBindAction::Action("start_search".to_string()));
-    map.insert("ctrl+page_up".to_string(), KeyBindAction::Action("prev_search_match".to_string()));
-    map.insert("ctrl+page_down".to_string(), KeyBindAction::Action("next_search_match".to_string()));
+    map.insert(
+        "ctrl+f".to_string(),
+        KeyBindAction::Action("start_search".to_string()),
+    );
+    map.insert(
+        "ctrl+page_up".to_string(),
+        KeyBindAction::Action("prev_search_match".to_string()),
+    );
+    map.insert(
+        "ctrl+page_down".to_string(),
+        KeyBindAction::Action("next_search_match".to_string()),
+    );
 
     // Debug/Performance
-    map.insert("f12".to_string(), KeyBindAction::Action("toggle_performance_stats".to_string()));
+    map.insert(
+        "f12".to_string(),
+        KeyBindAction::Action("toggle_performance_stats".to_string()),
+    );
 
     // Numpad movement macros
-    map.insert("num_1".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "sw\r".to_string() }));
-    map.insert("num_2".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "s\r".to_string() }));
-    map.insert("num_3".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "se\r".to_string() }));
-    map.insert("num_4".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "w\r".to_string() }));
-    map.insert("num_5".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "out\r".to_string() }));
-    map.insert("num_6".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "e\r".to_string() }));
-    map.insert("num_7".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "nw\r".to_string() }));
-    map.insert("num_8".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "n\r".to_string() }));
-    map.insert("num_9".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "ne\r".to_string() }));
-    map.insert("num_0".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "down\r".to_string() }));
-    map.insert("num_.".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "up\r".to_string() }));
-    map.insert("num_+".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "look\r".to_string() }));
-    map.insert("num_-".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "info\r".to_string() }));
-    map.insert("num_*".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "exp\r".to_string() }));
-    map.insert("num_/".to_string(), KeyBindAction::Macro(MacroAction { macro_text: "health\r".to_string() }));
+    map.insert(
+        "num_1".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "sw\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_2".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "s\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_3".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "se\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_4".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "w\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_5".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "out\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_6".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "e\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_7".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "nw\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_8".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "n\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_9".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "ne\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_0".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "down\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_.".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "up\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_+".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "look\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_-".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "info\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_*".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "exp\r".to_string(),
+        }),
+    );
+    map.insert(
+        "num_/".to_string(),
+        KeyBindAction::Macro(MacroAction {
+            macro_text: "health\r".to_string(),
+        }),
+    );
 
     // Note: Shift+numpad doesn't work on Windows - the OS doesn't report SHIFT modifier for numpad numeric keys
     // If you want peer keybinds, use alt+numpad or ctrl+numpad instead (those modifiers work with numpad)
@@ -1065,11 +2105,11 @@ pub fn default_keybinds() -> HashMap<String, KeyBindAction> {
 }
 
 fn default_countdown_icon() -> String {
-    "\u{f0c8}".to_string()  // Nerd Font square icon
+    "\u{f0c8}".to_string() // Nerd Font square icon
 }
 
 fn default_poll_timeout_ms() -> u64 {
-    16  // 16ms = ~60 FPS, 8ms = ~120 FPS, 4ms = ~240 FPS
+    16 // 16ms = ~60 FPS, 8ms = ~120 FPS, 4ms = ~240 FPS
 }
 
 fn default_selection_enabled() -> bool {
@@ -1097,7 +2137,7 @@ fn default_min_command_length() -> usize {
 }
 
 fn default_perf_stats_x() -> u16 {
-    0  // Calculated dynamically: terminal_width - 35
+    0 // Calculated dynamically: terminal_width - 35
 }
 
 fn default_perf_stats_y() -> u16 {
@@ -1122,655 +2162,22 @@ fn default_false() -> bool {
     false
 }
 
+fn default_theme_name() -> String {
+    "dark".to_string()
+}
+
 fn default_windows() -> Vec<WindowDef> {
-    // Default layout using absolute terminal cell positions
-    // Assumes typical terminal: ~120 cols x 40 rows
-    // Main: top 24 rows, full width
-    // Vitals: row 24-29 (two rows of 3-row-tall vitals/countdowns)
-    // Thoughts: bottom 10 rows, left 70% (~84 cols)
-    // Speech: bottom 10 rows, right 30% (~36 cols)
+    // Default layout: just main text window and command input
+    // Users can add more windows via .addwindow command
     vec![
-        WindowDef {
-            name: "main".to_string(),
-            widget_type: "text".to_string(),
-            streams: vec!["main".to_string()],
-            row: 0,      // Start at top
-            col: 0,      // Start at left
-            rows: 24,    // 24 rows tall (leave room for 2 rows of vitals)
-            cols: 120,   // Full width (will adjust to actual terminal width)
-            buffer_size: 10000,
-            show_border: true,
-            border_style: None,
-            border_color: None,
-            border_sides: None,
-            title: None,
-            content_align: Some("top-left".to_string()),
-            background_color: None,
-            bar_fill: None,
-            bar_background: None,
-            text_color: None,
-            transparent_background: true,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        // First row of vitals (row 24-26): Core stats
-        WindowDef {
-            name: "health".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 24,
-            col: 0,
-            rows: 3,
-            cols: 24,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Health".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#6e0202".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "mana".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 24,
-            col: 24,
-            rows: 3,
-            cols: 24,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Mana".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#08086d".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "stamina".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 24,
-            col: 48,
-            rows: 3,
-            cols: 24,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Stamina".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#bd7b00".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "spirit".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 24,
-            col: 72,
-            rows: 3,
-            cols: 24,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Spirit".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#6e727c".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "mindstate".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 24,
-            col: 96,
-            rows: 3,
-            cols: 24,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Mind".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#008b8b".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        // Second row of vitals (row 27-29): Stance, Encumbrance, Countdowns
-        WindowDef {
-            name: "stance".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 27,
-            col: 0,
-            rows: 3,
-            cols: 20,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Stance".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#000080".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "encumlevel".to_string(),
-            widget_type: "progress".to_string(),
-            streams: vec![],
-            row: 27,
-            col: 20,
-            rows: 3,
-            cols: 25,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Encumbrance".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#006400".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        // Countdown timers (row 27-29, right side)
-        WindowDef {
-            name: "roundtime".to_string(),
-            widget_type: "countdown".to_string(),
-            streams: vec![],
-            row: 27,
-            col: 45,
-            rows: 3,
-            cols: 10,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("RT".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#ff0000".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "casttime".to_string(),
-            widget_type: "countdown".to_string(),
-            streams: vec![],
-            row: 27,
-            col: 60,
-            rows: 3,
-            cols: 10,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Cast".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#0000ff".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "stuntime".to_string(),
-            widget_type: "countdown".to_string(),
-            streams: vec![],
-            row: 27,
-            col: 75,
-            rows: 3,
-            cols: 10,
-            buffer_size: 0,
-            show_border: true,
-            border_style: Some("single".to_string()),
-            border_color: None,
-            border_sides: None,
-            title: Some("Stun".to_string()),
-            content_align: None,
-            background_color: None,
-            bar_fill: Some("#ffff00".to_string()),
-            bar_background: Some("#000000".to_string()),
-            text_color: None,
-            transparent_background: false,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        // Text windows (row 30+)
-        WindowDef {
-            name: "thoughts".to_string(),
-            widget_type: "text".to_string(),
-            streams: vec!["thoughts".to_string()],
-            row: 30,     // Start at row 30 (below vitals)
-            col: 0,      // Left side
-            rows: 10,    // 10 rows tall
-            cols: 84,    // 70% of width
-            buffer_size: 500,
-            show_border: true,
-            border_style: None,
-            border_color: None,
-            border_sides: None,
-            title: None,
-            content_align: Some("top-left".to_string()),
-            background_color: None,
-            bar_fill: None,
-            bar_background: None,
-            text_color: None,
-            transparent_background: true,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        WindowDef {
-            name: "speech".to_string(),
-            widget_type: "text".to_string(),
-            streams: vec!["speech".to_string(), "whisper".to_string()],
-            row: 30,     // Start at row 30 (same as thoughts)
-            col: 84,     // Start at col 84 (right of thoughts)
-            rows: 10,    // 10 rows tall
-            cols: 36,    // 30% of width
-            buffer_size: 1000,
-            show_border: true,
-            border_style: None,
-            border_color: None,
-            border_sides: None,
-            title: None,
-            content_align: Some("top-left".to_string()),
-            background_color: None,
-            bar_fill: None,
-            bar_background: None,
-            text_color: None,
-            transparent_background: true,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-        },
-        // Command input (bottom of screen)
-        WindowDef {
-            name: "command_input".to_string(),
-            widget_type: "command_input".to_string(),
-            streams: vec![],
-            row: 40,     // Bottom of screen (will be calculated dynamically)
-            col: 0,
-            rows: 3,     // 3 rows tall (with border)
-            cols: 120,   // Full width (will use actual terminal width)
-            buffer_size: 0,
-            show_border: true,
-            border_style: None,
-            border_color: None,
-            border_sides: None,
-            title: None,
-            content_align: None,
-            background_color: None,
-            bar_fill: None,
-            bar_background: None,
-            text_color: None,
-            transparent_background: true,
-            locked: false,
-            indicator_colors: None,
-            dashboard_layout: None,
-            dashboard_indicators: None,
-            dashboard_spacing: None,
-            dashboard_hide_inactive: None,
-            visible_count: None,
-            effect_category: None,
-            tabs: None,
-            tab_bar_position: None,
-            tab_active_color: None,
-            tab_inactive_color: None,
-            tab_unread_color: None,
-            tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: Some(1),  // Command input needs at least 1 row
-            max_rows: Some(5),  // Don't let it get too tall
-            min_cols: Some(20), // Needs some width to be usable
-            max_cols: None,     // Can be full width
-            numbers_only: false,
-            ..Default::default()
-        },
+        Config::get_window_template("main").expect("main template should exist"),
+        Config::get_window_template("command_input").expect("command_input template should exist"),
     ]
 }
 
 impl Layout {
     /// Load layout from file using new profile-based structure
-    /// Priority: ~/.vellum-fe/{character}/layout.toml → ~/.vellum-fe/layouts/layout.toml → embedded
+    /// Priority: ~/.two-face/{character}/layout.toml → ~/.two-face/layouts/layout.toml → embedded
     pub fn load(character: Option<&str>) -> Result<Self> {
         let (layout, _base_name) = Self::load_with_terminal_size(character, None)?;
         Ok(layout)
@@ -1780,26 +2187,40 @@ impl Layout {
     /// Returns (layout, base_layout_name) where base_layout_name is the source layout file name (without .toml)
     ///
     /// New structure:
-    /// 1. ~/.vellum-fe/{character}/layout.toml (auto-save from exit)
-    /// 2. ~/.vellum-fe/default/layouts/default.toml (shared default)
+    /// 1. ~/.two-face/{character}/layout.toml (auto-save from exit)
+    /// 2. ~/.two-face/default/layouts/default.toml (shared default)
     /// 3. Embedded default
-    pub fn load_with_terminal_size(character: Option<&str>, terminal_size: Option<(u16, u16)>) -> Result<(Self, Option<String>)> {
+    pub fn load_with_terminal_size(
+        character: Option<&str>,
+        terminal_size: Option<(u16, u16)>,
+    ) -> Result<(Self, Option<String>)> {
         let profile_dir = Config::profile_dir(character)?;
-        let shared_layouts_dir = Config::layouts_dir()?;  // ~/.vellum-fe/default/layouts/
+        let default_profile_dir = Config::profile_dir(None)?; // ~/.two-face/default/
+        let shared_layouts_dir = Config::layouts_dir()?; // ~/.two-face/layouts/ (templates only)
 
-        // 1. Try character auto-save layout: ~/.vellum-fe/{character}/layout.toml
+        // 1. Try character auto-save layout: ~/.two-face/{character}/layout.toml
         let auto_layout_path = profile_dir.join("layout.toml");
         if auto_layout_path.exists() {
             tracing::info!("Loading auto-save layout from {:?}", auto_layout_path);
             let mut layout = Self::load_from_file(&auto_layout_path)?;
-            let base_name = layout.base_layout.clone().unwrap_or_else(|| "default".to_string());
+            let base_name = layout
+                .base_layout
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
 
             // Check if we need to scale from base layout
             if let Some((curr_width, curr_height)) = terminal_size {
-                if let (Some(layout_width), Some(layout_height)) = (layout.terminal_width, layout.terminal_height) {
+                if let (Some(layout_width), Some(layout_height)) =
+                    (layout.terminal_width, layout.terminal_height)
+                {
                     if curr_width != layout_width || curr_height != layout_height {
-                        tracing::info!("Terminal size changed from {}x{} to {}x{}, scaling from base layout",
-                            layout_width, layout_height, curr_width, curr_height);
+                        tracing::info!(
+                            "Terminal size changed from {}x{} to {}x{}, scaling from base layout",
+                            layout_width,
+                            layout_height,
+                            curr_width,
+                            curr_height
+                        );
 
                         // Try to load base layout for accurate scaling
                         let base_path = shared_layouts_dir.join(format!("{}.toml", base_name));
@@ -1824,18 +2245,23 @@ impl Layout {
             return Ok((layout, Some(base_name)));
         }
 
-        // 2. Try shared default layout: ~/.vellum-fe/layouts/layout.toml
-        let default_path = shared_layouts_dir.join("layout.toml");
+        // 2. Try default profile auto-save layout: ~/.two-face/default/layout.toml
+        let default_path = default_profile_dir.join("layout.toml");
         if default_path.exists() {
-            tracing::info!("Loading shared default layout from {:?}", default_path);
+            tracing::info!(
+                "Loading default profile auto-save layout from {:?}",
+                default_path
+            );
             let layout = Self::load_from_file(&default_path)?;
             return Ok((layout, Some("layout".to_string())));
         }
 
         // 3. Fall back to embedded default (should have been extracted by extract_defaults())
-        tracing::warn!("No layout found, using embedded default (this should have been extracted!)");
-        let layout: Layout = toml::from_str(LAYOUT_DEFAULT)
-            .context("Failed to parse embedded default layout")?;
+        tracing::warn!(
+            "No layout found, using embedded default (this should have been extracted!)"
+        );
+        let layout: Layout =
+            toml::from_str(LAYOUT_DEFAULT).context("Failed to parse embedded default layout")?;
 
         Ok((layout, Some("layout".to_string())))
     }
@@ -1846,57 +2272,86 @@ impl Layout {
         let base_height = self.terminal_height.unwrap_or(new_height);
 
         if base_width == 0 || base_height == 0 {
-            tracing::warn!("Invalid base terminal size ({}x{}), skipping scale", base_width, base_height);
+            tracing::warn!(
+                "Invalid base terminal size ({}x{}), skipping scale",
+                base_width,
+                base_height
+            );
             return;
         }
 
         let scale_x = new_width as f32 / base_width as f32;
         let scale_y = new_height as f32 / base_height as f32;
 
-        tracing::info!("Scaling layout from {}x{} to {}x{} (scale: {:.2}x, {:.2}y)",
-            base_width, base_height, new_width, new_height, scale_x, scale_y);
+        tracing::info!(
+            "Scaling layout from {}x{} to {}x{} (scale: {:.2}x, {:.2}y)",
+            base_width,
+            base_height,
+            new_width,
+            new_height,
+            scale_x,
+            scale_y
+        );
 
         for window in &mut self.windows {
-            let old_col = window.col;
-            let old_row = window.row;
-            let old_cols = window.cols;
-            let old_rows = window.rows;
+            // Capture name and type before mutable borrow
+            let window_name = window.name().to_string();
+            let window_type = window.widget_type().to_string();
 
-            window.col = (window.col as f32 * scale_x).round() as u16;
-            window.row = (window.row as f32 * scale_y).round() as u16;
-            window.cols = (window.cols as f32 * scale_x).round() as u16;
-            window.rows = (window.rows as f32 * scale_y).round() as u16;
+            let base = window.base_mut();
+            let old_col = base.col;
+            let old_row = base.row;
+            let old_cols = base.cols;
+            let old_rows = base.rows;
+
+            base.col = (base.col as f32 * scale_x).round() as u16;
+            base.row = (base.row as f32 * scale_y).round() as u16;
+            base.cols = (base.cols as f32 * scale_x).round() as u16;
+            base.rows = (base.rows as f32 * scale_y).round() as u16;
 
             // Ensure minimum sizes
-            if window.cols < 1 { window.cols = 1; }
-            if window.rows < 1 { window.rows = 1; }
+            if base.cols < 1 {
+                base.cols = 1;
+            }
+            if base.rows < 1 {
+                base.rows = 1;
+            }
 
             // Respect min/max constraints if set
-            if let Some(min_cols) = window.min_cols {
-                if window.cols < min_cols {
-                    window.cols = min_cols;
+            if let Some(min_cols) = base.min_cols {
+                if base.cols < min_cols {
+                    base.cols = min_cols;
                 }
             }
-            if let Some(max_cols) = window.max_cols {
-                if window.cols > max_cols {
-                    window.cols = max_cols;
+            if let Some(max_cols) = base.max_cols {
+                if base.cols > max_cols {
+                    base.cols = max_cols;
                 }
             }
-            if let Some(min_rows) = window.min_rows {
-                if window.rows < min_rows {
-                    window.rows = min_rows;
+            if let Some(min_rows) = base.min_rows {
+                if base.rows < min_rows {
+                    base.rows = min_rows;
                 }
             }
-            if let Some(max_rows) = window.max_rows {
-                if window.rows > max_rows {
-                    window.rows = max_rows;
+            if let Some(max_rows) = base.max_rows {
+                if base.rows > max_rows {
+                    base.rows = max_rows;
                 }
             }
 
-            tracing::debug!("  {} [{}]: pos {}x{} -> {}x{}, size {}x{} -> {}x{}",
-                window.name, window.widget_type,
-                old_col, old_row, window.col, window.row,
-                old_cols, old_rows, window.cols, window.rows);
+            tracing::debug!(
+                "  {} [{}]: pos {}x{} -> {}x{}, size {}x{} -> {}x{}",
+                window_name,
+                window_type,
+                old_col,
+                old_row,
+                base.col,
+                base.row,
+                old_cols,
+                old_rows,
+                base.cols,
+                base.rows
+            );
         }
 
         // Update terminal size to new size
@@ -1905,34 +2360,51 @@ impl Layout {
     }
 
     pub fn load_from_file(path: &std::path::Path) -> Result<Self> {
-        let contents = fs::read_to_string(path)
-            .context(format!("Failed to read layout file: {:?}", path))?;
+        let contents =
+            fs::read_to_string(path).context(format!("Failed to read layout file: {:?}", path))?;
         let mut layout: Layout = toml::from_str(&contents)
             .context(format!("Failed to parse layout file: {:?}", path))?;
 
         // Debug: Log what terminal size was loaded
         tracing::debug!(
             "Loaded layout from {:?}: terminal_width={:?}, terminal_height={:?}",
-            path, layout.terminal_width, layout.terminal_height
+            path,
+            layout.terminal_width,
+            layout.terminal_height
         );
 
         // Migration: Ensure command_input exists in windows array with valid values
-        if let Some(idx) = layout.windows.iter().position(|w| w.widget_type == "command_input") {
+        if let Some(idx) = layout
+            .windows
+            .iter()
+            .position(|w| w.widget_type() == "command_input")
+        {
             // Command input exists but might have invalid values (cols=0, rows=0, etc)
-            let cmd_input = &mut layout.windows[idx];
-            if cmd_input.cols == 0 || cmd_input.rows == 0 {
-                tracing::warn!("Command input has invalid size ({}x{}), fixing with defaults", cmd_input.rows, cmd_input.cols);
+            let cmd_input_base = layout.windows[idx].base_mut();
+            if cmd_input_base.cols == 0 || cmd_input_base.rows == 0 {
+                tracing::warn!(
+                    "Command input has invalid size ({}x{}), fixing with defaults",
+                    cmd_input_base.rows,
+                    cmd_input_base.cols
+                );
                 // Get defaults from default_windows()
-                if let Some(default_cmd) = default_windows().into_iter().find(|w| w.widget_type == "command_input") {
-                    cmd_input.row = default_cmd.row;
-                    cmd_input.col = default_cmd.col;
-                    cmd_input.rows = default_cmd.rows;
-                    cmd_input.cols = default_cmd.cols;
+                if let Some(default_cmd) = default_windows()
+                    .into_iter()
+                    .find(|w| w.widget_type() == "command_input")
+                {
+                    let default_base = default_cmd.base();
+                    cmd_input_base.row = default_base.row;
+                    cmd_input_base.col = default_base.col;
+                    cmd_input_base.rows = default_base.rows;
+                    cmd_input_base.cols = default_base.cols;
                 }
             }
         } else {
             // Command input doesn't exist - add it
-            if let Some(cmd_input) = default_windows().into_iter().find(|w| w.widget_type == "command_input") {
+            if let Some(cmd_input) = default_windows()
+                .into_iter()
+                .find(|w| w.widget_type() == "command_input")
+            {
                 tracing::info!("Migrating command_input to windows array");
                 layout.windows.push(cmd_input);
             }
@@ -1944,7 +2416,7 @@ impl Layout {
     /// Save layout to file
     /// If force_terminal_size is true, always update terminal_width/height to terminal_size
     /// Save layout to shared layouts directory (.savelayout command)
-    /// Saves to: ~/.vellum-fe/default/layouts/{name}.toml
+    /// Saves to: ~/.two-face/default/layouts/{name}.toml
     /// Normalize windows before saving - convert None colors back to "-" to preserve transparency
     fn normalize_windows_for_save(&mut self) {
         for window in &mut self.windows {
@@ -1955,26 +2427,30 @@ impl Layout {
                 }
             };
 
-            normalize(&mut window.background_color);
-            normalize(&mut window.border_color);
-            normalize(&mut window.bar_fill);
-            normalize(&mut window.bar_background);
-            normalize(&mut window.text_color);
-            normalize(&mut window.tab_active_color);
-            normalize(&mut window.tab_inactive_color);
-            normalize(&mut window.tab_unread_color);
-            normalize(&mut window.compass_active_color);
-            normalize(&mut window.compass_inactive_color);
+            let base = window.base_mut();
+            normalize(&mut base.background_color);
+            normalize(&mut base.border_color);
+            normalize(&mut base.text_color);
         }
     }
 
-    pub fn save(&mut self, name: &str, terminal_size: Option<(u16, u16)>, force_terminal_size: bool) -> Result<()> {
+    pub fn save(
+        &mut self,
+        name: &str,
+        terminal_size: Option<(u16, u16)>,
+        force_terminal_size: bool,
+    ) -> Result<()> {
         // Capture terminal size for layout baseline
         if force_terminal_size {
             // Force update terminal size (used by .resize to match resized widgets)
             if let Some((width, height)) = terminal_size {
-                tracing::info!("Forcing layout terminal size to {}x{} (was {:?}x{:?})",
-                    width, height, self.terminal_width, self.terminal_height);
+                tracing::info!(
+                    "Forcing layout terminal size to {}x{} (was {:?}x{:?})",
+                    width,
+                    height,
+                    self.terminal_width,
+                    self.terminal_height
+                );
                 self.terminal_width = Some(width);
                 self.terminal_height = Some(height);
             }
@@ -1983,7 +2459,11 @@ impl Layout {
             if let Some((width, height)) = terminal_size {
                 self.terminal_width = Some(width);
                 self.terminal_height = Some(height);
-                tracing::info!("Set layout terminal size to {}x{} (was not previously set)", width, height);
+                tracing::info!(
+                    "Set layout terminal size to {}x{} (was not previously set)",
+                    width,
+                    height
+                );
             }
         } else {
             tracing::debug!(
@@ -1995,23 +2475,26 @@ impl Layout {
         // Normalize windows before saving (convert None colors to "-")
         self.normalize_windows_for_save();
 
-        // Save to shared layouts directory: ~/.vellum-fe/default/layouts/{name}.toml
+        // Save to shared layouts directory: ~/.two-face/default/layouts/{name}.toml
         let layouts_dir = Config::layouts_dir()?;
         fs::create_dir_all(&layouts_dir)?;
 
         let layout_path = layouts_dir.join(format!("{}.toml", name));
-        let toml_string = toml::to_string_pretty(&self)
-            .context("Failed to serialize layout")?;
-        fs::write(&layout_path, toml_string)
-            .context("Failed to write layout file")?;
+        let toml_string = toml::to_string_pretty(&self).context("Failed to serialize layout")?;
+        fs::write(&layout_path, toml_string).context("Failed to write layout file")?;
 
         tracing::info!("Saved layout '{}' to {:?}", name, layout_path);
         Ok(())
     }
 
     /// Save as character auto-save layout (on exit/resize)
-    /// Saves to: ~/.vellum-fe/{character}/layout.toml
-    pub fn save_auto(&mut self, character: &str, base_layout_name: &str, terminal_size: Option<(u16, u16)>) -> Result<()> {
+    /// Saves to: ~/.two-face/{character}/layout.toml
+    pub fn save_auto(
+        &mut self,
+        character: &str,
+        base_layout_name: &str,
+        terminal_size: Option<(u16, u16)>,
+    ) -> Result<()> {
         // Set base_layout reference
         self.base_layout = Some(base_layout_name.to_string());
 
@@ -2024,20 +2507,82 @@ impl Layout {
         // Normalize windows before saving (convert None colors to "-")
         self.normalize_windows_for_save();
 
-        // Save to character profile: ~/.vellum-fe/{character}/layout.toml
+        // Save to character profile: ~/.two-face/{character}/layout.toml
         let profile_dir = Config::profile_dir(Some(character))?;
         fs::create_dir_all(&profile_dir)?;
 
         let layout_path = profile_dir.join("layout.toml");
-        let toml_string = toml::to_string_pretty(&self)
-            .context("Failed to serialize auto layout")?;
-        fs::write(&layout_path, toml_string)
-            .context("Failed to write auto layout file")?;
+        let toml_string =
+            toml::to_string_pretty(&self).context("Failed to serialize auto layout")?;
+        fs::write(&layout_path, toml_string).context("Failed to write auto layout file")?;
 
-        tracing::info!("Saved auto layout for {} to {:?} (base: {}, terminal: {:?}x{:?})",
-            character, layout_path, base_layout_name, self.terminal_width, self.terminal_height);
+        tracing::info!(
+            "Saved auto layout for {} to {:?} (base: {}, terminal: {:?}x{:?})",
+            character,
+            layout_path,
+            base_layout_name,
+            self.terminal_width,
+            self.terminal_height
+        );
 
         Ok(())
+    }
+
+    /// Get a window from the layout by name
+    pub fn get_window(&self, name: &str) -> Option<&WindowDef> {
+        self.windows.iter().find(|w| w.name() == name)
+    }
+
+    /// Add a window to the layout (from template or make visible if exists)
+    pub fn add_window(&mut self, name: &str) -> Result<()> {
+        // Check if window already exists in layout
+        if let Some(existing) = self.windows.iter_mut().find(|w| w.name() == name) {
+            // Just make it visible
+            existing.base_mut().visible = true;
+            tracing::info!("Window '{}' already exists, setting visible=true", name);
+            return Ok(());
+        }
+
+        // Get template
+        let mut window_def = Config::get_window_template(name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown window template: {}", name))?;
+
+        // Set visible
+        window_def.base_mut().visible = true;
+
+        // Add to layout
+        self.windows.push(window_def);
+        tracing::info!("Added window '{}' from template", name);
+        Ok(())
+    }
+
+    /// Hide a window (set visible = false)
+    pub fn hide_window(&mut self, name: &str) -> Result<()> {
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|w| w.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("Window not found: {}", name))?;
+
+        window.base_mut().visible = false;
+        tracing::info!("Window '{}' hidden (visible=false)", name);
+        Ok(())
+    }
+
+    /// Remove window from layout if it matches the default template
+    /// (keeps layout file minimal by not saving unmodified windows)
+    pub fn remove_window_if_default(&mut self, name: &str) {
+        if let Some(template) = Config::get_window_template(name) {
+            self.windows.retain(|w| {
+                if w.name() == name {
+                    // Compare window to template - if identical, remove (return false to filter out)
+                    // If different, keep (return true)
+                    w != &template
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
@@ -2049,14 +2594,22 @@ impl Config {
             if mapping.matches(width, height) {
                 tracing::info!(
                     "Found layout mapping for {}x{}: '{}' (range: {}x{} to {}x{})",
-                    width, height, mapping.layout,
-                    mapping.min_width, mapping.min_height,
-                    mapping.max_width, mapping.max_height
+                    width,
+                    height,
+                    mapping.layout,
+                    mapping.min_width,
+                    mapping.min_height,
+                    mapping.max_width,
+                    mapping.max_height
                 );
                 return Some(mapping.layout.clone());
             }
         }
-        tracing::debug!("No layout mapping found for terminal size {}x{}", width, height);
+        tracing::debug!(
+            "No layout mapping found for terminal size {}x{}",
+            width,
+            height
+        );
         None
     }
 
@@ -2071,7 +2624,8 @@ impl Config {
         }
 
         // If it's "none" or empty, return None
-        if color_input.is_empty() || color_input.eq_ignore_ascii_case("none") || color_input == "-" {
+        if color_input.is_empty() || color_input.eq_ignore_ascii_case("none") || color_input == "-"
+        {
             return None;
         }
 
@@ -2088,2099 +2642,820 @@ impl Config {
         Some(color_input.to_string())
     }
 
+    /// Get the currently active theme
+    /// Returns the theme specified by active_theme, or the default dark theme if not found
+    pub fn get_theme(&self) -> crate::theme::AppTheme {
+        crate::theme::ThemePresets::all_with_custom(self.character.as_deref())
+            .get(&self.active_theme)
+            .cloned()
+            .unwrap_or_else(|| crate::theme::ThemePresets::dark())
+    }
+
     /// Get a window template by name
     /// Returns a WindowDef with default positioning that can be customized
     pub fn get_window_template(name: &str) -> Option<WindowDef> {
-        // Default small window size and position (can be moved/resized by user)
-        let default_row = 0;
-        let default_col = 0;
-        let default_rows = 10;
-        let default_cols = 40;
+        // Create base defaults that all windows share
+        let base_defaults = WindowBase {
+            name: String::new(), // Will be overridden
+            row: 0,
+            col: 0,
+            rows: 10,
+            cols: 40,
+            show_border: true,
+            border_style: "single".to_string(),
+            border_sides: BorderSides::default(),
+            border_color: None,
+            show_title: true,
+            title: None, // Will be overridden
+            background_color: None,
+            text_color: None,
+            transparent_background: true,
+            locked: false,
+            min_rows: None,
+            max_rows: None,
+            min_cols: None,
+            max_cols: None,
+            visible: true,
+        };
 
         match name {
-            "main" => Some(WindowDef {
-                name: "main".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["main".to_string()],
-                row: 0,
-                col: 0,
-                rows: 30,
-                cols: 120,
-                buffer_size: 10000,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Main".to_string()),
-                content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+            "main" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "main".to_string(),
+                    title: Some("Story".to_string()),
+                    rows: 37,
+                    cols: 120,
+                    ..base_defaults
+                },
+                data: TextWidgetData {
+                    streams: vec!["main".to_string()],
+                    buffer_size: 10000,
+                },
             }),
-            "thoughts" | "thought" => Some(WindowDef {
-                name: "thoughts".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["thoughts".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Thoughts".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "room" => Some(WindowDef::Room {
+                base: WindowBase {
+                    name: "room".to_string(),
+                    title: Some("Room".to_string()),
+                    rows: 10,
+                    cols: 80,
+                    min_rows: Some(5),
+                    max_rows: Some(10),
+                    ..base_defaults.clone()
+                },
+                data: RoomWidgetData {
+                    buffer_size: 0,
+                    show_desc: true,
+                    show_objs: true,
+                    show_players: true,
+                    show_exits: true,
+                    show_name: false,
+                },
             }),
-            "speech" => Some(WindowDef {
-                name: "speech".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["speech".to_string(), "whisper".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 1000,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Speech".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "inventory" => Some(WindowDef::Inventory {
+                base: WindowBase {
+                    name: "inventory".to_string(),
+                    title: Some("Inventory".to_string()),
+                    rows: 20,
+                    cols: 40,
+                    min_rows: Some(5),
+                    max_rows: Some(50),
+                    ..base_defaults.clone()
+                },
+                data: InventoryWidgetData {
+                    streams: vec!["inv".to_string()],
+                    buffer_size: 0, // No scrollback for inventory (content replaced each update)
+                },
             }),
-            "familiar" => Some(WindowDef {
-                name: "familiar".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["familiar".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Familiar".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "command_input" => Some(WindowDef::CommandInput {
+                base: WindowBase {
+                    name: "command_input".to_string(),
+                    title: Some("Command Input".to_string()),
+                    rows: 3,
+                    cols: 120,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: CommandInputWidgetData::default(),
             }),
-            "inventory" | "inv" => Some(WindowDef {
-                name: "inventory".to_string(),
-                widget_type: "inventory".to_string(),
-                streams: vec!["inv".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: 20,
-                cols: 60,
-                buffer_size: 0, // Not used by inventory widget
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Inventory".to_string()),
-            content_align: Some("top".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "health" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "health".to_string(),
+                    title: Some("Health".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Health".to_string()),
+                    color: Some("#6e0202".to_string()), // Dark red
+                },
             }),
-            "room" => Some(WindowDef {
-                name: "room".to_string(),
-                widget_type: "room".to_string(),
-                streams: vec!["room".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 100,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Room".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "mana" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "mana".to_string(),
+                    title: Some("Mana".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Mana".to_string()),
+                    color: Some("#08086d".to_string()), // Dark blue
+                },
             }),
-            "local_map" => Some(WindowDef {
-                name: "map".to_string(),
-                widget_type: "map".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 25,
-                cols: 40,
-                buffer_size: 0,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Local Map".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "stamina" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "stamina".to_string(),
+                    title: Some("Stamina".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Stamina".to_string()),
+                    color: Some("#bd7b00".to_string()), // Orange
+                },
             }),
-            "spells" => Some(WindowDef {
-                name: "spells".to_string(),
-                widget_type: "spells".to_string(),
-                streams: vec!["Spells".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: 25,
-                cols: 40,
-                buffer_size: 0, // Not used by spells widget
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Spells".to_string()),
-            content_align: Some("top".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "spirit" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "spirit".to_string(),
+                    title: Some("Spirit".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Spirit".to_string()),
+                    color: Some("#6e727c".to_string()), // Gray
+                },
             }),
-            "logon" | "logons" => Some(WindowDef {
-                name: "logons".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["logons".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Logons".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "encumlevel" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "encumlevel".to_string(),
+                    title: Some("Encumbrance".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Encumbrance".to_string()),
+                    color: Some("#006400".to_string()), // Dark green
+                },
             }),
-            "death" | "deaths" => Some(WindowDef {
-                name: "deaths".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["deaths".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Deaths".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "pbarStance" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "pbarStance".to_string(),
+                    title: Some("Stance".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Stance".to_string()),
+                    color: Some("#000080".to_string()), // Navy
+                },
             }),
-            "arrivals" => Some(WindowDef {
-                name: "arrivals".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["arrivals".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Arrivals".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "mindState" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "mindState".to_string(),
+                    title: Some("Mind".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Mind".to_string()),
+                    color: Some("#008b8b".to_string()), // Cyan/teal
+                },
             }),
-            "ambients" => Some(WindowDef {
-                name: "ambients".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["ambients".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Ambients".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "lblBPs" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "lblBPs".to_string(),
+                    title: Some("Blood Points".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                    label: Some("Blood Points".to_string()),
+                    color: Some("#8B0000".to_string()), // Dark red
+                },
             }),
-            "announcements" => Some(WindowDef {
-                name: "announcements".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["announcements".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Announcements".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "roundtime" => Some(WindowDef::Countdown {
+                base: WindowBase {
+                    name: "roundtime".to_string(),
+                    title: Some("RT".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    text_color: Some("#FF0000".to_string()), // Red
+                    ..base_defaults.clone()
+                },
+                data: CountdownWidgetData {
+                    label: None,
+                    icon: Some('█'),
+                },
             }),
-            "loot" => Some(WindowDef {
-                name: "loot".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["loot".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 500,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Loot".to_string()),
-            content_align: Some("center".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "casttime" => Some(WindowDef::Countdown {
+                base: WindowBase {
+                    name: "casttime".to_string(),
+                    title: Some("Cast".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    text_color: Some("#00BFFF".to_string()), // Deep sky blue
+                    ..base_defaults.clone()
+                },
+                data: CountdownWidgetData {
+                    label: None,
+                    icon: Some('█'),
+                },
             }),
-            "bounty" | "bounties" => Some(WindowDef {
-                name: "bounty".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["bounty".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 0,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Bounties".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "stuntime" => Some(WindowDef::Countdown {
+                base: WindowBase {
+                    name: "stuntime".to_string(),
+                    title: Some("Stun".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    text_color: Some("#FFFF00".to_string()), // Yellow
+                    ..base_defaults.clone()
+                },
+                data: CountdownWidgetData {
+                    label: None,
+                    icon: Some('█'),
+                },
             }),
-            "spells" => Some(WindowDef {
-                name: "spells".to_string(),
-                widget_type: "text".to_string(),
-                streams: vec!["Spells".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: default_rows,
-                cols: default_cols,
-                buffer_size: 10000,
-                show_border: true,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("Spells".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "compass" => Some(WindowDef::Compass {
+                base: WindowBase {
+                    name: "compass".to_string(),
+                    title: Some("Exits".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 5, // 3 for compass grid + 2 for border
+                    cols: 9, // 7 for compass grid + 2 for border
+                    show_border: true,
+                    min_rows: Some(5),
+                    max_rows: Some(5),
+                    min_cols: Some(9),
+                    max_cols: Some(9),
+                    ..base_defaults.clone()
+                },
+                data: CompassWidgetData {
+                    active_color: Some("#00FF00".to_string()),   // Green
+                    inactive_color: Some("#333333".to_string()), // Dark gray
+                },
             }),
-            "health" | "hp" => Some(WindowDef {
-                name: "health".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Health".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#6e0202".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "injuries" | "injury_doll" => Some(WindowDef::InjuryDoll {
+                base: WindowBase {
+                    name: "injuries".to_string(),
+                    title: Some("Injuries".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 8,  // 6 for injury doll + 2 for border
+                    cols: 10, // 8 for injury doll (5+3 for labels) + 2 for border
+                    show_border: true,
+                    min_rows: Some(8),
+                    max_rows: Some(8),
+                    min_cols: Some(10),
+                    max_cols: Some(10),
+                    ..base_defaults.clone()
+                },
+                data: InjuryDollWidgetData {
+                    injury_default_color: None,
+                    injury1_color: Some("#aa5500".to_string()), // Brown
+                    injury2_color: Some("#ff8800".to_string()), // Orange
+                    injury3_color: Some("#ff0000".to_string()), // Bright red
+                    scar1_color: Some("#999999".to_string()),   // Light gray
+                    scar2_color: Some("#777777".to_string()),   // Medium gray
+                    scar3_color: Some("#555555".to_string()),   // Darker gray
+                },
             }),
-            "mana" | "mp" => Some(WindowDef {
-                name: "mana".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Mana".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#08086d".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "buffs" => Some(WindowDef::ActiveEffects {
+                base: WindowBase {
+                    name: "buffs".to_string(),
+                    title: Some("Buffs".to_string()),
+                    rows: 10,
+                    cols: 30,
+                    show_border: true,
+                    text_color: Some("#00FF00".to_string()), // Green
+                    ..base_defaults.clone()
+                },
+                data: ActiveEffectsWidgetData {
+                    category: "Buffs".to_string(),
+                },
             }),
-            "stamina" | "stam" => Some(WindowDef {
-                name: "stamina".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Stamina".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#bd7b00".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "debuffs" => Some(WindowDef::ActiveEffects {
+                base: WindowBase {
+                    name: "debuffs".to_string(),
+                    title: Some("Debuffs".to_string()),
+                    rows: 10,
+                    cols: 30,
+                    show_border: true,
+                    text_color: Some("#FF0000".to_string()), // Red
+                    ..base_defaults.clone()
+                },
+                data: ActiveEffectsWidgetData {
+                    category: "Debuffs".to_string(),
+                },
             }),
-            "spirit" => Some(WindowDef {
-                name: "spirit".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Spirit".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#6e727c".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "cooldowns" => Some(WindowDef::ActiveEffects {
+                base: WindowBase {
+                    name: "cooldowns".to_string(),
+                    title: Some("Cooldowns".to_string()),
+                    rows: 10,
+                    cols: 30,
+                    show_border: true,
+                    text_color: Some("#FFA500".to_string()), // Orange
+                    ..base_defaults.clone()
+                },
+                data: ActiveEffectsWidgetData {
+                    category: "Cooldowns".to_string(),
+                },
             }),
-            "mindstate" | "mind" => Some(WindowDef {
-                name: "mindState".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Mind".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#008b8b".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "active_spells" => Some(WindowDef::ActiveEffects {
+                base: WindowBase {
+                    name: "active_spells".to_string(),
+                    title: Some("Active Spells".to_string()),
+                    rows: 10,
+                    cols: 30,
+                    show_border: true,
+                    text_color: Some("#00BFFF".to_string()), // Deep sky blue
+                    ..base_defaults.clone()
+                },
+                data: ActiveEffectsWidgetData {
+                    category: "ActiveSpells".to_string(),
+                },
             }),
-            "encumbrance" | "encum" | "encumlevel" => Some(WindowDef {
-                name: "encumlevel".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Encumbrance".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#006400".to_string()), // Will change dynamically based on value
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "left_hand" => Some(WindowDef::Hand {
+                base: WindowBase {
+                    name: "left_hand".to_string(),
+                    title: Some("Left Hand".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: HandWidgetData {},
             }),
-            "stance" | "pbarstance" => Some(WindowDef {
-                name: "pbarStance".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Stance".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#000080".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "right_hand" => Some(WindowDef::Hand {
+                base: WindowBase {
+                    name: "right_hand".to_string(),
+                    title: Some("Right Hand".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: HandWidgetData {},
             }),
-            "bloodpoints" | "blood" | "lblbps" => Some(WindowDef {
-                name: "lblBPs".to_string(),
-                widget_type: "progress".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 30,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Blood Points".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#4d0085".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "spell_hand" => Some(WindowDef::Hand {
+                base: WindowBase {
+                    name: "spell_hand".to_string(),
+                    title: Some("Spell".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: HandWidgetData {},
             }),
-            "roundtime" | "rt" => Some(WindowDef {
-                name: "roundtime".to_string(),
-                widget_type: "countdown".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 10,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("RT".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#ff0000".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            // Text window templates for common streams
+            "thoughts" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "thoughts".to_string(),
+                    title: Some("Thoughts".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#00CED1".to_string()), // Dark turquoise
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["thoughts".to_string()],
+                    buffer_size: 1000,
+                },
             }),
-            "casttime" | "cast" => Some(WindowDef {
-                name: "casttime".to_string(),
-                widget_type: "countdown".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 10,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Cast".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#0000ff".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "speech" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "speech".to_string(),
+                    title: Some("Speech".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#FFD700".to_string()), // Gold
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["speech".to_string()],
+                    buffer_size: 1000,
+                },
             }),
-            "stun" | "stuntime" => Some(WindowDef {
-                name: "stuntime".to_string(),
-                widget_type: "countdown".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 10,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Stun".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#ffff00".to_string()),
-                bar_background: Some("#000000".to_string()),
-                text_color: None,
-                transparent_background: false,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "announcements" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "announcements".to_string(),
+                    title: Some("Announcements".to_string()),
+                    rows: 10,
+                    cols: 50,
+                    show_border: true,
+                    text_color: Some("#FF1493".to_string()), // Deep pink
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["announcements".to_string()],
+                    buffer_size: 500,
+                },
             }),
-            "compass" => Some(WindowDef {
-                name: "compass".to_string(),
-                widget_type: "compass".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 5,  // 3 rows for grid + 2 for border
-                cols: 10,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Exits".to_string()),
-            content_align: Some("center-left".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "loot" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "loot".to_string(),
+                    title: Some("Loot".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#FFD700".to_string()), // Gold
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["loot".to_string()],
+                    buffer_size: 500,
+                },
             }),
-            "injuries" | "injury_doll" => Some(WindowDef {
-                name: "injuries".to_string(),
-                widget_type: "injury_doll".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 8,  // 6 rows for body + 2 for border
-                cols: 10,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Injuries".to_string()),
-            content_align: Some("center-left".to_string()),
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "death" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "death".to_string(),
+                    title: Some("Death".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#DC143C".to_string()), // Crimson
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["death".to_string()],
+                    buffer_size: 500,
+                },
             }),
-            "lefthand" => Some(WindowDef {
-                name: "lefthand".to_string(),
-                widget_type: "lefthand".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 20, // Hand item display
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Left Hand".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-                hand_icon: Some("L:".to_string()),
-                countdown_icon: None,
-                compass_active_color: None,
-                compass_inactive_color: None,
-                min_rows: None,
-                max_rows: None,
-                min_cols: None,
-                max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "logons" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "logons".to_string(),
+                    title: Some("Logons".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#87CEEB".to_string()), // Sky blue
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["logons".to_string()],
+                    buffer_size: 500,
+                },
             }),
-            "righthand" => Some(WindowDef {
-                name: "righthand".to_string(),
-                widget_type: "righthand".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 20, // Hand item display
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Right Hand".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-                hand_icon: Some("R:".to_string()),
-                countdown_icon: None,
-                compass_active_color: None,
-                compass_inactive_color: None,
-                min_rows: None,
-                max_rows: None,
-                min_cols: None,
-                max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "familiar" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "familiar".to_string(),
+                    title: Some("Familiar".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#9370DB".to_string()), // Medium purple
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["familiar".to_string()],
+                    buffer_size: 1000,
+                },
             }),
-            "spellhand" => Some(WindowDef {
-                name: "spellhand".to_string(),
-                widget_type: "spellhand".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 20, // Hand item display
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Spell".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-                hand_icon: Some("S:".to_string()),
-                countdown_icon: None,
-                compass_active_color: None,
-                compass_inactive_color: None,
-                min_rows: None,
-                max_rows: None,
-                min_cols: None,
-                max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "ambients" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "ambients".to_string(),
+                    title: Some("Ambients".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#B0C4DE".to_string()), // Light steel blue
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["ambients".to_string()],
+                    buffer_size: 500,
+                },
             }),
-            "poisoned" => Some(WindowDef {
-                name: "poisoned".to_string(),
-                widget_type: "indicator".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 3,  // Icon + border
-                buffer_size: 0,
-                show_border: false,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("\u{e231}".to_string()), // Nerd Font poison icon
-                content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: Some(vec!["-".to_string(), "#00ff00".to_string()]), // off (transparent), green (on)
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "bounty" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "bounty".to_string(),
+                    title: Some("Bounties".to_string()),
+                    rows: 15,
+                    cols: 50,
+                    show_border: true,
+                    text_color: Some("#FFD700".to_string()), // Gold
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["bounty".to_string()],
+                    buffer_size: 0, // VellumFE uses 0 - content is cleared and replaced
+                },
             }),
-            "diseased" => Some(WindowDef {
-                name: "diseased".to_string(),
-                widget_type: "indicator".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 3,  // Icon + border
-                buffer_size: 0,
-                show_border: false,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                content_align: None,
-            background_color: None,
-                title: Some("\u{e286}".to_string()), // Nerd Font disease icon
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: Some(vec!["-".to_string(), "#8b4513".to_string()]), // off (transparent), brownish-red (on)
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
+
+            "spells" => Some(WindowDef::Spells {
+                base: WindowBase {
+                    name: "spells".to_string(),
+                    title: Some("Spells".to_string()),
+                    rows: 20,
+                    cols: 40,
+                    show_border: true,
+                    text_color: Some("#9370DB".to_string()), // Medium purple
+                    ..base_defaults
+                },
+                data: SpellsWidgetData {},
             }),
-            "bleeding" => Some(WindowDef {
-                name: "bleeding".to_string(),
-                widget_type: "indicator".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 3,  // Icon + border
-                buffer_size: 0,
-                show_border: false,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                content_align: None,
-            background_color: None,
-                title: Some("\u{f043}".to_string()), // Nerd Font bleeding icon
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: Some(vec!["-".to_string(), "#ff0000".to_string()]), // off (transparent), red (on)
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "stunned" => Some(WindowDef {
-                name: "stunned".to_string(),
-                widget_type: "indicator".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 3,  // Icon + border
-                buffer_size: 0,
-                show_border: false,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                content_align: None,
-            background_color: None,
-                title: Some("\u{f0e7}".to_string()), // Nerd Font stunned icon
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: Some(vec!["-".to_string(), "#ffff00".to_string()]), // off (transparent), yellow (on)
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "webbed" => Some(WindowDef {
-                name: "webbed".to_string(),
-                widget_type: "indicator".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 3,  // Icon + border
-                buffer_size: 0,
-                show_border: false,
-                border_style: None,
-                border_color: None,
-            border_sides: None,
-                title: Some("\u{f0bca}".to_string()), // Nerd Font webbed icon
-                content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: Some(vec!["-".to_string(), "#cccccc".to_string()]), // off (transparent), bright grey (on)
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "status_dashboard" => Some(WindowDef {
-                name: "status_dashboard".to_string(),
-                widget_type: "dashboard".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 3,  // 1 row + 2 for border
-                cols: 15, // ~5 icons * 2 (icon + space) + border
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("single".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Status".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: Some("horizontal".to_string()),
-                dashboard_indicators: Some(vec![
-                    DashboardIndicatorDef {
-                        id: "poisoned".to_string(),
-                        icon: "\u{e231}".to_string(),
-                        colors: vec!["-".to_string(), "#00ff00".to_string()],
-                    },
-                    DashboardIndicatorDef {
-                        id: "diseased".to_string(),
-                        icon: "\u{e286}".to_string(),
-                        colors: vec!["-".to_string(), "#8b4513".to_string()],
-                    },
-                    DashboardIndicatorDef {
-                        id: "bleeding".to_string(),
-                        icon: "\u{f043}".to_string(),
-                        colors: vec!["-".to_string(), "#ff0000".to_string()],
-                    },
-                    DashboardIndicatorDef {
-                        id: "stunned".to_string(),
-                        icon: "\u{f0e7}".to_string(),
-                        colors: vec!["-".to_string(), "#ffff00".to_string()],
-                    },
-                    DashboardIndicatorDef {
-                        id: "webbed".to_string(),
-                        icon: "\u{f0bca}".to_string(),
-                        colors: vec!["-".to_string(), "#cccccc".to_string()],
-                    },
-                ]),
-                dashboard_spacing: Some(1),
-                dashboard_hide_inactive: Some(true),
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "buffs" => Some(WindowDef {
-                name: "buffs".to_string(),
-                widget_type: "active_effects".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 7,
-                cols: 40,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Buffs".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#40FF40".to_string()),
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,  // Auto-adjust to window height
-                effect_category: Some("Buffs".to_string()),
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "debuffs" => Some(WindowDef {
-                name: "debuffs".to_string(),
-                widget_type: "active_effects".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 5,
-                cols: 40,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Debuffs".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#FF4040".to_string()),
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,  // Auto-adjust to window height
-                effect_category: Some("Debuffs".to_string()),
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "cooldowns" => Some(WindowDef {
-                name: "cooldowns".to_string(),
-                widget_type: "active_effects".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 5,
-                cols: 40,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Cooldowns".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#FFB040".to_string()),
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,  // Auto-adjust to window height
-                effect_category: Some("Cooldowns".to_string()),
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "active_spells" | "spells" => Some(WindowDef {
-                name: "active_spells".to_string(),
-                widget_type: "active_effects".to_string(),
-                streams: vec![],
-                row: default_row,
-                col: default_col,
-                rows: 18,
-                cols: 40,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-            border_sides: None,
-                title: Some("Active Spells".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: Some("#4080FF".to_string()),
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: Some("ActiveSpells".to_string()),
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "targets" => Some(WindowDef {
-                name: "targets".to_string(),
-                widget_type: "entity".to_string(),
-                streams: vec!["targetcount".to_string(), "combat".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 20,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-                border_sides: None,
-                title: Some("Targets".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
-            "players" => Some(WindowDef {
-                name: "players".to_string(),
-                widget_type: "entity".to_string(),
-                streams: vec!["playercount".to_string(), "playerlist".to_string()],
-                row: default_row,
-                col: default_col,
-                rows: 3,
-                cols: 20,
-                buffer_size: 0,
-                show_border: true,
-                border_style: Some("rounded".to_string()),
-                border_color: None,
-                border_sides: None,
-                title: Some("Players".to_string()),
-            content_align: None,
-            background_color: None,
-                bar_fill: None,
-                bar_background: None,
-                text_color: None,
-                transparent_background: true,
-                locked: false,
-                indicator_colors: None,
-                dashboard_layout: None,
-                dashboard_indicators: None,
-                dashboard_spacing: None,
-                dashboard_hide_inactive: None,
-                visible_count: None,
-                effect_category: None,
-                tabs: None,
-                tab_bar_position: None,
-                tab_active_color: None,
-                tab_inactive_color: None,
-                tab_unread_color: None,
-                tab_unread_prefix: None,
-            hand_icon: None,
-            countdown_icon: None,
-            compass_active_color: None,
-            compass_inactive_color: None,
-            min_rows: None,
-            max_rows: None,
-            min_cols: None,
-            max_cols: None,
-            numbers_only: false,
-            ..Default::default()
-            }),
+
             _ => None,
         }
     }
 
-    /// Get list of available window templates
-    pub fn available_window_templates() -> Vec<&'static str> {
+    /// Get list of all available window templates
+    /// Returns all windows that can be added via .menu
+    pub fn list_window_templates() -> Vec<&'static str> {
         vec![
-            "main",
-            "thoughts",
-            "speech",
-            "familiar",
-            "inventory",
-            "room",
-            "logons",
-            "deaths",
-            "arrivals",
-            "ambients",
-            "announcements",
-            "loot",
-            "bounty",
-            "spells",
+            // Progress bars
             "health",
             "mana",
             "stamina",
             "spirit",
-            "mindstate",
-            "encumbrance",
-            "stance",
-            "bloodpoints",
+            "encumlevel",
+            "pbarStance",
+            "mindState",
+            "lblBPs",
+            // Text windows
+            "main",
+            "thoughts",
+            "speech",
+            "announcements",
+            "loot",
+            "death",
+            "logons",
+            "familiar",
+            "ambients",
+            "bounty",
+            // Countdowns
             "roundtime",
             "casttime",
             "stuntime",
-            "compass",
-            "injuries",
-            "lefthand",
-            "righthand",
-            "spellhand",
-            "poisoned",
-            "diseased",
-            "bleeding",
-            "stunned",
-            "webbed",
-            "status_dashboard",
+            // Hands
+            "left_hand",
+            "right_hand",
+            "spell_hand",
+            // Active Effects
             "buffs",
             "debuffs",
             "cooldowns",
             "active_spells",
+            // Other
+            "inventory",
+            "room",
             "spells",
-            "targets",
-            "players",
+            "compass",
+            "injuries",
+            // command_input is NOT in this list - it's always present and can't be added/removed
         ]
+    }
+
+    /// Get list of available window templates (excluding command_input which is always present)
+    /// DEPRECATED: Use list_window_templates() instead
+    pub fn available_window_templates() -> Vec<&'static str> {
+        Self::list_window_templates()
+    }
+
+    /// Get templates grouped by widget category
+    pub fn get_templates_by_category() -> HashMap<WidgetCategory, Vec<String>> {
+        let mut categories: HashMap<WidgetCategory, Vec<String>> = HashMap::new();
+
+        for template_name in Self::list_window_templates() {
+            if let Some(template) = Self::get_window_template(template_name) {
+                let category = WidgetCategory::from_widget_type(template.widget_type());
+                categories
+                    .entry(category)
+                    .or_insert_with(Vec::new)
+                    .push(template_name.to_string());
+            }
+        }
+
+        categories
+    }
+
+    /// Get addable templates by category (excluding visible windows)
+    pub fn get_addable_templates_by_category(
+        layout: &crate::config::Layout,
+    ) -> HashMap<WidgetCategory, Vec<String>> {
+        let all_by_category = Self::get_templates_by_category();
+
+        all_by_category
+            .into_iter()
+            .map(|(category, templates)| {
+                let available: Vec<String> = templates
+                    .into_iter()
+                    .filter(|name| {
+                        !layout
+                            .windows
+                            .iter()
+                            .any(|w| w.name() == *name && w.base().visible)
+                    })
+                    .collect();
+                (category, available)
+            })
+            .filter(|(_, templates)| !templates.is_empty())
+            .collect()
+    }
+
+    /// Get list of visible windows in a layout
+    pub fn list_visible_windows(layout: &crate::config::Layout) -> Vec<String> {
+        layout
+            .windows
+            .iter()
+            .filter(|w| w.base().visible)
+            .map(|w| w.name().to_string())
+            .collect()
     }
 
     pub fn load() -> Result<Self> {
         Self::load_with_options(None, 8000)
     }
 
+    /// Load config from a custom file path
+    /// This loads the main config.toml from the specified path,
+    /// but still loads colors, highlights, and keybinds from standard locations
+    pub fn load_from_path(
+        path: &std::path::Path,
+        character: Option<&str>,
+        port_override: u16,
+    ) -> Result<Self> {
+        // Ensure defaults are extracted
+        Self::extract_defaults(character)?;
+
+        // Load config from custom path
+        let contents =
+            fs::read_to_string(path).context(format!("Failed to read config file: {:?}", path))?;
+        let mut config: Config = toml::from_str(&contents)
+            .context(format!("Failed to parse config file: {:?}", path))?;
+
+        // Override port from command line
+        config.connection.port = port_override;
+
+        // Store character name for later saves
+        config.character = character.map(|s| s.to_string());
+
+        // Load from separate files (from standard locations)
+        config.colors = ColorConfig::load(character)?;
+        config.highlights = Self::load_highlights(character)?;
+        config.keybinds = Self::load_keybinds(character)?;
+
+        // Validate and auto-fix menu keybinds
+        let validation = menu_keybind_validator::validate_menu_keybinds(&config.menu_keybinds);
+        if validation.has_errors() {
+            tracing::warn!(
+                "Menu keybind validation found {} errors",
+                validation.errors().len()
+            );
+            for error in validation.errors() {
+                tracing::warn!("  {}", error.message());
+            }
+
+            // Auto-fix critical issues
+            let fixed = menu_keybind_validator::auto_fix_menu_keybinds(
+                &mut config.menu_keybinds,
+                &validation.issues,
+            );
+            if fixed > 0 {
+                tracing::info!("Auto-fixed {} menu keybind issues", fixed);
+            }
+        }
+        if validation.has_warnings() {
+            for warning in validation.warnings() {
+                tracing::warn!("Menu keybind warning: {}", warning.message());
+            }
+        }
+
+        Ok(config)
+    }
+
     /// Load config with command-line options
     /// Checks in order:
     /// 1. ./config/<character>.toml (if character specified)
     /// 2. ./config/default.toml
-    /// 3. ~/.vellum-fe/<character>.toml (if character specified)
-    /// 4. ~/.vellum-fe/config.toml (fallback)
+    /// 3. ~/.two-face/<character>.toml (if character specified)
+    /// 4. ~/.two-face/config.toml (fallback)
     /// Extract default files on first run
     /// Creates shared directories and profile-specific files
     ///
     /// Shared:
-    /// - ~/.vellum-fe/layouts/layout.toml
-    /// - ~/.vellum-fe/layouts/none.toml
-    /// - ~/.vellum-fe/layouts/sidebar.toml
-    /// - ~/.vellum-fe/sounds/wizard_music.mp3
-    /// - ~/.vellum-fe/sounds/README.md
-    /// - ~/.vellum-fe/cmdlist1.xml
+    /// - ~/.two-face/layouts/layout.toml
+    /// - ~/.two-face/layouts/none.toml
+    /// - ~/.two-face/layouts/sidebar.toml
+    /// - ~/.two-face/sounds/wizard_music.mp3
+    /// - ~/.two-face/sounds/README.md
+    /// - ~/.two-face/cmdlist1.xml
     ///
     /// Profile-specific (default or character):
-    /// - ~/.vellum-fe/{profile}/config.toml
-    /// - ~/.vellum-fe/{profile}/history.txt (empty)
+    /// - ~/.two-face/{profile}/config.toml
+    /// - ~/.two-face/{profile}/history.txt (empty)
     fn extract_defaults(character: Option<&str>) -> Result<()> {
         // Create shared layouts directory and extract all embedded layouts
         let layouts_dir = Self::layouts_dir()?;
@@ -4188,13 +3463,16 @@ impl Config {
 
         // Automatically extract all files from embedded layouts directory
         for file in LAYOUTS_DIR.files() {
-            let filename = file.path().file_name()
+            let filename = file
+                .path()
+                .file_name()
                 .and_then(|n| n.to_str())
                 .context("Invalid layout filename")?;
             let layout_path = layouts_dir.join(filename);
 
             if !layout_path.exists() {
-                let content = file.contents_utf8()
+                let content = file
+                    .contents_utf8()
                     .context(format!("Failed to read embedded layout {}", filename))?;
                 fs::write(&layout_path, content)
                     .context(format!("Failed to write layouts/{}", filename))?;
@@ -4208,7 +3486,9 @@ impl Config {
 
         // Automatically extract all files from embedded sounds directory
         for file in SOUNDS_DIR.files() {
-            let filename = file.path().file_name()
+            let filename = file
+                .path()
+                .file_name()
                 .and_then(|n| n.to_str())
                 .context("Invalid sound filename")?;
             let sound_path = sounds_dir.join(filename);
@@ -4224,8 +3504,7 @@ impl Config {
         // Extract cmdlist1.xml to shared location (only once)
         let cmdlist_path = Self::cmdlist_path()?;
         if !cmdlist_path.exists() {
-            fs::write(&cmdlist_path, DEFAULT_CMDLIST)
-                .context("Failed to write cmdlist1.xml")?;
+            fs::write(&cmdlist_path, DEFAULT_CMDLIST).context("Failed to write cmdlist1.xml")?;
             tracing::info!("Extracted cmdlist1.xml to {:?}", cmdlist_path);
         }
 
@@ -4237,16 +3516,14 @@ impl Config {
         // Extract config.toml to profile (if it doesn't exist)
         let config_path = profile.join("config.toml");
         if !config_path.exists() {
-            fs::write(&config_path, DEFAULT_CONFIG)
-                .context("Failed to write config.toml")?;
+            fs::write(&config_path, DEFAULT_CONFIG).context("Failed to write config.toml")?;
             tracing::info!("Extracted config.toml to {:?}", config_path);
         }
 
         // Extract colors.toml to profile (if it doesn't exist)
         let colors_path = profile.join("colors.toml");
         if !colors_path.exists() {
-            fs::write(&colors_path, DEFAULT_COLORS)
-                .context("Failed to write colors.toml")?;
+            fs::write(&colors_path, DEFAULT_COLORS).context("Failed to write colors.toml")?;
             tracing::info!("Extracted colors.toml to {:?}", colors_path);
         }
 
@@ -4261,16 +3538,14 @@ impl Config {
         // Extract keybinds.toml to profile (if it doesn't exist)
         let keybinds_path = profile.join("keybinds.toml");
         if !keybinds_path.exists() {
-            fs::write(&keybinds_path, DEFAULT_KEYBINDS)
-                .context("Failed to write keybinds.toml")?;
+            fs::write(&keybinds_path, DEFAULT_KEYBINDS).context("Failed to write keybinds.toml")?;
             tracing::info!("Extracted keybinds.toml to {:?}", keybinds_path);
         }
 
         // Create empty history.txt in profile (if it doesn't exist)
         let history_path = profile.join("history.txt");
         if !history_path.exists() {
-            fs::write(&history_path, "")
-                .context("Failed to create history.txt")?;
+            fs::write(&history_path, "").context("Failed to create history.txt")?;
             tracing::info!("Created empty history.txt at {:?}", history_path);
         }
 
@@ -4301,6 +3576,32 @@ impl Config {
         config.highlights = Self::load_highlights(character)?;
         config.keybinds = Self::load_keybinds(character)?;
 
+        // Validate and auto-fix menu keybinds
+        let validation = menu_keybind_validator::validate_menu_keybinds(&config.menu_keybinds);
+        if validation.has_errors() {
+            tracing::warn!(
+                "Menu keybind validation found {} errors",
+                validation.errors().len()
+            );
+            for error in validation.errors() {
+                tracing::warn!("  {}", error.message());
+            }
+
+            // Auto-fix critical issues
+            let fixed = menu_keybind_validator::auto_fix_menu_keybinds(
+                &mut config.menu_keybinds,
+                &validation.issues,
+            );
+            if fixed > 0 {
+                tracing::info!("Auto-fixed {} menu keybind issues", fixed);
+            }
+        }
+        if validation.has_warnings() {
+            for warning in validation.warnings() {
+                tracing::warn!("Menu keybind warning: {}", warning.message());
+            }
+        }
+
         Ok(config)
     }
 
@@ -4315,10 +3616,8 @@ impl Config {
         }
 
         // Save main config (without highlights, keybinds, colors, color_palette - those are skipped)
-        let contents = toml::to_string_pretty(self)
-            .context("Failed to serialize config")?;
-        fs::write(&config_path, contents)
-            .context("Failed to write config file")?;
+        let contents = toml::to_string_pretty(self).context("Failed to serialize config")?;
+        fs::write(&config_path, contents).context("Failed to write config file")?;
 
         // Save to separate files
         self.colors.save(char_name)?;
@@ -4328,90 +3627,99 @@ impl Config {
         Ok(())
     }
 
-    /// Get the profile directory for a character (or "default" if none)
-    /// Returns: ~/.vellum-fe/{character}/ or ~/.vellum-fe/default/
-    fn profile_dir(character: Option<&str>) -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Could not find home directory")?;
-        let profile_name = character.unwrap_or("default");
-        Ok(home.join(".vellum-fe").join(profile_name))
+    /// Expose base directory path (~/.two-face) for other systems (e.g., direct auth).
+    pub fn base_dir() -> Result<PathBuf> {
+        Self::config_dir()
     }
 
-    /// Get the base vellum-fe directory (~/.vellum-fe/)
+    /// Get the profile directory for a character (or "default" if none)
+    /// Returns: ~/.two-face/{character}/ or ~/.two-face/default/
+    fn profile_dir(character: Option<&str>) -> Result<PathBuf> {
+        let profile_name = character.unwrap_or("default");
+        Ok(Self::config_dir()?.join(profile_name))
+    }
+
+    /// Get the base two-face directory (~/.two-face/)
+    /// Can be overridden with TWO_FACE_DIR environment variable
     fn config_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Could not find home directory")?;
-        Ok(home.join(".vellum-fe"))
+        // Check for custom directory from environment variable
+        if let Ok(custom_dir) = std::env::var("TWO_FACE_DIR") {
+            return Ok(PathBuf::from(custom_dir));
+        }
+
+        // Default to ~/.two-face
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        Ok(home.join(".two-face"))
     }
 
     /// Get path to config.toml for a character
-    /// Returns: ~/.vellum-fe/{character}/config.toml or ~/.vellum-fe/default/config.toml
+    /// Returns: ~/.two-face/{character}/config.toml or ~/.two-face/default/config.toml
     pub fn config_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("config.toml"))
     }
 
     /// Get path to colors.toml for a character
-    /// Returns: ~/.vellum-fe/{character}/colors.toml
+    /// Returns: ~/.two-face/{character}/colors.toml
     pub fn colors_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("colors.toml"))
     }
 
     /// Get the shared layouts directory (where .savelayout saves to)
-    /// Returns: ~/.vellum-fe/layouts/
+    /// Returns: ~/.two-face/layouts/
     fn layouts_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("layouts"))
     }
 
     /// Get the shared highlights directory (where .savehighlights saves to)
-    /// Returns: ~/.vellum-fe/highlights/
+    /// Returns: ~/.two-face/highlights/
     fn highlights_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("highlights"))
     }
 
     /// Get the shared keybinds directory (where .savekeybinds saves to)
-    /// Returns: ~/.vellum-fe/keybinds/
+    /// Returns: ~/.two-face/keybinds/
     fn keybinds_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("keybinds"))
     }
 
     /// Get the shared sounds directory
-    /// Returns: ~/.vellum-fe/sounds/
+    /// Returns: ~/.two-face/sounds/
     pub fn sounds_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("sounds"))
     }
 
     /// Get path to debug log for a character
-    /// Returns: ~/.vellum-fe/{character}/debug.log
+    /// Returns: ~/.two-face/{character}/debug.log
     pub fn get_log_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("debug.log"))
     }
 
     /// Get path to command history for a character
-    /// Returns: ~/.vellum-fe/{character}/history.txt
+    /// Returns: ~/.two-face/{character}/history.txt
     pub fn history_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("history.txt"))
     }
 
     /// Get path to widget_state.toml for a character
-    /// Returns: ~/.vellum-fe/{character}/widget_state.toml
+    /// Returns: ~/.two-face/{character}/widget_state.toml
     pub fn widget_state_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("widget_state.toml"))
     }
 
     /// Get path to cmdlist1.xml (single source of truth)
-    /// Returns: ~/.vellum-fe/cmdlist1.xml
+    /// Returns: ~/.two-face/cmdlist1.xml
     pub fn cmdlist_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("cmdlist1.xml"))
     }
 
     /// Get path to highlights.toml for a character
-    /// Returns: ~/.vellum-fe/{character}/highlights.toml
+    /// Returns: ~/.two-face/{character}/highlights.toml
     pub fn highlights_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("highlights.toml"))
     }
 
     /// Get path to keybinds.toml for a character
-    /// Returns: ~/.vellum-fe/{character}/keybinds.toml
+    /// Returns: ~/.two-face/{character}/keybinds.toml
     pub fn keybinds_path(character: Option<&str>) -> Result<PathBuf> {
         Ok(Self::profile_dir(character)?.join("keybinds.toml"))
     }
@@ -4474,10 +3782,9 @@ impl Config {
         fs::create_dir_all(&highlights_dir)?;
 
         let highlights_path = highlights_dir.join(format!("{}.toml", name));
-        let contents = toml::to_string_pretty(&self.highlights)
-            .context("Failed to serialize highlights")?;
-        fs::write(&highlights_path, contents)
-            .context("Failed to write highlights profile")?;
+        let contents =
+            toml::to_string_pretty(&self.highlights).context("Failed to serialize highlights")?;
+        fs::write(&highlights_path, contents).context("Failed to write highlights profile")?;
 
         Ok(highlights_path)
     }
@@ -4491,10 +3798,10 @@ impl Config {
             return Err(anyhow::anyhow!("Highlight profile '{}' not found", name));
         }
 
-        let contents = fs::read_to_string(&highlights_path)
-            .context("Failed to read highlights profile")?;
-        let highlights: HashMap<String, HighlightPattern> = toml::from_str(&contents)
-            .context("Failed to parse highlights profile")?;
+        let contents =
+            fs::read_to_string(&highlights_path).context("Failed to read highlights profile")?;
+        let highlights: HashMap<String, HighlightPattern> =
+            toml::from_str(&contents).context("Failed to parse highlights profile")?;
 
         Ok(highlights)
     }
@@ -4529,10 +3836,9 @@ impl Config {
         fs::create_dir_all(&keybinds_dir)?;
 
         let keybinds_path = keybinds_dir.join(format!("{}.toml", name));
-        let contents = toml::to_string_pretty(&self.keybinds)
-            .context("Failed to serialize keybinds")?;
-        fs::write(&keybinds_path, contents)
-            .context("Failed to write keybinds profile")?;
+        let contents =
+            toml::to_string_pretty(&self.keybinds).context("Failed to serialize keybinds")?;
+        fs::write(&keybinds_path, contents).context("Failed to write keybinds profile")?;
 
         Ok(keybinds_path)
     }
@@ -4546,20 +3852,19 @@ impl Config {
             return Err(anyhow::anyhow!("Keybind profile '{}' not found", name));
         }
 
-        let contents = fs::read_to_string(&keybinds_path)
-            .context("Failed to read keybinds profile")?;
-        let keybinds: HashMap<String, KeyBindAction> = toml::from_str(&contents)
-            .context("Failed to parse keybinds profile")?;
+        let contents =
+            fs::read_to_string(&keybinds_path).context("Failed to read keybinds profile")?;
+        let keybinds: HashMap<String, KeyBindAction> =
+            toml::from_str(&contents).context("Failed to parse keybinds profile")?;
 
         Ok(keybinds)
     }
 
-    /// Resolve a spell ID to a color based on configured spell lists
-    /// Example: spells = [101, 107, 120, 140, 150]
-    pub fn get_spell_color(&self, spell_id: u32) -> Option<String> {
+    /// Resolve a spell ID to configured styling (bar/text colors)
+    pub fn get_spell_color_style(&self, spell_id: u32) -> Option<SpellColorStyle> {
         for spell_config in &self.colors.spell_colors {
             if spell_config.spells.contains(&spell_id) {
-                return Some(spell_config.color.clone());
+                return Some(spell_config.style());
             }
         }
         None
@@ -4592,13 +3897,16 @@ impl Default for Config {
                 perf_stats_width: default_perf_stats_width(),
                 perf_stats_height: default_perf_stats_height(),
             },
-            highlights: HashMap::new(),  // Loaded from highlights.toml
-            keybinds: HashMap::new(),  // Loaded from keybinds.toml
-            colors: ColorConfig::default(),  // Loaded from colors.toml
+            highlights: HashMap::new(),     // Loaded from highlights.toml
+            keybinds: HashMap::new(),       // Loaded from keybinds.toml
+            colors: ColorConfig::default(), // Loaded from colors.toml
             sound: SoundConfig::default(),
-            event_patterns: HashMap::new(),  // Empty by default - user adds via config
-            layout_mappings: Vec::new(),  // Empty by default - user adds via config
-            character: None,  // Set at runtime via load_with_options
+            tts: TtsConfig::default(),
+            event_patterns: HashMap::new(), // Empty by default - user adds via config
+            layout_mappings: Vec::new(),    // Empty by default - user adds via config
+            character: None,                // Set at runtime via load_with_options
+            menu_keybinds: MenuKeybinds::default(),
+            active_theme: default_theme_name(),
         }
     }
 }

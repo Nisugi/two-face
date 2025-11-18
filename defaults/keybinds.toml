@@ -19,7 +19,8 @@
 #   switch_current_window, scroll_current_window_up_one, scroll_current_window_down_one,
 #   scroll_current_window_up_page, scroll_current_window_down_page,
 #   start_search, next_search_match, prev_search_match, clear_search,
-#   toggle_performance_stats
+#   toggle_performance_stats,
+#   tts_next, tts_previous, tts_pause_resume, tts_mute_toggle
 
 # Basic command input navigation
 right = "cursor_right"
@@ -59,48 +60,32 @@ esc = "clear_search"  # Exit search mode
 # Performance stats
 f12 = "toggle_performance_stats"
 
-# Numpad movement macros
-[num_1]
-macro_text = "sw\r"
+# Text-to-Speech (Accessibility)
+# Ctrl+Alt combinations avoid terminal interception
+# Also set enabled = true in [tts] section of config.toml
+"ctrl+alt+left" = "tts_previous"       # Previous message (sequential, includes read)
+"ctrl+alt+right" = "tts_next"          # Next message (sequential, includes read)
+"ctrl+alt+up" = "tts_next_unread"      # Skip to next unread message
+"ctrl+alt+down" = "tts_stop"           # Stop current speech
+f7 = "tts_increase_volume"             # Increase TTS volume by 0.2
+f8 = "tts_decrease_volume"             # Decrease TTS volume by 0.2
+f9 = "tts_increase_rate"               # Increase TTS speech rate by 0.5
+f10 = "tts_decrease_rate"              # Decrease TTS speech rate by 0.5
+f11 = "tts_mute_toggle"                # Toggle TTS mute (stops speech, prevents new speech)
 
-[num_2]
-macro_text = "s\r"
-
-[num_3]
-macro_text = "se\r"
-
-[num_4]
-macro_text = "w\r"
-
-[num_5]
-macro_text = "out\r"
-
-[num_6]
-macro_text = "e\r"
-
-[num_7]
-macro_text = "nw\r"
-
-[num_8]
-macro_text = "n\r"
-
-[num_9]
-macro_text = "ne\r"
-
-[num_0]
-macro_text = "down\r"
-
-["num_."]
-macro_text = "up\r"
-
-["num_+"]
-macro_text = "look\r"
-
-["num_-"]
-macro_text = "info\r"
-
-["num_*"]
-macro_text = "exp\r"
-
-["num_/"]
-macro_text = "health\r"
+# Numpad movement macros (inline table syntax required for HashMap deserialization)
+num_1 = { macro_text = "sw\r" }
+num_2 = { macro_text = "s\r" }
+num_3 = { macro_text = "se\r" }
+num_4 = { macro_text = "w\r" }
+num_5 = { macro_text = "out\r" }
+num_6 = { macro_text = "e\r" }
+num_7 = { macro_text = "nw\r" }
+num_8 = { macro_text = "n\r" }
+num_9 = { macro_text = "ne\r" }
+num_0 = { macro_text = "down\r" }
+"num_." = { macro_text = "up\r" }
+"num_+" = { macro_text = "look\r" }
+"num_-" = { macro_text = "info\r" }
+"num_*" = { macro_text = "exp\r" }
+"num_/" = { macro_text = "health\r" }

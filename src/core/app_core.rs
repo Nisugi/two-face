@@ -1,650 +1,3821 @@
+//! Core application logic - Pure business logic without UI coupling
+//!
+//! AppCore manages game state, configuration, and message processing.
+//! It has NO knowledge of rendering - all state is stored in data structures
+//! that frontends read from.
+
 use crate::cmdlist::CmdList;
-use crate::config::{Config, KeyAction, Layout};
-use crate::network::ServerMessage;
-use crate::parser::XmlParser;
+use crate::config::{Config, Layout};
+use crate::core::{GameState, MessageProcessor};
+use crate::data::*;
+use crate::parser::{ParsedElement, XmlParser};
 use crate::performance::PerformanceStats;
-use crate::sound::SoundPlayer;
-use crate::ui::{WindowManager, StyledText, SpanType};
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::style::Color;
 use std::collections::HashMap;
 
-/// Core application state (frontend-agnostic)
-///
-/// AppCore contains all business logic that is independent of the rendering layer.
-/// It handles configuration, game state, XML parsing, stream routing, and window management logic.
-/// Both TUI and GUI frontends will use AppCore for shared state and logic.
+/// Pending menu request for correlation
+#[derive(Clone, Debug)]
+pub struct PendingMenuRequest {
+    pub exist_id: String,
+    pub noun: String,
+}
+
+/// Core application state - frontend-agnostic
 pub struct AppCore {
-    /// Application configuration
+    // === Configuration ===
+    /// Application configuration (presets, highlights, keybinds, etc.)
     pub config: Config,
 
-    /// Current window layout
+    /// Current window layout definition
     pub layout: Layout,
 
-    /// Window manager (handles widget state and stream routing)
-    pub window_manager: WindowManager,
+    /// Baseline layout for proportional resizing
+    pub baseline_layout: Option<Layout>,
 
+    // === State ===
+    /// Game session state (connection, character, room, vitals, etc.)
+    pub game_state: GameState,
+
+    /// UI state (windows, focus, input, popups, etc.)
+    pub ui_state: UiState,
+
+    // === Message Processing ===
     /// XML parser for GemStone IV protocol
     pub parser: XmlParser,
 
-    /// Application running flag
-    pub running: bool,
+    /// Message processor (routes parsed elements to state updates)
+    pub message_processor: MessageProcessor,
 
-    /// Current active stream (where incoming text is routed)
+    // === Stream Management ===
+    /// Current active stream ID (where text is being routed)
     pub current_stream: String,
 
-    /// If true, discard text because no window exists for current stream
+    /// If true, discard text because no window exists for stream
     pub discard_current_stream: bool,
 
-    /// Track if current chunk (since last prompt) has main stream text
-    pub chunk_has_main_text: bool,
+    /// Buffer for accumulating multi-line stream content
+    pub stream_buffer: String,
 
-    /// Track if current chunk has silent updates (buffs, vitals, etc.)
-    pub chunk_has_silent_updates: bool,
-
+    // === Timing ===
     /// Server time offset (server_time - local_time) for countdown calculations
     pub server_time_offset: i64,
 
-    /// Buffer for accumulating stream text (used for combat/playerlist)
-    pub stream_buffer: String,
+    // === Optional Features ===
+    /// Command list for context menus (None if failed to load)
+    pub cmdlist: Option<CmdList>,
 
-    /// Parsed keybindings map (key combo -> action)
-    pub keybind_map: HashMap<(KeyCode, KeyModifiers), KeyAction>,
+    /// Menu request counter for correlating menu responses
+    pub menu_request_counter: u32,
 
-    /// Performance statistics
+    /// Pending menu requests (counter -> PendingMenuRequest)
+    pub pending_menu_requests: HashMap<String, PendingMenuRequest>,
+
+    /// Cached menu categories for submenus (category_name -> items)
+    pub menu_categories: HashMap<String, Vec<crate::data::ui_state::PopupMenuItem>>,
+
+    /// Position of last link click (for menu positioning)
+    pub last_link_click_pos: Option<(u16, u16)>,
+
+    /// Performance statistics tracking
     pub perf_stats: PerformanceStats,
 
     /// Whether to show performance stats
     pub show_perf_stats: bool,
 
-    /// Sound player (None if initialization failed)
-    pub sound_player: Option<SoundPlayer>,
+    /// Sound player for highlight sounds
+    pub sound_player: Option<crate::sound::SoundPlayer>,
 
-    /// Command list for context menus (None if failed to load)
-    pub cmdlist: Option<CmdList>,
+    /// Text-to-Speech manager for accessibility
+    pub tts_manager: crate::tts::TtsManager,
 
-    /// Counter for menu request correlation IDs
-    pub menu_request_counter: u32,
-
-    /// Navigation room ID (e.g., "2022628" from <nav rm='2022628'/>)
+    // === Navigation State ===
+    /// Navigation room ID from <nav rm='...'/>
     pub nav_room_id: Option<String>,
 
-    /// Lich room ID (e.g., "33711" extracted from room name display)
+    /// Lich room ID extracted from room display
     pub lich_room_id: Option<String>,
 
     /// Room subtitle (e.g., " - Emberthorn Refuge, Bowery")
     pub room_subtitle: Option<String>,
 
-    /// Command input buffer
-    pub command_input: String,
+    /// Room component buffers (id -> lines of segments)
+    /// Components: "room desc", "room objs", "room players", "room exits"
+    pub room_components: HashMap<String, Vec<Vec<TextSegment>>>,
 
-    /// Command input cursor position
-    pub command_cursor: usize,
+    /// Current room component being built
+    pub current_room_component: Option<String>,
+
+    /// Flag indicating room window needs sync
+    pub room_window_dirty: bool,
+
+    // === Runtime Flags ===
+    /// Application running flag
+    pub running: bool,
 
     /// Dirty flag - true if state changed and needs re-render
     pub needs_render: bool,
+
+    /// Track if current chunk has main stream text
+    pub chunk_has_main_text: bool,
+
+    /// Track if current chunk has silent updates (vitals, buffs, etc.)
+    pub chunk_has_silent_updates: bool,
+
+    /// Track if layout has been modified since last .savelayout
+    pub layout_modified_since_save: bool,
+
+    /// Track if save reminder has been shown this session
+    pub save_reminder_shown: bool,
+
+    /// Base layout name for autosave reference
+    pub base_layout_name: Option<String>,
+
+    // === Keybind Runtime Cache ===
+    /// Runtime keybind map for fast O(1) lookups (KeyEvent -> KeyBindAction)
+    /// Built from config.keybinds at startup and on config reload
+    pub keybind_map: HashMap<crossterm::event::KeyEvent, crate::config::KeyBindAction>,
 }
 
 impl AppCore {
-    /// Create AppCore by extracting state from an initialized App
-    ///
-    /// This is a bridge method during the refactoring process. It allows us to use
-    /// App::new() for initialization while testing the new architecture.
-    ///
-    /// TODO: Eventually replace this with a direct AppCore::new()
-    pub fn from_app(app: &crate::app::App) -> Self {
-        Self {
-            config: app.config.clone(),
-            layout: app.layout.clone(),
-            window_manager: app.window_manager.clone(),
-            parser: app.parser.clone(),
-            running: app.running,
-            current_stream: app.current_stream.clone(),
-            discard_current_stream: app.discard_current_stream,
-            chunk_has_main_text: app.chunk_has_main_text,
-            chunk_has_silent_updates: app.chunk_has_silent_updates,
-            server_time_offset: app.server_time_offset,
-            stream_buffer: app.stream_buffer.clone(),
-            keybind_map: app.keybind_map.clone(),
-            perf_stats: app.perf_stats.clone(),
-            show_perf_stats: app.show_perf_stats,
-            // SoundPlayer can't be cloned (has OutputStream), so we'll skip it for now
-            // TODO: Share sound player or recreate it
-            sound_player: None,
-            cmdlist: app.cmdlist.clone(),
-            menu_request_counter: app.menu_request_counter,
-            nav_room_id: app.nav_room_id.clone(),
-            lich_room_id: app.lich_room_id.clone(),
-            room_subtitle: app.room_subtitle.clone(),
-            command_input: String::new(),
-            command_cursor: 0,
-            needs_render: true, // Initial render needed
+    fn available_themes_message(theme_presets: &HashMap<String, crate::theme::AppTheme>) -> String {
+        let mut names: Vec<_> = theme_presets.keys().cloned().collect();
+        names.sort();
+        format!("Available themes: {}", names.join(", "))
+    }
+
+    fn apply_layout_theme(
+        &mut self,
+        theme_name: Option<&str>,
+    ) -> Option<(String, crate::theme::AppTheme)> {
+        let theme_id = theme_name?;
+        if theme_id == self.config.active_theme {
+            return None;
+        }
+
+        let theme_presets =
+            crate::theme::ThemePresets::all_with_custom(self.config.character.as_deref());
+
+        if let Some(theme) = theme_presets.get(theme_id) {
+            self.config.active_theme = theme_id.to_string();
+            if let Err(e) = self.config.save(self.config.character.as_deref()) {
+                tracing::warn!("Failed to save config after applying layout theme: {}", e);
+            }
+            Some((theme_id.to_string(), theme.clone()))
+        } else {
+            tracing::warn!(
+                "Layout requested unknown theme '{}', keeping current theme '{}'",
+                theme_id,
+                self.config.active_theme
+            );
+            None
         }
     }
 
-    /// Create a new AppCore instance from existing components
-    ///
-    /// This is a temporary constructor used during the refactoring process.
-    /// Eventually this will be the primary constructor that initializes everything.
-    ///
-    /// TODO: Refactor App::new() logic into this method
-    pub fn from_existing(
-        config: Config,
-        layout: Layout,
-        window_manager: WindowManager,
-        parser: XmlParser,
-        keybind_map: HashMap<(KeyCode, KeyModifiers), KeyAction>,
-        sound_player: Option<SoundPlayer>,
-        cmdlist: Option<CmdList>,
-    ) -> Self {
-        Self {
+    /// Create a new AppCore instance
+    pub fn new(config: Config) -> Result<Self> {
+        // Load layout from file system
+        let layout = Layout::load(config.character.as_deref())?;
+
+        // Load command list
+        let cmdlist = CmdList::load().ok();
+
+        // Create message processor
+        let message_processor = MessageProcessor::new(config.clone());
+
+        // Convert presets from config to parser format
+        let preset_list: Vec<(String, Option<String>, Option<String>)> = config
+            .colors
+            .presets
+            .iter()
+            .map(|(id, preset)| (id.clone(), preset.fg.clone(), preset.bg.clone()))
+            .collect();
+
+        // Create parser with presets and event patterns
+        let parser = XmlParser::with_presets(preset_list, config.event_patterns.clone());
+
+        // Initialize sound player (if sound feature is enabled)
+        let sound_player = crate::sound::SoundPlayer::new(true, 0.8, 500).ok();
+        if sound_player.is_some() {
+            tracing::debug!("Sound player initialized");
+            // Ensure sounds directory exists
+            if let Err(e) = crate::sound::ensure_sounds_directory() {
+                tracing::warn!("Failed to create sounds directory: {}", e);
+            }
+        }
+
+        // Initialize TTS manager (respects config.tts.enabled)
+        let tts_manager = crate::tts::TtsManager::new(
+            config.tts.enabled,
+            config.tts.rate,
+            config.tts.volume
+        );
+        if config.tts.enabled {
+            tracing::info!("TTS enabled - accessibility features active");
+        }
+
+        // Build the runtime keybind map from config
+        let keybind_map = Self::build_keybind_map(&config);
+
+        let layout_theme = layout.theme.clone();
+        let mut app = Self {
             config,
-            layout,
-            window_manager,
+            layout: layout.clone(),
+            baseline_layout: Some(layout),
+            game_state: GameState::new(),
+            ui_state: UiState::new(),
             parser,
-            running: true,
-            current_stream: "main".to_string(),
+            message_processor,
+            current_stream: String::from("main"),
             discard_current_stream: false,
-            chunk_has_main_text: false,
-            chunk_has_silent_updates: false,
-            server_time_offset: 0,
             stream_buffer: String::new(),
-            keybind_map,
+            server_time_offset: 0,
+            cmdlist,
+            menu_request_counter: 0,
+            pending_menu_requests: HashMap::new(),
+            menu_categories: HashMap::new(),
+            last_link_click_pos: None,
             perf_stats: PerformanceStats::new(),
             show_perf_stats: false,
             sound_player,
-            cmdlist,
-            menu_request_counter: 0,
+            tts_manager,
             nav_room_id: None,
             lich_room_id: None,
             room_subtitle: None,
-            command_input: String::new(),
-            command_cursor: 0,
-            needs_render: true, // Initial render needed
+            room_components: HashMap::new(),
+            current_room_component: None,
+            room_window_dirty: false,
+            running: true,
+            needs_render: true,
+            chunk_has_main_text: false,
+            chunk_has_silent_updates: false,
+            layout_modified_since_save: false,
+            save_reminder_shown: false,
+            base_layout_name: None,
+            keybind_map,
+        };
+
+        if let Some((theme_id, _)) = app.apply_layout_theme(layout_theme.as_deref()) {
+            app.add_system_message(&format!("Theme switched to: {}", theme_id));
+            // Update frontend cache later; AppCore just updates config here.
+            // The frontend will refresh during initialization from config.
+        }
+
+        Ok(app)
+    }
+
+    /// Build runtime keybind map from config for fast O(1) lookups
+    /// Converts string-based keybinds (e.g., "num_0", "Ctrl+s") to KeyEvent structs
+    fn build_keybind_map(config: &Config) -> HashMap<crossterm::event::KeyEvent, crate::config::KeyBindAction> {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+        let mut map = HashMap::new();
+
+        for (key_string, action) in &config.keybinds {
+            // Parse the key string into a (KeyCode, KeyModifiers) tuple
+            if let Some((code, modifiers)) = crate::config::parse_key_string(key_string) {
+                // Create a KeyEvent from the parsed code and modifiers
+                let key_event = KeyEvent {
+                    code,
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    state: KeyEventState::empty(),
+                };
+                map.insert(key_event, action.clone());
+            } else {
+                tracing::warn!("Failed to parse keybind string: '{}'", key_string);
+            }
+        }
+
+        tracing::debug!("Built keybind map with {} entries", map.len());
+        map
+    }
+
+    /// Rebuild the keybind map (call after config changes)
+    pub fn rebuild_keybind_map(&mut self) {
+        self.keybind_map = Self::build_keybind_map(&self.config);
+    }
+
+    // ===========================================================================================
+    // Command Input Methods (for keybind actions)
+    // ===========================================================================================
+
+    /// Move cursor left in command input
+    pub fn cursor_left(&mut self) {
+        if self.ui_state.command_cursor > 0 {
+            self.ui_state.command_cursor -= 1;
         }
     }
 
-    /// Handle a server message (process game data)
-    ///
-    /// This method processes XML data from the game server, parses it,
-    /// and routes text to appropriate windows.
-    ///
-    /// Simplified implementation for experimental mode (Milestone 6.4)
-    /// TODO: Add remaining functionality from App::handle_server_message()
-    pub fn handle_server_message(&mut self, msg: ServerMessage) -> Result<()> {
-        use crate::parser::ParsedElement;
-        use crate::ui::StyledText;
-        use crate::ui::SpanType;
-        use ratatui::style::Color;
+    /// Move cursor right in command input
+    pub fn cursor_right(&mut self) {
+        if self.ui_state.command_cursor < self.ui_state.command_input.len() {
+            self.ui_state.command_cursor += 1;
+        }
+    }
 
-        match msg {
-            ServerMessage::Connected => {
-                tracing::info!("Connected to server");
-                self.add_system_message("Connected to Lich");
-                self.needs_render = true;
+    /// Move cursor to previous word boundary
+    pub fn cursor_word_left(&mut self) {
+        let input = &self.ui_state.command_input;
+        let mut pos = self.ui_state.command_cursor;
 
-                // Play startup music if enabled
-                if self.config.ui.startup_music {
-                    if let Some(ref player) = self.sound_player {
-                        if let Err(e) = player.play_from_sounds_dir(&self.config.ui.startup_music_file, Some(0.5)) {
-                            tracing::warn!("Failed to play startup_music: {}", e);
+        // Skip whitespace before current position
+        while pos > 0 && input.chars().nth(pos - 1).map_or(false, |c| c.is_whitespace()) {
+            pos -= 1;
+        }
+
+        // Skip non-whitespace to find word start
+        while pos > 0 && input.chars().nth(pos - 1).map_or(false, |c| !c.is_whitespace()) {
+            pos -= 1;
+        }
+
+        self.ui_state.command_cursor = pos;
+    }
+
+    /// Move cursor to next word boundary
+    pub fn cursor_word_right(&mut self) {
+        let input = &self.ui_state.command_input;
+        let len = input.len();
+        let mut pos = self.ui_state.command_cursor;
+
+        // Skip non-whitespace to find word end
+        while pos < len && input.chars().nth(pos).map_or(false, |c| !c.is_whitespace()) {
+            pos += 1;
+        }
+
+        // Skip whitespace after word
+        while pos < len && input.chars().nth(pos).map_or(false, |c| c.is_whitespace()) {
+            pos += 1;
+        }
+
+        self.ui_state.command_cursor = pos;
+    }
+
+    /// Move cursor to start of command input
+    pub fn cursor_home(&mut self) {
+        self.ui_state.command_cursor = 0;
+    }
+
+    /// Move cursor to end of command input
+    pub fn cursor_end(&mut self) {
+        self.ui_state.command_cursor = self.ui_state.command_input.len();
+    }
+
+    /// Delete character before cursor (backspace)
+    pub fn cursor_backspace(&mut self) {
+        if self.ui_state.command_cursor > 0 {
+            let pos = self.ui_state.command_cursor;
+            self.ui_state.command_input.remove(pos - 1);
+            self.ui_state.command_cursor -= 1;
+        }
+    }
+
+    /// Delete character at cursor (delete key)
+    pub fn cursor_delete(&mut self) {
+        let pos = self.ui_state.command_cursor;
+        if pos < self.ui_state.command_input.len() {
+            self.ui_state.command_input.remove(pos);
+        }
+    }
+
+    // ===========================================================================================
+    // Command History Methods
+    // ===========================================================================================
+
+    /// Navigate to previous command in history
+    pub fn previous_command(&mut self) {
+        if self.ui_state.command_history.is_empty() {
+            return;
+        }
+
+        let new_index = match self.ui_state.command_history_index {
+            None => Some(self.ui_state.command_history.len() - 1),
+            Some(idx) if idx > 0 => Some(idx - 1),
+            Some(idx) => Some(idx), // Already at oldest
+        };
+
+        if let Some(idx) = new_index {
+            self.ui_state.command_input = self.ui_state.command_history[idx].clone();
+            self.ui_state.command_cursor = self.ui_state.command_input.len();
+            self.ui_state.command_history_index = Some(idx);
+        }
+    }
+
+    /// Navigate to next command in history
+    pub fn next_command(&mut self) {
+        if let Some(idx) = self.ui_state.command_history_index {
+            if idx + 1 < self.ui_state.command_history.len() {
+                let new_idx = idx + 1;
+                self.ui_state.command_input = self.ui_state.command_history[new_idx].clone();
+                self.ui_state.command_cursor = self.ui_state.command_input.len();
+                self.ui_state.command_history_index = Some(new_idx);
+            } else {
+                // At newest history entry - clear to empty
+                self.ui_state.command_input.clear();
+                self.ui_state.command_cursor = 0;
+                self.ui_state.command_history_index = None;
+            }
+        }
+    }
+
+    /// Send the last command from history
+    pub fn send_last_command(&mut self) -> Result<String> {
+        if let Some(cmd) = self.ui_state.command_history.last() {
+            let command = cmd.clone();
+            self.send_command(command)
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Send the second-to-last command from history
+    pub fn send_second_last_command(&mut self) -> Result<String> {
+        let len = self.ui_state.command_history.len();
+        if len >= 2 {
+            let command = self.ui_state.command_history[len - 2].clone();
+            self.send_command(command)
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    // ===========================================================================================
+    // Window Scrolling Methods
+    // ===========================================================================================
+
+    /// Scroll the currently focused window up by one line
+    pub fn scroll_current_window_up_one(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    content.scroll_up(1);
+                }
+            }
+        }
+    }
+
+    /// Scroll the currently focused window down by one line
+    pub fn scroll_current_window_down_one(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    content.scroll_down(1);
+                }
+            }
+        }
+    }
+
+    /// Scroll the currently focused window up by one page
+    pub fn scroll_current_window_up_page(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    // Use a reasonable page size (20 lines)
+                    content.scroll_up(20);
+                }
+            }
+        }
+    }
+
+    /// Scroll the currently focused window down by one page
+    pub fn scroll_current_window_down_page(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    // Use a reasonable page size (20 lines)
+                    content.scroll_down(20);
+                }
+            }
+        }
+    }
+
+    // ===========================================================================================
+    // Keybind Action Execution
+    // ===========================================================================================
+
+    /// Execute a keybind action (called when a bound key is pressed)
+    pub fn execute_keybind_action(&mut self, action: &crate::config::KeyBindAction) -> Result<()> {
+        use crate::config::{KeyAction, KeyBindAction};
+
+        match action {
+            KeyBindAction::Action(action_str) => {
+                // Parse the action string to a KeyAction
+                if let Some(key_action) = KeyAction::from_str(action_str) {
+                    self.execute_key_action(key_action)?;
+                } else {
+                    tracing::warn!("Unknown keybind action: '{}'", action_str);
+                }
+            }
+            KeyBindAction::Macro(macro_action) => {
+                // Send the macro text as a command
+                // Replace \r with actual Enter (send command)
+                let macro_text = &macro_action.macro_text;
+                if macro_text.contains("\\r") {
+                    // Split on \r and send each part as a command
+                    for part in macro_text.split("\\r") {
+                        if !part.is_empty() {
+                            self.send_command(part.to_string())?;
+                        }
+                    }
+                } else {
+                    // Just add to command input (no Enter)
+                    self.ui_state.command_input.push_str(macro_text);
+                    self.ui_state.command_cursor = self.ui_state.command_input.len();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute a KeyAction (dispatch to the appropriate method)
+    fn execute_key_action(&mut self, action: crate::config::KeyAction) -> Result<()> {
+        use crate::config::KeyAction;
+
+        match action {
+            // Command input actions
+            KeyAction::SendCommand => {
+                let cmd = self.ui_state.command_input.clone();
+                if !cmd.is_empty() {
+                    // Add to history
+                    self.ui_state.command_history.push(cmd.clone());
+                    self.ui_state.command_history_index = None;
+                    // Clear input
+                    self.ui_state.command_input.clear();
+                    self.ui_state.command_cursor = 0;
+                    // Send command
+                    self.send_command(cmd)?;
+                }
+            }
+            KeyAction::CursorLeft => self.cursor_left(),
+            KeyAction::CursorRight => self.cursor_right(),
+            KeyAction::CursorWordLeft => self.cursor_word_left(),
+            KeyAction::CursorWordRight => self.cursor_word_right(),
+            KeyAction::CursorHome => self.cursor_home(),
+            KeyAction::CursorEnd => self.cursor_end(),
+            KeyAction::CursorBackspace => self.cursor_backspace(),
+            KeyAction::CursorDelete => self.cursor_delete(),
+
+            // History actions
+            KeyAction::PreviousCommand => self.previous_command(),
+            KeyAction::NextCommand => self.next_command(),
+            KeyAction::SendLastCommand => {
+                self.send_last_command()?;
+            }
+            KeyAction::SendSecondLastCommand => {
+                self.send_second_last_command()?;
+            }
+
+            // Window actions
+            KeyAction::SwitchCurrentWindow => {
+                // TODO: Implement window switching logic
+                tracing::debug!("SwitchCurrentWindow not yet implemented");
+            }
+            KeyAction::ScrollCurrentWindowUpOne => self.scroll_current_window_up_one(),
+            KeyAction::ScrollCurrentWindowDownOne => self.scroll_current_window_down_one(),
+            KeyAction::ScrollCurrentWindowUpPage => self.scroll_current_window_up_page(),
+            KeyAction::ScrollCurrentWindowDownPage => self.scroll_current_window_down_page(),
+
+            // Search actions (already implemented elsewhere)
+            KeyAction::StartSearch => {
+                // TODO: Set input mode to Search
+                tracing::debug!("StartSearch should be handled by input mode change");
+            }
+            KeyAction::NextSearchMatch => {
+                // TODO: Implement search navigation
+                tracing::debug!("NextSearchMatch not yet implemented");
+            }
+            KeyAction::PrevSearchMatch => {
+                // TODO: Implement search navigation
+                tracing::debug!("PrevSearchMatch not yet implemented");
+            }
+            KeyAction::ClearSearch => {
+                // TODO: Implement search clearing
+                tracing::debug!("ClearSearch not yet implemented");
+            }
+
+            // Debug/Performance actions
+            KeyAction::TogglePerformanceStats => {
+                // TODO: Toggle performance stats overlay
+                tracing::debug!("TogglePerformanceStats not yet implemented");
+            }
+
+            // TTS (Text-to-Speech) actions - Accessibility
+            KeyAction::TtsNext => {
+                if let Err(e) = self.tts_manager.speak_next() {
+                    tracing::warn!("TTS speak_next failed: {}", e);
+                }
+            }
+            KeyAction::TtsPrevious => {
+                if let Err(e) = self.tts_manager.speak_previous() {
+                    tracing::warn!("TTS speak_previous failed: {}", e);
+                }
+            }
+            KeyAction::TtsNextUnread => {
+                if let Err(e) = self.tts_manager.speak_next_unread() {
+                    tracing::warn!("TTS speak_next_unread failed: {}", e);
+                }
+            }
+            KeyAction::TtsStop => {
+                if let Err(e) = self.tts_manager.stop() {
+                    tracing::warn!("TTS stop failed: {}", e);
+                }
+            }
+            KeyAction::TtsMuteToggle => {
+                self.tts_manager.toggle_mute();
+                let status = if self.tts_manager.is_muted() { "muted" } else { "unmuted" };
+                self.add_system_message(&format!("TTS {}", status));
+            }
+            KeyAction::TtsIncreaseRate => {
+                if let Err(e) = self.tts_manager.increase_rate() {
+                    tracing::warn!("TTS increase_rate failed: {}", e);
+                } else {
+                    self.add_system_message("TTS rate increased");
+                }
+            }
+            KeyAction::TtsDecreaseRate => {
+                if let Err(e) = self.tts_manager.decrease_rate() {
+                    tracing::warn!("TTS decrease_rate failed: {}", e);
+                } else {
+                    self.add_system_message("TTS rate decreased");
+                }
+            }
+            KeyAction::TtsIncreaseVolume => {
+                if let Err(e) = self.tts_manager.increase_volume() {
+                    tracing::warn!("TTS increase_volume failed: {}", e);
+                } else {
+                    self.add_system_message("TTS volume increased");
+                }
+            }
+            KeyAction::TtsDecreaseVolume => {
+                if let Err(e) = self.tts_manager.decrease_volume() {
+                    tracing::warn!("TTS decrease_volume failed: {}", e);
+                } else {
+                    self.add_system_message("TTS volume decreased");
+                }
+            }
+
+            // Macro actions (should not reach here - handled by execute_keybind_action)
+            KeyAction::SendMacro(text) => {
+                self.send_command(text)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Poll TTS events from callback channel and handle them
+    /// Should be called in the main event loop to enable auto-play
+    pub fn poll_tts_events(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        loop {
+            match self.tts_manager.try_recv_event() {
+                Ok(event) => {
+                    match event {
+                        crate::tts::TtsEvent::UtteranceEnded(id) => {
+                            // Check if this was the current utterance
+                            if self.tts_manager.is_current_utterance(id) {
+                                tracing::debug!("Utterance {:?} ended (manual control - no auto-play)", id);
+                                // Auto-play disabled - user has full manual control with Ctrl+Alt+Left/Right/Up
+                            }
+                        }
+                        crate::tts::TtsEvent::UtteranceStarted(id) => {
+                            tracing::debug!("Utterance {:?} started", id);
+                        }
+                        crate::tts::TtsEvent::UtteranceStopped(id) => {
+                            tracing::debug!("Utterance {:?} stopped", id);
                         }
                     }
                 }
+                Err(TryRecvError::Empty) => {
+                    // No more events to process
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!("TTS event channel disconnected");
+                    break;
+                }
             }
-            ServerMessage::Disconnected => {
-                tracing::info!("Disconnected from server");
-                self.add_system_message("Disconnected from Lich");
-                self.running = false;
-                self.needs_render = true;
-            }
-            ServerMessage::Text(line) => {
-                // Track network bytes received
-                self.perf_stats.record_bytes_received(line.len() as u64);
+        }
+    }
 
-                // Handle empty lines
-                if line.is_empty() {
-                    self.add_text_to_current_stream(StyledText {
-                        content: String::new(),
-                        fg: None,
+    /// Initialize windows based on current layout
+    pub fn init_windows(&mut self, terminal_width: u16, terminal_height: u16) {
+        // Calculate window positions from layout
+        let positions = self.calculate_window_positions(terminal_width, terminal_height);
+
+        // Create windows based on layout (only visible ones)
+        for window_def in &self.layout.windows {
+            // Skip hidden windows
+            if !window_def.base().visible {
+                tracing::debug!("Skipping hidden window '{}' during init", window_def.name());
+                continue;
+            }
+
+            let position = positions
+                .get(window_def.name())
+                .cloned()
+                .unwrap_or(WindowPosition {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                });
+
+            let mut widget_type = match window_def.widget_type() {
+                "text" => WidgetType::Text,
+                "tabbedtext" => WidgetType::TabbedText,
+                "progress" => WidgetType::Progress,
+                "countdown" => WidgetType::Countdown,
+                "compass" => WidgetType::Compass,
+                "injury_doll" | "injuries" => WidgetType::InjuryDoll,
+                "indicator" => WidgetType::Indicator,
+                "room" => WidgetType::Room,
+                "inventory" => WidgetType::Inventory,
+                "command_input" | "commandinput" => WidgetType::CommandInput, // Support both for backward compatibility
+                "dashboard" => WidgetType::Dashboard,
+                "hand" => WidgetType::Hand,
+                "active_effects" => WidgetType::ActiveEffects,
+                "targets" => WidgetType::Targets,
+                "players" => WidgetType::Players,
+                "spells" => WidgetType::Spells,
+                _ => WidgetType::Text,
+            };
+
+            let title = window_def
+                .base()
+                .title
+                .as_deref()
+                .unwrap_or(window_def.name());
+
+            let content = match widget_type {
+                WidgetType::Text => {
+                    let buffer_size =
+                        if let crate::config::WindowDef::Text { data, .. } = window_def {
+                            data.buffer_size
+                        } else {
+                            1000 // fallback
+                        };
+                    WindowContent::Text(TextContent::new(title, buffer_size))
+                }
+                WidgetType::CommandInput => WindowContent::CommandInput {
+                    text: String::new(),
+                    cursor: 0,
+                    history: Vec::new(),
+                    history_index: None,
+                },
+                WidgetType::Progress => WindowContent::Progress(ProgressData {
+                    value: 100,
+                    max: 100,
+                    label: title.to_string(),
+                    color: None,
+                }),
+                WidgetType::Countdown => WindowContent::Countdown(CountdownData {
+                    end_time: 0,
+                    label: title.to_string(),
+                }),
+                WidgetType::Compass => WindowContent::Compass(CompassData {
+                    directions: Vec::new(),
+                }),
+                WidgetType::InjuryDoll => WindowContent::InjuryDoll(InjuryDollData::new()),
+                WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
+                    status: String::from("standing"),
+                    color: None,
+                }),
+                WidgetType::Hand => WindowContent::Hand {
+                    item: None,
+                    link: None,
+                },
+                WidgetType::Room => WindowContent::Room(RoomContent {
+                    name: String::new(),
+                    description: Vec::new(),
+                    exits: Vec::new(),
+                    players: Vec::new(),
+                    objects: Vec::new(),
+                }),
+                WidgetType::Inventory => WindowContent::Inventory(TextContent::new(title, 10000)),
+                WidgetType::Spells => WindowContent::Spells(TextContent::new(title, 10000)),
+                WidgetType::ActiveEffects => {
+                    // Extract category from window def
+                    let category =
+                        if let crate::config::WindowDef::ActiveEffects { data, .. } = window_def {
+                            data.category.clone()
+                        } else {
+                            "Unknown".to_string()
+                        };
+                    WindowContent::ActiveEffects(crate::data::ActiveEffectsContent {
+                        category,
+                        effects: Vec::new(),
+                    })
+                }
+                WidgetType::Targets => WindowContent::Targets {
+                    targets_text: String::new(),
+                },
+                WidgetType::Players => WindowContent::Players {
+                    players_text: String::new(),
+                },
+                WidgetType::Dashboard => WindowContent::Dashboard {
+                    indicators: Vec::new(),
+                },
+                _ => WindowContent::Empty,
+            };
+
+            let window = WindowState {
+                name: window_def.name().to_string(),
+                widget_type,
+                content,
+                position,
+                visible: true,
+                focused: false,
+            };
+
+            self.ui_state
+                .set_window(window_def.name().to_string(), window);
+        }
+
+        self.needs_render = true;
+    }
+
+    /// Add a single new window without destroying existing ones
+    ///
+    /// Uses absolute positioning from window definition with optional delta-based scaling.
+    pub fn add_new_window(
+        &mut self,
+        window_def: &crate::config::WindowDef,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) {
+        tracing::info!(
+            "add_new_window: '{}' ({})",
+            window_def.name(),
+            window_def.widget_type()
+        );
+
+        // Use exact position from window definition
+        let base = window_def.base();
+        let position = WindowPosition {
+            x: base.col,
+            y: base.row,
+            width: base.cols,
+            height: base.rows,
+        };
+
+        tracing::debug!(
+            "Window '{}' will be created at exact pos=({},{}) size={}x{}",
+            window_def.name(),
+            position.x,
+            position.y,
+            position.width,
+            position.height
+        );
+
+        let is_room_window = window_def.widget_type() == "room";
+
+        let widget_type = match window_def.widget_type() {
+            "text" => WidgetType::Text,
+            "tabbedtext" => WidgetType::TabbedText,
+            "progress" => WidgetType::Progress,
+            "countdown" => WidgetType::Countdown,
+            "compass" => WidgetType::Compass,
+            "injury_doll" | "injuries" => WidgetType::InjuryDoll,
+            "indicator" => WidgetType::Indicator,
+            "room" => WidgetType::Room,
+            "inventory" => WidgetType::Inventory,
+            "command_input" | "commandinput" => WidgetType::CommandInput,
+            "dashboard" => WidgetType::Dashboard,
+            "hand" => WidgetType::Hand,
+            "active_effects" => WidgetType::ActiveEffects,
+            "targets" => WidgetType::Targets,
+            "players" => WidgetType::Players,
+            "spells" => WidgetType::Spells,
+            _ => WidgetType::Text,
+        };
+
+        let title = window_def
+            .base()
+            .title
+            .as_deref()
+            .unwrap_or(window_def.name());
+
+        let content = match widget_type {
+            WidgetType::Text => {
+                let buffer_size = if let crate::config::WindowDef::Text { data, .. } = window_def {
+                    data.buffer_size
+                } else {
+                    1000 // fallback
+                };
+                WindowContent::Text(TextContent::new(title, buffer_size))
+            }
+            WidgetType::CommandInput => WindowContent::CommandInput {
+                text: String::new(),
+                cursor: 0,
+                history: Vec::new(),
+                history_index: None,
+            },
+            WidgetType::Progress => WindowContent::Progress(ProgressData {
+                value: 100,
+                max: 100,
+                label: title.to_string(),
+                color: None,
+            }),
+            WidgetType::Countdown => WindowContent::Countdown(CountdownData {
+                end_time: 0,
+                label: title.to_string(),
+            }),
+            WidgetType::Compass => WindowContent::Compass(CompassData {
+                directions: Vec::new(),
+            }),
+            WidgetType::InjuryDoll => WindowContent::InjuryDoll(InjuryDollData::new()),
+            WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
+                status: String::from("standing"),
+                color: None,
+            }),
+            WidgetType::Hand => WindowContent::Hand {
+                item: None,
+                link: None,
+            },
+            WidgetType::Room => WindowContent::Room(RoomContent {
+                name: String::new(),
+                description: Vec::new(),
+                exits: Vec::new(),
+                players: Vec::new(),
+                objects: Vec::new(),
+            }),
+            WidgetType::Inventory => WindowContent::Inventory(TextContent::new(title, 0)),
+            WidgetType::Spells => WindowContent::Spells(TextContent::new(title, 0)),
+            WidgetType::ActiveEffects => {
+                // Extract category from window def
+                let category =
+                    if let crate::config::WindowDef::ActiveEffects { data, .. } = window_def {
+                        data.category.clone()
+                    } else {
+                        "Unknown".to_string()
+                    };
+                WindowContent::ActiveEffects(crate::data::ActiveEffectsContent {
+                    category,
+                    effects: Vec::new(),
+                })
+            }
+            WidgetType::Targets => WindowContent::Targets {
+                targets_text: String::new(),
+            },
+            WidgetType::Players => WindowContent::Players {
+                players_text: String::new(),
+            },
+            WidgetType::Dashboard => WindowContent::Dashboard {
+                indicators: Vec::new(),
+            },
+            _ => WindowContent::Empty,
+        };
+
+        let window = WindowState {
+            name: window_def.name().to_string(),
+            widget_type,
+            content,
+            position: position.clone(),
+            visible: true,
+            focused: false,
+        };
+
+        self.ui_state
+            .set_window(window_def.name().to_string(), window);
+        self.needs_render = true;
+
+        // Clear inventory cache if this is an inventory window to force initial render
+        if window_def.widget_type() == "inventory" {
+            self.message_processor.clear_inventory_cache();
+        }
+
+        // Set dirty flag for room windows to trigger sync in TUI frontend
+        if is_room_window {
+            self.room_window_dirty = true;
+        }
+
+        tracing::info!(
+            "Created new window '{}' at ({}, {}) size {}x{}",
+            window_def.name(),
+            position.x,
+            position.y,
+            position.width,
+            position.height
+        );
+    }
+
+    /// Update an existing window's position without destroying content
+    /// Update an existing window's position from window definition (uses exact positions, no scaling)
+    ///
+    /// This is called when editing a window via the window editor. It applies the exact
+    /// position from the window definition to the UI state without any scaling.
+    pub fn update_window_position(
+        &mut self,
+        window_def: &crate::config::WindowDef,
+        _terminal_width: u16,
+        _terminal_height: u16,
+    ) {
+        let base = window_def.base();
+        let position = WindowPosition {
+            x: base.col,
+            y: base.row,
+            width: base.cols,
+            height: base.rows,
+        };
+
+        if let Some(window_state) = self.ui_state.windows.get_mut(window_def.name()) {
+            window_state.position = position.clone();
+            self.needs_render = true;
+            tracing::info!(
+                "Updated window '{}' to EXACT position ({}, {}) size {}x{}",
+                window_def.name(),
+                position.x,
+                position.y,
+                position.width,
+                position.height
+            );
+        }
+    }
+
+    /// Remove a window from UI state
+    pub fn remove_window(&mut self, name: &str) {
+        self.ui_state.remove_window(name);
+        self.needs_render = true;
+        tracing::info!("Removed window '{}'", name);
+    }
+
+    /// Process incoming XML data from server
+    pub fn process_server_data(&mut self, data: &str) -> Result<()> {
+        // Parse XML line by line
+        for line in data.lines() {
+            let elements = self.parser.parse_line(line);
+
+            // Process each element
+            for element in elements {
+                self.process_element(&element)?;
+            }
+
+            // Finish the current line after processing all elements from this network line
+            // This ensures newlines from the game are preserved (like VellumFE does)
+            self.message_processor
+                .flush_current_stream_with_tts(&mut self.ui_state, Some(&mut self.tts_manager));
+        }
+
+        Ok(())
+    }
+
+    /// Process a single parsed XML element
+    fn process_element(&mut self, element: &ParsedElement) -> Result<()> {
+        // Handle MenuResponse specially (needs access to cmdlist and menu state)
+        if let ParsedElement::MenuResponse { id, coords } = element {
+            self.message_processor.chunk_has_silent_updates = true; // Mark as silent update
+            self.handle_menu_response(id, coords);
+            self.needs_render = true;
+            return Ok(());
+        }
+
+        // Update game state and UI state via message processor
+        self.message_processor.process_element(
+            element,
+            &mut self.game_state,
+            &mut self.ui_state,
+            &mut self.room_components,
+            &mut self.current_room_component,
+            &mut self.room_window_dirty,
+            &mut self.nav_room_id,
+            &mut self.lich_room_id,
+            &mut self.room_subtitle,
+            Some(&mut self.tts_manager),
+        );
+
+        // Mark that we need to render
+        self.needs_render = true;
+
+        Ok(())
+    }
+
+    /// Send command to server
+    pub fn send_command(&mut self, command: String) -> Result<String> {
+        use crate::data::{SpanType, StyledLine, TextSegment, WindowContent};
+
+        // Check for dot commands (local client commands)
+        if command.starts_with('.') {
+            return self.handle_dot_command(&command);
+        }
+
+        // Echo command to main window (prompt + command)
+        if !command.is_empty() {
+            if let Some(main_window) = self.ui_state.windows.get_mut("main") {
+                if let WindowContent::Text(ref mut content) = main_window.content {
+                    let mut segments = Vec::new();
+
+                    // Add prompt with per-character coloring (same as prompt rendering)
+                    for ch in self.game_state.last_prompt.chars() {
+                        let char_str = ch.to_string();
+
+                        // Find color for this character in prompt_colors config
+                        let color = self
+                            .config
+                            .colors
+                            .prompt_colors
+                            .iter()
+                            .find(|pc| pc.character == char_str)
+                            .and_then(|pc| {
+                                // Prefer fg, fallback to color (legacy)
+                                pc.fg.as_ref().or(pc.color.as_ref()).cloned()
+                            })
+                            .unwrap_or_else(|| "#808080".to_string()); // Default dark gray
+
+                        segments.push(TextSegment {
+                            text: char_str,
+                            fg: Some(color),
+                            bg: None,
+                            bold: false,
+                            span_type: SpanType::Normal,
+                            link_data: None,
+                        });
+                    }
+
+                    // Add the command text (in default color)
+                    segments.push(TextSegment {
+                        text: command.clone(),
+                        fg: Some("#ffffff".to_string()), // White text for command
                         bg: None,
                         bold: false,
                         span_type: SpanType::Normal,
                         link_data: None,
                     });
-                    self.finish_current_line();
-                    return Ok(());
-                }
 
-                // Parse XML
-                let parse_start = std::time::Instant::now();
-                let elements = self.parser.parse_line(&line);
-                let parse_duration = parse_start.elapsed();
-                self.perf_stats.record_parse(parse_duration);
-                self.perf_stats.record_elements_parsed(elements.len() as u64);
-
-                // Process elements
-                for element in elements {
-                    match element {
-                        ParsedElement::Text { content, fg_color, bg_color, bold, span_type, link_data, .. } => {
-                            if self.discard_current_stream {
-                                continue;
-                            }
-
-                            // Add text even if empty (for proper line breaks)
-                            self.add_text_to_current_stream(StyledText {
-                                content,
-                                fg: fg_color.and_then(|c| Self::parse_hex_color(&c)),
-                                bg: bg_color.and_then(|c| Self::parse_hex_color(&c)),
-                                bold,
-                                span_type,
-                                link_data,
-                            });
-                        }
-                        ParsedElement::Prompt { text, .. } => {
-                            // Reset to main stream
-                            self.current_stream = "main".to_string();
-                            self.discard_current_stream = false;
-
-                            // Show prompt
-                            if !text.trim().is_empty() {
-                                for ch in text.chars() {
-                                    let char_str = ch.to_string();
-                                    let color = self.config.colors.prompt_colors
-                                        .iter()
-                                        .find(|pc| pc.character == char_str)
-                                        .and_then(|pc| {
-                                            pc.fg.as_ref().or(pc.color.as_ref())
-                                                .and_then(|color_str| Self::parse_hex_color(color_str))
-                                        })
-                                        .unwrap_or(Color::DarkGray);
-
-                                    self.add_text_to_current_stream(StyledText {
-                                        content: char_str,
-                                        fg: Some(color),
-                                        bg: None,
-                                        bold: false,
-                                        span_type: SpanType::Normal,
-                                        link_data: None,
-                                    });
-                                }
-                            }
-                        }
-                        ParsedElement::StreamPush { id } => {
-                            self.current_stream = id.clone();
-                            if !self.window_manager.has_window_for_stream(&id) {
-                                self.discard_current_stream = true;
-                            } else {
-                                self.discard_current_stream = false;
-                            }
-                        }
-                        ParsedElement::StreamPop => {
-                            self.current_stream = "main".to_string();
-                            self.discard_current_stream = false;
-                        }
-                        ParsedElement::ProgressBar { id, value, max, text } => {
-                            // Handle progress bar updates
-                            let window_id = match id.as_str() {
-                                "pbarStance" => "stance",
-                                "mindState" => "mindstate",
-                                "encumlevel" => "encumbrance",
-                                _ => &id,
-                            };
-
-                            if let Some(window) = self.window_manager.get_window(window_id) {
-                                if !text.is_empty() {
-                                    window.set_progress_with_text(value, max, Some(text));
-                                } else {
-                                    window.set_progress(value, max);
-                                }
-                            }
-                        }
-                        ParsedElement::RoundTime { value } => {
-                            if let Some(window) = self.window_manager.get_window("roundtime") {
-                                window.set_countdown(value as u64);
-                            }
-                        }
-                        ParsedElement::CastTime { value } => {
-                            if let Some(window) = self.window_manager.get_window("casttime") {
-                                window.set_countdown(value as u64);
-                            }
-                        }
-                        // TODO: Add more element handlers as needed
-                        _ => {}
-                    }
-                }
-
-                // Finish the line after processing all elements from this server line
-                // Each line from the server represents one logical line that needs wrapping
-                self.finish_current_line();
-
-                // Mark as needing render after processing server text
-                self.needs_render = true;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Add text to the current stream's window
-    fn add_text_to_current_stream(&mut self, text: StyledText) {
-        use crate::ui::Widget;
-
-        if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
-            if let Some(window) = self.window_manager.get_window(&window_name) {
-                // Check if it's a tabbed window - use stream-aware method
-                match window {
-                    Widget::Tabbed(tabbed) => {
-                        tabbed.add_text_to_stream(&self.current_stream, text);
-                    }
-                    _ => {
-                        // Regular text window
-                        window.add_text(text);
-                    }
+                    // Add the styled line to the main window
+                    content.add_line(StyledLine { segments });
                 }
             }
         }
-    }
 
-    /// Finish the current line in all windows
-    fn finish_current_line(&mut self) {
-        use crate::ui::Widget;
-
-        // Get terminal width for wrapping (default to 120 if we can't get it)
-        let inner_width = 120u16.saturating_sub(2);
-
-        if let Some(window_name) = self.window_manager.stream_map.get(&self.current_stream).cloned() {
-            if let Some(window) = self.window_manager.get_window(&window_name) {
-                // Check if it's a tabbed window - use stream-aware method
-                match window {
-                    Widget::Tabbed(tabbed) => {
-                        tabbed.finish_line_for_stream(&self.current_stream, inner_width);
-                    }
-                    _ => {
-                        // Regular text window
-                        window.finish_line(inner_width);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Parse hex color string to ratatui Color
-    fn parse_hex_color(hex: &str) -> Option<Color> {
-        if !hex.starts_with('#') || hex.len() != 7 {
-            return None;
+        // Add to command history
+        if !command.is_empty() {
+            self.ui_state.command_history.push(command.clone());
         }
 
-        let r = u8::from_str_radix(&hex[1..3], 16).ok()?;
-        let g = u8::from_str_radix(&hex[3..5], 16).ok()?;
-        let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
+        // Clear current input
+        self.ui_state.command_input.clear();
+        self.ui_state.command_cursor = 0;
+        self.ui_state.command_history_index = None;
 
-        Some(Color::Rgb(r, g, b))
+        // Return formatted command for network layer to send
+        Ok(format!("{}\n", command))
     }
 
-    /// Handle a dot command (local command not sent to server)
-    ///
-    /// Dot commands are local to the client (e.g., .quit, .addwindow, .settings)
-    ///
-    /// Simplified implementation for experimental mode (Milestone 6.5)
-    /// TODO: Add remaining commands from App::handle_dot_command()
-    pub fn handle_dot_command(&mut self, command: &str) -> Result<()> {
+    /// Handle dot commands (local client commands)
+    fn handle_dot_command(&mut self, command: &str) -> Result<String> {
         let parts: Vec<&str> = command[1..].split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
+        let cmd = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
 
-        match parts[0] {
+        match cmd.as_str() {
+            // Application commands
             "quit" | "q" => {
-                self.running = false;
-                self.add_system_message("Exiting...");
+                self.quit();
             }
+            "help" | "h" | "?" => {
+                self.show_help();
+            }
+
+            // Layout commands
             "savelayout" => {
                 let name = parts.get(1).unwrap_or(&"default");
-                let terminal_size = crossterm::terminal::size().ok();
-                match self.layout.save(name, terminal_size, false) {
-                    Ok(_) => self.add_system_message(&format!("Layout saved as '{}'", name)),
-                    Err(e) => self.add_system_message(&format!("Failed to save layout: {}", e)),
-                }
+                tracing::info!("[APP_CORE] User entered .savelayout command: '{}'", name);
+                // Note: This is a placeholder - actual handling should be in main.rs with terminal size
+                // For now, we'll use the layout's terminal size or fallback
+                let width = self.layout.terminal_width.unwrap_or(80);
+                let height = self.layout.terminal_height.unwrap_or(24);
+                tracing::warn!(
+                    "savelayout called without terminal size - using layout size {}x{}",
+                    width,
+                    height
+                );
+                self.save_layout(name, width, height);
             }
             "loadlayout" => {
-                let name = parts.get(1).unwrap_or(&"default");
-                let layout_path = crate::config::Config::layout_path(name)?;
-                match crate::config::Layout::load_from_file(&layout_path) {
-                    Ok(new_layout) => {
-                        self.layout = new_layout;
-                        self.add_system_message(&format!("Layout '{}' loaded", name));
-                        self.update_window_manager_config()?;
-                    }
-                    Err(e) => self.add_system_message(&format!("Failed to load layout: {}", e)),
-                }
+                // This is just a placeholder - actual handling is in main.rs with terminal size
+                self.add_system_message(
+                    "Layout loading requires terminal size - handled by main event loop",
+                );
             }
             "layouts" => {
-                match crate::config::Config::list_layouts() {
-                    Ok(layouts) => {
-                        if layouts.is_empty() {
-                            self.add_system_message("No saved layouts");
-                        } else {
-                            self.add_system_message(&format!("Saved layouts: {}", layouts.join(", ")));
-                        }
-                    }
-                    Err(e) => self.add_system_message(&format!("Failed to list layouts: {}", e)),
-                }
+                self.list_layouts();
             }
-            "windows" | "listwindows" => {
-                let window_names = self.window_manager.get_window_names();
-                if window_names.is_empty() {
-                    self.add_system_message("No windows");
+            "resize" => {
+                self.resize_to_current_terminal();
+            }
+
+            // Window management commands
+            "windows" => {
+                self.list_windows();
+            }
+            "deletewindow" | "delwindow" => {
+                if let Some(name) = parts.get(1) {
+                    self.delete_window(name);
                 } else {
-                    self.add_system_message(&format!("Windows ({}): {}", window_names.len(), window_names.join(", ")));
+                    self.add_system_message("Usage: .deletewindow <name>");
                 }
             }
-            "help" => {
-                self.add_system_message("Available commands (experimental mode):");
-                self.add_system_message("  .quit / .q - Exit application");
-                self.add_system_message("  .savelayout [name] - Save current layout");
-                self.add_system_message("  .loadlayout [name] - Load saved layout");
-                self.add_system_message("  .layouts - List saved layouts");
-                self.add_system_message("  .windows - List active windows");
-                self.add_system_message("  .help - Show this help");
+            "addwindow" => {
+                if parts.len() >= 6 {
+                    let name = parts[1];
+                    let widget_type = parts[2];
+                    let x = parts[3].parse::<u16>().unwrap_or(0);
+                    let y = parts[4].parse::<u16>().unwrap_or(0);
+                    let width = parts[5].parse::<u16>().unwrap_or(40);
+                    let height = parts
+                        .get(6)
+                        .and_then(|h| h.parse::<u16>().ok())
+                        .unwrap_or(10);
+                    self.add_window(name, widget_type, x, y, width, height);
+                } else if parts.len() == 1 {
+                    // No arguments - open widget picker
+                    return Ok("action:addwindow".to_string());
+                } else {
+                    self.add_system_message(
+                        "Usage: .addwindow <name> <type> <x> <y> <width> [height]",
+                    );
+                    self.add_system_message(
+                        "Types: text, progress, countdown, compass, hands, room, indicator",
+                    );
+                }
             }
+            "hidewindow" => {
+                if let Some(name) = parts.get(1) {
+                    // Hide specific window
+                    self.hide_window(name);
+                } else {
+                    // No arguments - open window picker for hiding
+                    return Ok("action:hidewindow".to_string());
+                }
+            }
+            "rename" => {
+                if parts.len() >= 3 {
+                    let window_name = parts[1];
+                    let new_title = parts[2..].join(" ");
+                    self.rename_window(window_name, &new_title);
+                } else {
+                    self.add_system_message("Usage: .rename <window> <new title>");
+                }
+            }
+            "border" => {
+                if parts.len() >= 3 {
+                    let window_name = parts[1];
+                    let border_style = parts[2];
+                    let border_color = parts.get(3).map(|s| s.to_string());
+                    self.set_window_border(window_name, border_style, border_color);
+                } else {
+                    self.add_system_message("Usage: .border <window> <style> [color]");
+                    self.add_system_message("Styles: all, none, top, bottom, left, right");
+                }
+            }
+
+            // Highlight commands
+            "highlights" | "hl" => {
+                // Open highlight browser instead of just listing
+                return Ok("action:highlights".to_string());
+            }
+            "addhighlight" | "addhl" => {
+                return Ok("action:addhighlight".to_string());
+            }
+            "edithighlight" | "edithl" => {
+                if let Some(name) = parts.get(1) {
+                    return Ok(format!("action:edithighlight:{}", name));
+                } else {
+                    self.add_system_message("Usage: .edithighlight <name>");
+                }
+            }
+
+            // Keybind commands
+            "keybinds" | "kb" => {
+                return Ok("action:keybinds".to_string());
+            }
+            "addkeybind" | "addkey" => {
+                return Ok("action:addkeybind".to_string());
+            }
+
+            // Color commands
+            "colors" | "colorpalette" => {
+                return Ok("action:colors".to_string());
+            }
+            "addcolor" | "createcolor" => {
+                return Ok("action:addcolor".to_string());
+            }
+            "uicolors" => {
+                return Ok("action:uicolors".to_string());
+            }
+            "spellcolors" => {
+                return Ok("action:spellcolors".to_string());
+            }
+            "addspellcolor" | "newspellcolor" => {
+                return Ok("action:addspellcolor".to_string());
+            }
+
+            // Theme commands
+            "themes" => {
+                return Ok("action:themes".to_string());
+            }
+            "settheme" | "theme" => {
+                if let Some(theme_name) = parts.get(1) {
+                    // Validate theme exists (includes built-in and custom)
+                    let theme_presets = crate::theme::ThemePresets::all_with_custom(
+                        self.config.character.as_deref(),
+                    );
+                    let theme_list_message = Self::available_themes_message(&theme_presets);
+                    if theme_presets.contains_key(*theme_name) {
+                        self.config.active_theme = theme_name.to_string();
+                        self.add_system_message(&format!("Theme switched to: {}", theme_name));
+
+                        // Save config
+                        if let Err(e) = self.config.save(self.config.character.as_deref()) {
+                            tracing::error!("Failed to save config after theme change: {}", e);
+                            self.add_system_message(&format!(
+                                "Warning: Failed to save theme preference: {}",
+                                e
+                            ));
+                        }
+
+                        // Return action so main.rs can update frontend cache
+                        return Ok(format!("action:settheme:{}", theme_name));
+                    } else {
+                        self.add_system_message(&format!("Unknown theme: {}", theme_name));
+                        self.add_system_message(&theme_list_message);
+                    }
+                } else {
+                    self.add_system_message("Usage: .settheme <name>");
+                    let theme_presets = crate::theme::ThemePresets::all_with_custom(
+                        self.config.character.as_deref(),
+                    );
+                    self.add_system_message(&Self::available_themes_message(&theme_presets));
+                }
+            }
+            "edittheme" => {
+                return Ok("action:edittheme".to_string());
+            }
+
+            // Tab navigation commands
+            "nexttab" => {
+                return Ok("action:nexttab".to_string());
+            }
+            "prevtab" => {
+                return Ok("action:prevtab".to_string());
+            }
+            "gonew" | "nextunread" => {
+                return Ok("action:gonew".to_string());
+            }
+
+            // Settings
+            "settings" => {
+                return Ok("action:settings".to_string());
+            }
+
+            // Window editor
+            "editwindow" | "editwin" => {
+                if let Some(name) = parts.get(1) {
+                    return Ok(format!("action:editwindow:{}", name));
+                } else {
+                    // Open window picker
+                    return Ok("action:editwindow".to_string());
+                }
+            }
+
+            // Menu system
+            "menu" => {
+                // Build main menu
+                let items = self.build_main_menu();
+
+                tracing::debug!("Creating menu with {} items", items.len());
+
+                // Create popup menu at center of screen
+                // Position will be adjusted by frontend based on actual terminal size
+                self.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                    items,
+                    (40, 12), // Default center position
+                ));
+
+                // Switch to Menu input mode
+                self.ui_state.input_mode = crate::data::ui_state::InputMode::Menu;
+                tracing::debug!("Input mode set to Menu: {:?}", self.ui_state.input_mode);
+                self.needs_render = true;
+            }
+
             _ => {
-                self.add_system_message(&format!("Unknown command: .{} (try .help)", parts[0]));
+                self.add_system_message(&format!("Unknown command: {}", command));
+                self.add_system_message("Type .help for list of commands");
             }
         }
 
-        Ok(())
+        // Clear input
+        self.ui_state.command_input.clear();
+        self.ui_state.command_cursor = 0;
+
+        // Don't send anything to server
+        Ok(String::new())
+    }
+
+    /// Get list of available dot commands for tab completion
+    pub fn get_available_commands(&self) -> Vec<String> {
+        vec![
+            // Application commands
+            ".quit".to_string(),
+            ".q".to_string(),
+            ".help".to_string(),
+            ".h".to_string(),
+            ".?".to_string(),
+            // Layout commands
+            ".savelayout".to_string(),
+            ".loadlayout".to_string(),
+            ".layouts".to_string(),
+            ".resize".to_string(),
+            // Window management
+            ".windows".to_string(),
+            ".deletewindow".to_string(),
+            ".delwindow".to_string(),
+            ".addwindow".to_string(),
+            ".rename".to_string(),
+            ".border".to_string(),
+            ".editwindow".to_string(),
+            ".editwin".to_string(),
+            // Highlight commands
+            ".highlights".to_string(),
+            ".hl".to_string(),
+            ".addhighlight".to_string(),
+            ".addhl".to_string(),
+            ".edithighlight".to_string(),
+            ".edithl".to_string(),
+            // Keybind commands
+            ".keybinds".to_string(),
+            ".kb".to_string(),
+            ".addkeybind".to_string(),
+            ".addkey".to_string(),
+            // Color commands
+            ".colors".to_string(),
+            ".colorpalette".to_string(),
+            ".addcolor".to_string(),
+            ".createcolor".to_string(),
+            ".uicolors".to_string(),
+            ".spellcolors".to_string(),
+            ".addspellcolor".to_string(),
+            ".newspellcolor".to_string(),
+            // Theme commands
+            ".themes".to_string(),
+            ".settheme".to_string(),
+            ".theme".to_string(),
+            ".edittheme".to_string(),
+            // Tab navigation
+            ".nexttab".to_string(),
+            ".prevtab".to_string(),
+            ".gonew".to_string(),
+            ".nextunread".to_string(),
+            // Settings
+            ".settings".to_string(),
+            // Menu system
+            ".menu".to_string(),
+        ]
+    }
+
+    /// Get list of window names for tab completion
+    pub fn get_window_names(&self) -> Vec<String> {
+        self.layout
+            .windows
+            .iter()
+            .map(|w| w.name().to_string())
+            .collect()
+    }
+
+    /// List all loaded highlights
+    fn list_highlights(&mut self) {
+        let count = self.config.highlights.len();
+
+        // Collect all highlight info first to avoid borrow checker issues
+        let mut lines = vec![format!("=== Highlights ({}) ===", count)];
+
+        for (name, pattern) in &self.config.highlights {
+            let mut info = format!("  {} - pattern: '{}'", name, pattern.pattern);
+            if let Some(ref fg) = pattern.fg {
+                info.push_str(&format!(" fg:{}", fg));
+            }
+            if let Some(ref bg) = pattern.bg {
+                info.push_str(&format!(" bg:{}", bg));
+            }
+            if pattern.bold {
+                info.push_str(" bold");
+            }
+            lines.push(info);
+        }
+
+        // Add all messages
+        for line in lines {
+            self.add_system_message(&line);
+        }
     }
 
     /// Add a system message to the main window
-    ///
-    /// System messages are local notifications (e.g., "Layout saved", "Window created")
     pub fn add_system_message(&mut self, message: &str) {
-        use crate::ui::StyledText;
-        use crate::ui::SpanType;
-        use ratatui::style::Color;
+        use crate::data::{SpanType, StyledLine, TextSegment, WindowContent};
 
-        // Add message to main window
-        if let Some(window) = self.window_manager.get_window("main") {
-            window.add_text(StyledText {
-                content: format!("[VellumFE] {}", message),
-                fg: Some(Color::Yellow),
-                bg: None,
-                bold: false,
-                span_type: SpanType::Normal,
-                link_data: None,
-            });
-            window.finish_line(120);
+        if let Some(main_window) = self.ui_state.get_window_mut("main") {
+            if let WindowContent::Text(ref mut content) = main_window.content {
+                let line = StyledLine {
+                    segments: vec![TextSegment {
+                        text: message.to_string(),
+                        fg: Some("#00ff00".to_string()),
+                        bg: None,
+                        bold: true,
+                        span_type: SpanType::Normal,
+                        link_data: None,
+                    }],
+                };
+                content.add_line(line);
+                self.needs_render = true;
+            }
+        }
+    }
+
+    /// Show help for dot commands
+    fn show_help(&mut self) {
+        self.add_system_message("=== Two-Face Dot Commands ===");
+        self.add_system_message("Application: .quit/.q, .help/.h/.?, .menu, .settings");
+        self.add_system_message(
+            "Layouts: .savelayout [name], .loadlayout [name], .layouts, .resize",
+        );
+        self.add_system_message("Windows: .windows, .addwindow <name> <type> <x> <y> <w> [h]");
+        self.add_system_message(
+            "         .deletewindow <name>, .rename <win> <title>, .editwindow [name]",
+        );
+        self.add_system_message("         .border <win> <style> [color]");
+        self.add_system_message("Highlights: .highlights, .addhighlight, .edithighlight <name>");
+        self.add_system_message("Keybinds: .keybinds, .addkeybind");
+        self.add_system_message(
+            "Colors: .colors, .addcolor, .uicolors, .spellcolors, .addspellcolor",
+        );
+        self.add_system_message("Themes: .themes, .settheme <name>");
+    }
+
+    /// Save current layout
+    pub fn save_layout(&mut self, name: &str, terminal_width: u16, terminal_height: u16) {
+        tracing::info!("========== SAVE LAYOUT: '{}' START ==========", name);
+        tracing::info!(
+            "Current terminal size: {}x{}",
+            terminal_width,
+            terminal_height
+        );
+        tracing::info!("Layout has {} windows defined", self.layout.windows.len());
+        tracing::info!(
+            "UI state has {} windows rendered",
+            self.ui_state.windows.len()
+        );
+
+        // IMPORTANT: Capture actual window positions from UI state before saving
+        // (user may have moved/resized windows with mouse)
+        for window_def in &mut self.layout.windows {
+            let window_name = window_def.name().to_string();
+            let base = window_def.base();
+
+            tracing::debug!(
+                "Window '{}' BEFORE capture: pos=({},{}) size={}x{}",
+                window_name,
+                base.col,
+                base.row,
+                base.cols,
+                base.rows
+            );
+
+            if let Some(window_state) = self.ui_state.windows.get(&window_name) {
+                let ui_pos = &window_state.position;
+                tracing::info!(
+                    "Window '{}' - Capturing from UI state: pos=({},{}) size={}x{}",
+                    window_name,
+                    ui_pos.x,
+                    ui_pos.y,
+                    ui_pos.width,
+                    ui_pos.height
+                );
+
+                // Clamp window position and size to terminal boundaries before saving
+                let clamped_x = ui_pos.x.min(terminal_width.saturating_sub(1));
+                let clamped_y = ui_pos.y.min(terminal_height.saturating_sub(1));
+
+                // Ensure width doesn't exceed available space
+                let max_width = terminal_width.saturating_sub(clamped_x);
+                let clamped_width = ui_pos.width.min(max_width).max(10);
+
+                // Ensure height doesn't exceed available space
+                let max_height = terminal_height.saturating_sub(clamped_y);
+                let clamped_height = ui_pos.height.min(max_height).max(3);
+
+                if clamped_x != ui_pos.x
+                    || clamped_y != ui_pos.y
+                    || clamped_width != ui_pos.width
+                    || clamped_height != ui_pos.height
+                {
+                    tracing::warn!(
+                        "Window '{}' clamped: ({},{} {}x{}) -> ({},{} {}x{}) to fit terminal {}x{}",
+                        window_name,
+                        ui_pos.x,
+                        ui_pos.y,
+                        ui_pos.width,
+                        ui_pos.height,
+                        clamped_x,
+                        clamped_y,
+                        clamped_width,
+                        clamped_height,
+                        terminal_width,
+                        terminal_height
+                    );
+                }
+
+                let base = window_def.base_mut();
+                base.row = clamped_y;
+                base.col = clamped_x;
+                base.rows = clamped_height;
+                base.cols = clamped_width;
+
+                tracing::debug!(
+                    "Window '{}' AFTER capture: pos=({},{}) size={}x{}",
+                    window_name,
+                    base.col,
+                    base.row,
+                    base.cols,
+                    base.rows
+                );
+            } else {
+                tracing::warn!(
+                    "Window '{}' is in layout but NOT in ui_state! Cannot capture position.",
+                    window_name
+                );
+            }
+        }
+
+        let layout_path = match Config::layout_path(name) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::error!("Failed to get layout path for '{}': {}", name, e);
+                self.add_system_message(&format!("Failed to get layout path: {}", e));
+                return;
+            }
+        };
+
+        tracing::info!("Saving layout to: {}", layout_path.display());
+
+        // Pass actual terminal size with force=true so it always updates to current terminal size
+        self.layout.theme = Some(self.config.active_theme.clone());
+        match self
+            .layout
+            .save(name, Some((terminal_width, terminal_height)), true)
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "Layout '{}' saved successfully to {}",
+                    name,
+                    layout_path.display()
+                );
+                tracing::info!("========== SAVE LAYOUT: '{}' SUCCESS ==========", name);
+                self.add_system_message(&format!("Layout saved as '{}'", name));
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to save layout '{}': {}", name, e);
+                tracing::info!("========== SAVE LAYOUT: '{}' FAILED ==========", name);
+                self.add_system_message(&format!("Failed to save layout: {}", e));
+            }
+        }
+    }
+
+    /// Load a saved layout and update window positions/configs
+    ///
+    /// Loads layout at exact positions specified in file.
+    /// Use .resize command for delta-based proportional scaling after loading.
+    pub fn load_layout(
+        &mut self,
+        name: &str,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<(String, crate::theme::AppTheme)> {
+        tracing::info!("========== LOAD LAYOUT: '{}' START ==========", name);
+        tracing::info!(
+            "Current terminal size: {}x{}",
+            terminal_width,
+            terminal_height
+        );
+        tracing::info!("Current layout has {} windows", self.layout.windows.len());
+        tracing::info!(
+            "Current UI state has {} windows",
+            self.ui_state.windows.len()
+        );
+
+        let layout_path = match Config::layout_path(name) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::error!("Failed to get layout path for '{}': {}", name, e);
+                self.add_system_message(&format!("Failed to get layout path: {}", e));
+                return None;
+            }
+        };
+
+        tracing::info!("Loading layout from: {}", layout_path.display());
+
+        match Layout::load_from_file(&layout_path) {
+            Ok(new_layout) => {
+                let theme_update = self.apply_layout_theme(new_layout.theme.as_deref());
+                tracing::info!("Layout file loaded successfully");
+                tracing::info!("Loaded layout has {} windows", new_layout.windows.len());
+                tracing::info!(
+                    "Loaded layout terminal size: {}x{}",
+                    new_layout.terminal_width.unwrap_or(0),
+                    new_layout.terminal_height.unwrap_or(0)
+                );
+
+                // Log all windows in the loaded layout
+                for (idx, window_def) in new_layout.windows.iter().enumerate() {
+                    let base = window_def.base();
+                    tracing::info!(
+                        "  [{}] Window '{}' ({}): pos=({},{}) size={}x{}",
+                        idx,
+                        window_def.name(),
+                        window_def.widget_type(),
+                        base.col,
+                        base.row,
+                        base.cols,
+                        base.rows
+                    );
+                }
+
+                // Check if terminal is too small for any window
+                let mut terminal_too_small = false;
+                for window_def in &new_layout.windows {
+                    let base = window_def.base();
+                    let required_width = base.col + base.cols;
+                    let required_height = base.row + base.rows;
+
+                    if required_width > terminal_width || required_height > terminal_height {
+                        tracing::warn!(
+                            "Window '{}' requires {}x{} but terminal is only {}x{}",
+                            window_def.name(),
+                            required_width,
+                            required_height,
+                            terminal_width,
+                            terminal_height
+                        );
+                        terminal_too_small = true;
+                    }
+                }
+
+                if terminal_too_small {
+                    tracing::error!("Terminal too small to load layout '{}'", name);
+                    self.add_system_message(&format!(
+                        "Cannot load layout '{}': terminal too small",
+                        name
+                    ));
+                    self.add_system_message("Increase terminal size or use a different layout");
+                    return None;
+                }
+
+                // Store new layout
+                let old_layout = std::mem::replace(&mut self.layout, new_layout.clone());
+                self.baseline_layout = Some(new_layout);
+
+                tracing::info!("Calling sync_layout_to_ui_state to apply changes...");
+
+                // Update positions for existing windows, create new ones, remove old ones
+                self.sync_layout_to_ui_state(terminal_width, terminal_height, &old_layout);
+
+                tracing::info!(
+                    "After sync: UI state now has {} windows",
+                    self.ui_state.windows.len()
+                );
+                tracing::info!("========== LOAD LAYOUT: '{}' SUCCESS ==========", name);
+
+                self.add_system_message(&format!("Layout '{}' loaded", name));
+
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+                self.needs_render = true;
+                return theme_update;
+            }
+            Err(e) => {
+                tracing::error!("Failed to load layout file '{}': {}", name, e);
+                tracing::info!("========== LOAD LAYOUT: '{}' FAILED ==========", name);
+                self.add_system_message(&format!("Failed to load layout: {}", e));
+            }
+        }
+
+        None
+    }
+
+    /// Resize all windows proportionally based on current terminal size (VellumFE algorithm)
+    ///
+    /// This command resets to the baseline layout and applies delta-based proportional distribution.
+    /// This is the ONLY place (besides initial load) that should perform scaling operations.
+    pub fn resize_windows(&mut self, terminal_width: u16, terminal_height: u16) {
+        use std::collections::HashSet;
+
+        tracing::info!("========== RESIZE WINDOWS START (VellumFE algorithm) ==========");
+        tracing::info!(
+            "Target terminal size: {}x{}",
+            terminal_width,
+            terminal_height
+        );
+
+        // Get baseline layout (the original, unscaled layout)
+        let baseline_layout = if let Some(ref bl) = self.baseline_layout {
+            bl.clone()
+        } else {
+            tracing::error!("No baseline layout available");
+            self.add_system_message("Error: No baseline layout - cannot resize");
+            self.add_system_message("Load a layout first with .loadlayout");
+            return;
+        };
+
+        let baseline_width = baseline_layout.terminal_width.unwrap_or(terminal_width);
+        let baseline_height = baseline_layout.terminal_height.unwrap_or(terminal_height);
+
+        tracing::info!(
+            "Baseline terminal size: {}x{}",
+            baseline_width,
+            baseline_height
+        );
+
+        // Calculate deltas (not scale factors!)
+        let width_delta = terminal_width as i32 - baseline_width as i32;
+        let height_delta = terminal_height as i32 - baseline_height as i32;
+
+        tracing::info!("Delta: width={:+}, height={:+}", width_delta, height_delta);
+
+        if width_delta == 0 && height_delta == 0 {
+            tracing::info!("No resize needed - terminal size matches baseline");
+            self.add_system_message("Already at baseline size - no resize needed");
+            return;
+        }
+
+        // Reset layout to baseline (critical - prevents cumulative scaling errors)
+        self.layout = baseline_layout;
+
+        tracing::info!("Reset to baseline layout - now applying proportional distribution...");
+
+        // Categorize widgets by scaling behavior
+        let mut static_both = HashSet::new();
+        let mut static_height = HashSet::new();
+        for window_def in &self.layout.windows {
+            let base = window_def.base();
+            match window_def.widget_type() {
+                "compass" | "injury_doll" | "dashboard" | "indicator" => {
+                    static_both.insert(base.name.clone());
+                }
+                "progress" | "countdown" | "hands" | "hand" | "lefthand" | "righthand"
+                | "spellhand" | "command_input" => {
+                    static_height.insert(base.name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // Apply VellumFE's proportional distribution algorithm
+        self.apply_height_resize(height_delta, &static_both, &static_height);
+        self.apply_width_resize(width_delta, &static_both);
+
+        // Update layout terminal size to current
+        self.layout.terminal_width = Some(terminal_width);
+        self.layout.terminal_height = Some(terminal_height);
+
+        // Apply resized positions to UI state
+        for window_def in &self.layout.windows {
+            if let Some(window_state) = self.ui_state.windows.get_mut(window_def.name()) {
+                let base = window_def.base();
+                window_state.position = WindowPosition {
+                    x: base.col,
+                    y: base.row,
+                    width: base.cols,
+                    height: base.rows,
+                };
+                tracing::debug!(
+                    "Applied to UI: '{}' @ ({},{}) size {}x{}",
+                    base.name,
+                    base.col,
+                    base.row,
+                    base.cols,
+                    base.rows
+                );
+            }
         }
 
         self.needs_render = true;
-        tracing::info!("System message: {}", message);
+        self.add_system_message(&format!(
+            "Resized to {}x{} - use .savelayout to save",
+            terminal_width, terminal_height
+        ));
+        tracing::info!("========== RESIZE WINDOWS COMPLETE ==========");
     }
 
-    /// Check and auto-resize layout if terminal is smaller than designed size
-    ///
-    /// TODO: Move implementation from App::check_and_auto_resize()
-    pub fn check_and_auto_resize(&mut self) -> Result<()> {
-        // TODO: Implementation will be moved from App in next step
-        Ok(())
-    }
-
-    /// Update window manager configuration after layout changes
-    ///
-    /// Simplified implementation for experimental mode
-    /// TODO: Add full implementation from App::update_window_manager_config()
-    pub fn update_window_manager_config(&mut self) -> Result<()> {
-        use crate::ui::WindowConfig;
-
-        // Convert layout window definitions to window manager configs
-        let window_configs: Vec<WindowConfig> = self.layout
-            .windows
-            .iter()
-            .map(|w| WindowConfig {
-                name: w.name.clone(),
-                widget_type: w.widget_type.clone(),
-                streams: w.streams.clone(),
-                row: w.row,
-                col: w.col,
-                rows: w.rows,
-                cols: w.cols,
-                buffer_size: w.buffer_size,
-                show_border: w.show_border,
-                border_style: w.border_style.clone(),
-                border_color: w.border_color.clone(),
-                border_sides: w.border_sides.clone(),
-                title: w.title.clone(),
-                content_align: w.content_align.clone(),
-                background_color: w.background_color.clone(),
-                bar_fill: w.bar_fill.clone(),
-                bar_background: w.bar_background.clone(),
-                text_color: w.text_color.clone(),
-                transparent_background: w.transparent_background,
-                countdown_icon: Some(self.config.ui.countdown_icon.clone()),
-                indicator_colors: w.indicator_colors.clone(),
-                dashboard_layout: w.dashboard_layout.clone(),
-                dashboard_indicators: w.dashboard_indicators.clone(),
-                dashboard_spacing: w.dashboard_spacing,
-                dashboard_hide_inactive: w.dashboard_hide_inactive,
-                visible_count: w.visible_count,
-                effect_category: w.effect_category.clone(),
-                tabs: w.tabs.clone(),
-                tab_bar_position: w.tab_bar_position.clone(),
-                tab_active_color: w.tab_active_color.clone(),
-                tab_inactive_color: w.tab_inactive_color.clone(),
-                tab_unread_color: w.tab_unread_color.clone(),
-                tab_unread_prefix: w.tab_unread_prefix.clone(),
-                hand_icon: w.hand_icon.clone(),
-                compass_active_color: w.compass_active_color.clone(),
-                compass_inactive_color: w.compass_inactive_color.clone(),
-                show_timestamps: w.show_timestamps,
-                numbers_only: Some(w.numbers_only),
-                injury_default_color: w.injury_default_color.clone(),
-                injury1_color: w.injury1_color.clone(),
-                injury2_color: w.injury2_color.clone(),
-                injury3_color: w.injury3_color.clone(),
-                scar1_color: w.scar1_color.clone(),
-                scar2_color: w.scar2_color.clone(),
-                scar3_color: w.scar3_color.clone(),
-            })
-            .collect();
-
-        // Update window manager with new configs
-        self.window_manager.update_config(window_configs);
-
-        Ok(())
-    }
-
-    /// Handle keyboard input for command line
-    ///
-    /// Returns Some(command) if Enter was pressed and command should be sent
-    pub fn handle_key_input(&mut self, key: crossterm::event::KeyCode) -> Option<String> {
-        use crossterm::event::KeyCode;
-
-        match key {
-            KeyCode::Char(c) => {
-                // Insert character at cursor position
-                self.command_input.insert(self.command_cursor, c);
-                self.command_cursor += 1;
-                self.needs_render = true;
-                None
-            }
-            KeyCode::Backspace => {
-                // Delete character before cursor
-                if self.command_cursor > 0 {
-                    self.command_input.remove(self.command_cursor - 1);
-                    self.command_cursor -= 1;
-                    self.needs_render = true;
-                }
-                None
-            }
-            KeyCode::Delete => {
-                // Delete character at cursor
-                if self.command_cursor < self.command_input.len() {
-                    self.command_input.remove(self.command_cursor);
-                    self.needs_render = true;
-                }
-                None
-            }
-            KeyCode::Left => {
-                // Move cursor left
-                if self.command_cursor > 0 {
-                    self.command_cursor -= 1;
-                    self.needs_render = true;
-                }
-                None
-            }
-            KeyCode::Right => {
-                // Move cursor right
-                if self.command_cursor < self.command_input.len() {
-                    self.command_cursor += 1;
-                    self.needs_render = true;
-                }
-                None
-            }
-            KeyCode::Home => {
-                // Move cursor to start
-                self.command_cursor = 0;
-                self.needs_render = true;
-                None
-            }
-            KeyCode::End => {
-                // Move cursor to end
-                self.command_cursor = self.command_input.len();
-                self.needs_render = true;
-                None
-            }
-            KeyCode::Enter => {
-                // Send command
-                let command = self.command_input.clone();
-                self.command_input.clear();
-                self.command_cursor = 0;
-                self.needs_render = true;
-
-                if !command.is_empty() {
-                    Some(command)
-                } else {
-                    None
-                }
-            }
-            _ => None,
+    /// Helper to get minimum widget size based on widget type (from VellumFE)
+    fn widget_min_size(&self, widget_type: &str) -> (u16, u16) {
+        match widget_type {
+            "progress" | "countdown" | "indicator" | "hands" | "hand" => (10, 1),
+            "compass" => (13, 5),
+            "injury_doll" => (20, 10),
+            "dashboard" => (15, 3),
+            "command_input" => (20, 1),
+            _ => (5, 3), // text, room, tabbed, etc.
         }
     }
 
-    /// Process a command (either dot command or game command)
-    ///
-    /// Returns Some(command) if it should be sent to the server
-    pub fn process_command(&mut self, command: String) -> Option<String> {
-        if command.starts_with('.') {
-            // Dot command - handle locally
-            if let Err(e) = self.handle_dot_command(&command) {
-                self.add_system_message(&format!("Error: {}", e));
-            }
-            None
+    pub fn window_min_size(&self, window_name: &str) -> (u16, u16) {
+        if let Some(window_def) = self.layout.windows.iter().find(|w| w.name() == window_name) {
+            let (default_min_cols, default_min_rows) =
+                self.widget_min_size(window_def.widget_type());
+            let base = window_def.base();
+            let min_cols = base.min_cols.unwrap_or(default_min_cols);
+            let min_rows = base.min_rows.unwrap_or(default_min_rows);
+            (min_cols, min_rows)
         } else {
-            // Regular command - send to server
-            Some(command)
+            self.widget_min_size("text")
+        }
+    }
+
+    /// Apply proportional height resize (from VellumFE apply_height_resize)
+    /// Adapted for WindowDef enum structure
+    fn apply_height_resize(
+        &mut self,
+        height_delta: i32,
+        static_both: &std::collections::HashSet<String>,
+        static_height: &std::collections::HashSet<String>,
+    ) {
+        use std::collections::HashSet;
+        if height_delta == 0 {
+            return;
+        }
+
+        tracing::debug!("--- HEIGHT SCALING ---");
+
+        let mut height_applied = HashSet::new();
+
+        // Build list of all scalable widgets with their column ranges
+        let mut scalable_widgets: Vec<(String, u16, u16, u16, u16)> = Vec::new();
+        for window_def in &self.layout.windows {
+            let base = window_def.base();
+            if static_both.contains(base.name.as_str())
+                || static_height.contains(base.name.as_str())
+            {
+                continue;
+            }
+            scalable_widgets.push((base.name.clone(), base.row, base.rows, base.col, base.cols));
+        }
+
+        while !scalable_widgets.is_empty() {
+            let anchor = scalable_widgets.remove(0);
+            let (anchor_name, anchor_row, anchor_rows, anchor_col, anchor_cols) = anchor;
+            if height_applied.contains(&anchor_name) {
+                continue;
+            }
+
+            let anchor_col_end = anchor_col + anchor_cols;
+            tracing::debug!(
+                "Processing column stack anchored by '{}' (col {}-{})",
+                anchor_name,
+                anchor_col,
+                anchor_col_end
+            );
+
+            let mut widgets_in_col =
+                vec![(anchor_name.clone(), anchor_row, anchor_rows, anchor_cols)];
+            scalable_widgets.retain(|(name, row, rows, col, cols)| {
+                let col_end = *col + *cols;
+                let overlaps = *col < anchor_col_end && col_end > anchor_col;
+                if overlaps && !height_applied.contains(name) {
+                    widgets_in_col.push((name.clone(), *row, *rows, *cols));
+                    false
+                } else {
+                    true
+                }
+            });
+
+            // Sort by row and distribute proportionally
+            widgets_in_col.sort_by_key(|(_, row, _, _)| *row);
+
+            let total_scalable_height: u16 = widgets_in_col
+                .iter()
+                .filter(|(n, _, _, _)| !height_applied.contains(n))
+                .map(|(_, _, rows, _)| *rows)
+                .sum();
+
+            if total_scalable_height == 0 {
+                continue;
+            }
+
+            let mut adjustments: Vec<(String, i32)> = Vec::new();
+            let mut leftover = height_delta;
+
+            tracing::debug!(
+                "HEIGHT DISTRIBUTION (col {}-{}): height_delta={}, total_scalable_height={}",
+                anchor_col,
+                anchor_col_end,
+                height_delta,
+                total_scalable_height
+            );
+
+            // Distribute proportionally based on current size
+            for (name, _row, rows, _cols) in &widgets_in_col {
+                if !height_applied.contains(name) {
+                    let proportion = *rows as f64 / total_scalable_height as f64;
+                    let share = (proportion * height_delta as f64).floor() as i32;
+                    leftover -= share;
+                    tracing::debug!(
+                        "  {} (rows={}): proportion={:.4}, share={}",
+                        name,
+                        rows,
+                        proportion,
+                        share
+                    );
+                    adjustments.push((name.clone(), share));
+                }
+            }
+
+            tracing::debug!("  Leftover after proportional distribution: {}", leftover);
+
+            // Distribute leftover (one row at a time to first windows)
+            let mut idx = 0;
+            while leftover > 0 && idx < adjustments.len() {
+                adjustments[idx].1 += 1;
+                tracing::debug!("  Distributing +1 leftover row to {}", adjustments[idx].0);
+                leftover -= 1;
+                idx += 1;
+            }
+            while leftover < 0 && idx < adjustments.len() {
+                adjustments[idx].1 -= 1;
+                tracing::debug!("  Distributing -1 leftover row to {}", adjustments[idx].0);
+                leftover += 1;
+                idx += 1;
+            }
+
+            tracing::debug!("  Final adjustments:");
+            for (name, delta) in &adjustments {
+                let orig_rows = widgets_in_col
+                    .iter()
+                    .find(|(n, _, _, _)| n == name)
+                    .map(|(_, _, r, _)| *r)
+                    .unwrap_or(0);
+                tracing::debug!(
+                    "    {}: {} rows -> +{} delta -> {} rows",
+                    name,
+                    orig_rows,
+                    delta,
+                    orig_rows as i32 + delta
+                );
+            }
+
+            let mut current_row = 0u16;
+            for (idx, (name, orig_row, orig_rows, _cols)) in widgets_in_col.iter().enumerate() {
+                if height_applied.contains(name) {
+                    continue;
+                }
+                let adjustment = adjustments
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, a)| *a)
+                    .unwrap_or(0);
+
+                // Find window and get widget type
+                let window_def = self
+                    .layout
+                    .windows
+                    .iter()
+                    .find(|w| w.name() == name)
+                    .unwrap();
+                let widget_type = window_def.widget_type();
+                let base = window_def.base();
+                let (_, min_rows) = self.widget_min_size(&widget_type);
+                let min_constraint = base.min_rows.unwrap_or(min_rows);
+                let max_constraint = base.max_rows;
+
+                let mut new_rows =
+                    (*orig_rows as i32 + adjustment).max(min_constraint as i32) as u16;
+                if let Some(max) = max_constraint {
+                    new_rows = new_rows.min(max);
+                }
+                let new_row = if idx == 0 { *orig_row } else { current_row };
+
+                // Apply changes
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                    let base = w.base_mut();
+                    base.row = new_row;
+                    base.rows = new_rows;
+                    height_applied.insert(name.clone());
+                }
+                current_row = new_row + new_rows;
+            }
+        }
+
+        // Anchor command_input to bottom; build continuous top stack of statics
+        let new_height = if let Some(ref baseline) = self.baseline_layout {
+            if let (Some(_bw), Some(bh)) = (baseline.terminal_width, baseline.terminal_height) {
+                (bh as i32 + height_delta).max(0) as u16
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // Snapshot baseline rows to avoid mixing updates while computing the stack
+        let baseline_rows: Vec<u16> = self.layout.windows.iter().map(|w| w.base().row).collect();
+
+        // Collect static-height windows by baseline row (exclude command_input)
+        use std::collections::BTreeMap;
+        let mut statics_by_row: BTreeMap<u16, Vec<(u16, u16, usize)>> = BTreeMap::new();
+        for (i, w) in self.layout.windows.iter().enumerate() {
+            let base = w.base();
+            if w.widget_type() == "command_input" {
+                continue;
+            }
+            if static_both.contains(base.name.as_str())
+                || static_height.contains(base.name.as_str())
+            {
+                let start = base.col;
+                let end = base.col.saturating_add(base.cols);
+                statics_by_row
+                    .entry(baseline_rows[i])
+                    .or_default()
+                    .push((start, end, i));
+            }
+        }
+
+        // Build the top stack: start with row 0 statics
+        use std::collections::HashSet as _HashSetAlias;
+        let mut stack_indices: _HashSetAlias<usize> = _HashSetAlias::new();
+        let prev_spans: Vec<(u16, u16, usize)> =
+            statics_by_row.get(&0).cloned().unwrap_or_default();
+        for (_, _, i) in &prev_spans {
+            stack_indices.insert(*i);
+        }
+
+        // Track contiguous overlapping rows
+        let mut current_row_opt = Some(0u16);
+        let mut last_spans = prev_spans;
+        while let Some(current_row) = current_row_opt {
+            let next_row = current_row.saturating_add(1);
+            if let Some(candidates) = statics_by_row.get(&next_row) {
+                let mut next_spans: Vec<(u16, u16, usize)> = Vec::new();
+                for (s, e, idx) in candidates.iter().copied() {
+                    let overlaps = last_spans.iter().any(|(ps, pe, _)| s < *pe && e > *ps);
+                    if overlaps {
+                        next_spans.push((s, e, idx));
+                        stack_indices.insert(idx);
+                    }
+                }
+                if next_spans.is_empty() {
+                    break;
+                } else {
+                    last_spans = next_spans;
+                    current_row_opt = Some(next_row);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Apply anchoring: command_input to bottom; top-stack statics remain at baseline; others shift by delta
+        for (i, window_def) in self.layout.windows.iter_mut().enumerate() {
+            let widget_type = window_def.widget_type().to_string();
+            let base_name = window_def.base().name.clone();
+
+            let base = window_def.base_mut();
+            if widget_type == "command_input" {
+                let old_row = base.row;
+                base.row = new_height.saturating_sub(base.rows);
+                tracing::debug!(
+                    "Command input anchored: old_row={}, new_row={}",
+                    old_row,
+                    base.row
+                );
+                continue;
+            }
+            if static_both.contains(base_name.as_str())
+                || static_height.contains(base_name.as_str())
+            {
+                let baseline_row = baseline_rows[i];
+                if stack_indices.contains(&i) {
+                    base.row = baseline_row.min(new_height.saturating_sub(base.rows));
+                } else {
+                    base.row = (baseline_row as i32 + height_delta).max(0) as u16;
+                }
+            }
+        }
+    }
+
+    /// Apply proportional width resize (from VellumFE apply_width_resize)
+    /// Adapted for WindowDef enum structure
+    fn apply_width_resize(
+        &mut self,
+        width_delta: i32,
+        static_both: &std::collections::HashSet<String>,
+    ) {
+        use std::collections::HashSet;
+        if width_delta == 0 {
+            return;
+        }
+
+        tracing::debug!("--- WIDTH SCALING ---");
+
+        let mut width_applied = HashSet::new();
+        let max_row = self
+            .layout
+            .windows
+            .iter()
+            .map(|w| w.base().row + w.base().rows)
+            .max()
+            .unwrap_or(0);
+
+        for current_row in 0..max_row {
+            let mut widgets_at_row: Vec<(String, String, u16, u16, u16, u16)> = Vec::new();
+            for window_def in &self.layout.windows {
+                let base = window_def.base();
+                if width_applied.contains(&base.name) {
+                    continue;
+                }
+                if current_row >= base.row && current_row < base.row + base.rows {
+                    widgets_at_row.push((
+                        base.name.clone(),
+                        window_def.widget_type().to_string(),
+                        base.row,
+                        base.col,
+                        base.rows,
+                        base.cols,
+                    ));
+                }
+            }
+            if widgets_at_row.is_empty() {
+                continue;
+            }
+            widgets_at_row.sort_by_key(|(_, _, _, col, _, _)| *col);
+
+            let mut total_scalable_width: u16 = 0;
+            let mut embedded_widgets = HashSet::new();
+            for (i, (_name_i, _, _, col_i, _, cols_i)) in widgets_at_row.iter().enumerate() {
+                let col_i_end = *col_i + *cols_i;
+                for (j, (name_j, _, _, col_j, _, cols_j)) in widgets_at_row.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    let col_j_end = *col_j + *cols_j;
+                    if *col_j >= *col_i && col_j_end <= col_i_end {
+                        embedded_widgets.insert(name_j.clone());
+                    }
+                }
+            }
+            for (name, _, _, _col, _, cols) in widgets_at_row.iter() {
+                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+                    continue;
+                }
+                total_scalable_width += *cols;
+            }
+            if total_scalable_width == 0 {
+                continue;
+            }
+
+            let mut adjustments: Vec<(String, i32)> = Vec::new();
+            let mut redistribution_pool = 0i32;
+            let mut leftover = width_delta;
+
+            // Distribute proportionally based on current size
+            for (name, _wt, _row, _col, _rows, cols) in &widgets_at_row {
+                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+                    continue;
+                }
+                if !width_applied.contains(name) {
+                    let proportion = *cols as f64 / total_scalable_width as f64;
+                    let share = (proportion * width_delta as f64).floor() as i32;
+                    leftover -= share;
+                    adjustments.push((name.clone(), share));
+                }
+            }
+
+            // Distribute leftover (one column at a time to first windows)
+            let mut idx = 0;
+            while leftover > 0 && idx < adjustments.len() {
+                adjustments[idx].1 += 1;
+                leftover -= 1;
+                idx += 1;
+            }
+            while leftover < 0 && idx < adjustments.len() {
+                adjustments[idx].1 -= 1;
+                leftover += 1;
+                idx += 1;
+            }
+
+            let mut capped_widgets = HashSet::new();
+            for (name, adjustment) in &adjustments {
+                let window_def = self
+                    .layout
+                    .windows
+                    .iter()
+                    .find(|w| w.name() == name)
+                    .unwrap();
+                let base = window_def.base();
+                if let Some(max_cols) = base.max_cols {
+                    let current_cols = base.cols;
+                    let target_cols = (current_cols as i32 + adjustment).max(0) as u16;
+                    if target_cols > max_cols {
+                        let actual_adjustment = (max_cols as i32 - current_cols as i32).max(0);
+                        let unused = adjustment - actual_adjustment;
+                        redistribution_pool += unused;
+                        capped_widgets.insert(name.clone());
+                    }
+                }
+            }
+            if redistribution_pool != 0 {
+                let recipients: Vec<_> = adjustments
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .filter(|n| !capped_widgets.contains(n))
+                    .collect();
+                let recip_count = recipients.len() as i32;
+                if recip_count > 0 {
+                    let each = redistribution_pool / recip_count;
+                    let mut remainder = redistribution_pool % recip_count;
+                    for (name, adj) in &mut adjustments {
+                        if !capped_widgets.contains(name) {
+                            *adj += each;
+                            if remainder != 0 {
+                                *adj += remainder.signum();
+                                remainder -= remainder.signum();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut previous_original_col = 0u16;
+            let mut previous_original_width = 0u16;
+            let mut current_col = 0u16;
+            let mut first_widget_end = 0u16;
+            for (idx, (name, _wt, _row, orig_col, _rows, orig_cols)) in
+                widgets_at_row.iter().enumerate()
+            {
+                if static_both.contains(name.as_str()) {
+                    previous_original_col = *orig_col;
+                    previous_original_width = *orig_cols;
+                    current_col = *orig_col + *orig_cols;
+                    continue;
+                }
+                if width_applied.contains(name) {
+                    let window_def = self
+                        .layout
+                        .windows
+                        .iter()
+                        .find(|w| w.name() == name)
+                        .unwrap();
+                    let current_width = window_def.base().cols;
+                    current_col += current_width;
+                    continue;
+                }
+                let adjustment = adjustments
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, a)| *a)
+                    .unwrap_or(0);
+                let window_def = self
+                    .layout
+                    .windows
+                    .iter()
+                    .find(|w| w.name() == name)
+                    .unwrap();
+                let base = window_def.base();
+                let (min_cols, _) = self.widget_min_size(&window_def.widget_type());
+                let min_constraint = base.min_cols.unwrap_or(min_cols);
+                let max_constraint = base.max_cols;
+                let mut new_cols =
+                    (*orig_cols as i32 + adjustment).max(min_constraint as i32) as u16;
+                if let Some(max) = max_constraint {
+                    new_cols = new_cols.min(max);
+                }
+                if idx == 0 {
+                    first_widget_end = *orig_col + *orig_cols;
+                }
+                let overlaps_first = idx > 0 && *orig_col < first_widget_end;
+                let overlaps_previous = if idx == 0 {
+                    false
+                } else {
+                    *orig_col < previous_original_col + previous_original_width
+                };
+                let new_col = if idx == 0 || overlaps_previous || overlaps_first {
+                    *orig_col
+                } else {
+                    let original_gap =
+                        orig_col.saturating_sub(previous_original_col + previous_original_width);
+                    current_col + original_gap
+                };
+
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                    let base_mut = w.base_mut();
+                    base_mut.col = new_col;
+                    base_mut.cols = new_cols;
+                    width_applied.insert(name.clone());
+                }
+                previous_original_col = *orig_col;
+                previous_original_width = *orig_cols;
+                current_col = new_col + new_cols;
+            }
+        }
+    }
+
+    /// Sync layout WindowDefs to ui_state WindowStates without destroying content
+    ///
+    /// Uses exact positions from layout file.
+    /// Use .resize command for delta-based proportional scaling.
+    pub fn sync_layout_to_ui_state(
+        &mut self,
+        terminal_width: u16,
+        terminal_height: u16,
+        old_layout: &Layout,
+    ) {
+        tracing::info!("--- sync_layout_to_ui_state START ---");
+        tracing::info!("Terminal size: {}x{}", terminal_width, terminal_height);
+        tracing::info!("New layout has {} windows", self.layout.windows.len());
+
+        // Use exact positions from layout file
+        tracing::debug!("Using exact positions from layout file");
+
+        // Track which windows are in the new layout AND visible
+        let new_window_names: std::collections::HashSet<String> = self
+            .layout
+            .windows
+            .iter()
+            .filter(|w| w.base().visible)
+            .map(|w| w.name().to_string())
+            .collect();
+
+        tracing::info!("Visible windows in new layout: {:?}", new_window_names);
+
+        let current_window_names: std::collections::HashSet<String> =
+            self.ui_state.windows.keys().cloned().collect();
+        tracing::info!("Windows currently in UI state: {:?}", current_window_names);
+
+        // Collect windows to create (can't create while iterating due to borrow checker)
+        let mut windows_to_create: Vec<crate::config::WindowDef> = Vec::new();
+        let mut windows_to_update = 0;
+
+        // Update existing windows' positions
+        for window_def in &self.layout.windows {
+            let window_name = window_def.name().to_string();
+            let base = window_def.base();
+
+            // Skip hidden windows
+            if !base.visible {
+                tracing::debug!("Skipping hidden window '{}'", window_name);
+                continue;
+            }
+
+            // Use exact position from layout file
+            let position = WindowPosition {
+                x: base.col,
+                y: base.row,
+                width: base.cols,
+                height: base.rows,
+            };
+
+            tracing::debug!(
+                "Processing window '{}': exact pos=({},{}) size={}x{}",
+                window_name,
+                position.x,
+                position.y,
+                position.width,
+                position.height
+            );
+
+            if let Some(window_state) = self.ui_state.windows.get_mut(&window_name) {
+                // Window exists - just update position (preserve content!)
+                let old_pos = window_state.position.clone();
+                window_state.position = position.clone();
+                windows_to_update += 1;
+                tracing::info!(
+                    "UPDATING window '{}': pos ({},{})→({},{}) size {}x{}→{}x{}",
+                    window_name,
+                    old_pos.x,
+                    old_pos.y,
+                    position.x,
+                    position.y,
+                    old_pos.width,
+                    old_pos.height,
+                    position.width,
+                    position.height
+                );
+            } else {
+                // Window doesn't exist - queue for creation
+                tracing::info!(
+                    "Window '{}' not in UI state - queuing for creation",
+                    window_name
+                );
+                windows_to_create.push(window_def.clone());
+            }
+        }
+
+        tracing::info!(
+            "Summary: {} windows to update, {} windows to create",
+            windows_to_update,
+            windows_to_create.len()
+        );
+
+        // Create new windows
+        if !windows_to_create.is_empty() {
+            tracing::info!("Creating {} new windows...", windows_to_create.len());
+            for window_def in windows_to_create {
+                let window_name = window_def.name().to_string();
+                tracing::info!(
+                    "CREATING window '{}' ({})",
+                    window_name,
+                    window_def.widget_type()
+                );
+                self.add_new_window(&window_def, terminal_width, terminal_height);
+            }
+        }
+
+        // Remove windows that are no longer in the layout
+        let windows_to_remove: Vec<String> = self
+            .ui_state
+            .windows
+            .keys()
+            .filter(|name| !new_window_names.contains(*name))
+            .cloned()
+            .collect();
+
+        if !windows_to_remove.is_empty() {
+            tracing::info!(
+                "Removing {} windows not in new layout: {:?}",
+                windows_to_remove.len(),
+                windows_to_remove
+            );
+            for window_name in windows_to_remove {
+                self.ui_state.remove_window(&window_name);
+                tracing::info!("REMOVED window '{}'", window_name);
+            }
+        } else {
+            tracing::info!("No windows to remove");
+        }
+
+        tracing::info!("--- sync_layout_to_ui_state COMPLETE ---");
+    }
+
+    /// Load a saved layout with terminal size for immediate reinitialization
+    pub fn load_layout_with_size(&mut self, name: &str, width: u16, height: u16) {
+        let layout_path = match Config::layout_path(name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.add_system_message(&format!("Failed to get layout path: {}", e));
+                return;
+            }
+        };
+
+        match Layout::load_from_file(&layout_path) {
+            Ok(new_layout) => {
+                self.apply_layout_theme(new_layout.theme.as_deref());
+                self.layout = new_layout.clone();
+                self.baseline_layout = Some(new_layout);
+                self.add_system_message(&format!("Layout '{}' loaded", name));
+
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+
+                // Reinitialize windows from new layout with actual terminal size
+                self.init_windows(width, height);
+                self.needs_render = true;
+            }
+            Err(e) => self.add_system_message(&format!("Failed to load layout: {}", e)),
+        }
+    }
+
+    /// List all saved layouts
+    fn list_layouts(&mut self) {
+        match Config::list_layouts() {
+            Ok(layouts) => {
+                if layouts.is_empty() {
+                    self.add_system_message("No saved layouts");
+                } else {
+                    self.add_system_message(&format!("=== Saved Layouts ({}) ===", layouts.len()));
+                    for layout in layouts {
+                        self.add_system_message(&format!("  {}", layout));
+                    }
+                }
+            }
+            Err(e) => self.add_system_message(&format!("Failed to list layouts: {}", e)),
+        }
+    }
+
+    /// Resize layout using delta-based proportional distribution
+    /// This method is called by the .resize command and requires manual invocation
+    pub fn resize_to_terminal(&mut self, terminal_width: u16, terminal_height: u16) {
+        // Need a baseline layout to calculate delta from
+        let baseline = match &self.baseline_layout {
+            Some(baseline) => baseline,
+            None => {
+                self.add_system_message(
+                    "No baseline layout - save current layout first with .savelayout",
+                );
+                return;
+            }
+        };
+
+        // Get baseline terminal size
+        let baseline_width = baseline.terminal_width.unwrap_or(80);
+        let baseline_height = baseline.terminal_height.unwrap_or(24);
+
+        // Calculate delta
+        let width_delta = terminal_width as i32 - baseline_width as i32;
+        let height_delta = terminal_height as i32 - baseline_height as i32;
+
+        if width_delta == 0 && height_delta == 0 {
+            self.add_system_message(&format!(
+                "Terminal size unchanged ({}x{})",
+                terminal_width, terminal_height
+            ));
+            return;
+        }
+
+        tracing::info!(
+            "Resizing layout: baseline {}x{} -> current {}x{} (delta: {}x{})",
+            baseline_width,
+            baseline_height,
+            terminal_width,
+            terminal_height,
+            width_delta,
+            height_delta
+        );
+
+        // Simple delta-based proportional distribution
+        // For each window: calculate its proportion of total size, then distribute delta proportionally
+
+        // Calculate total scalable width and height from baseline
+        let total_baseline_width: u16 = baseline.windows.iter().map(|w| w.base().cols).sum();
+        let total_baseline_height: u16 = baseline.windows.iter().map(|w| w.base().rows).sum();
+
+        let mut width_remainder = width_delta;
+        let mut height_remainder = height_delta;
+
+        // Apply proportional resize to each window in the layout
+        for window_def in &mut self.layout.windows {
+            let window_name = window_def.name().to_string();
+            let baseline_window = baseline.windows.iter().find(|w| w.name() == window_name);
+
+            if let Some(baseline_win) = baseline_window {
+                let baseline_base = baseline_win.base();
+                let base = window_def.base_mut();
+
+                // Calculate width adjustment
+                if total_baseline_width > 0 && width_delta != 0 {
+                    let proportion = baseline_base.cols as f64 / total_baseline_width as f64;
+                    let width_share = (proportion * width_delta as f64).floor() as i32;
+                    let new_width = (baseline_base.cols as i32 + width_share).max(1) as u16;
+                    base.cols = new_width;
+                    width_remainder -= width_share;
+                }
+
+                // Calculate height adjustment
+                if total_baseline_height > 0 && height_delta != 0 {
+                    let proportion = baseline_base.rows as f64 / total_baseline_height as f64;
+                    let height_share = (proportion * height_delta as f64).floor() as i32;
+                    let new_height = (baseline_base.rows as i32 + height_share).max(1) as u16;
+                    base.rows = new_height;
+                    height_remainder -= height_share;
+                }
+            }
+        }
+
+        // Distribute remainders to first windows (simple round-robin)
+        if width_remainder != 0 {
+            for window_def in &mut self.layout.windows {
+                if width_remainder == 0 {
+                    break;
+                }
+                let base = window_def.base_mut();
+                if width_remainder > 0 {
+                    base.cols += 1;
+                    width_remainder -= 1;
+                } else if base.cols > 1 {
+                    base.cols -= 1;
+                    width_remainder += 1;
+                }
+            }
+        }
+
+        if height_remainder != 0 {
+            for window_def in &mut self.layout.windows {
+                if height_remainder == 0 {
+                    break;
+                }
+                let base = window_def.base_mut();
+                if height_remainder > 0 {
+                    base.rows += 1;
+                    height_remainder -= 1;
+                } else if base.rows > 1 {
+                    base.rows -= 1;
+                    height_remainder += 1;
+                }
+            }
+        }
+
+        // Update layout terminal size
+        self.layout.terminal_width = Some(terminal_width);
+        self.layout.terminal_height = Some(terminal_height);
+
+        // Mark as modified and trigger re-init
+        self.layout_modified_since_save = true;
+        self.init_windows(terminal_width, terminal_height);
+        self.needs_render = true;
+
+        self.add_system_message(&format!(
+            "Layout resized to {}x{} (delta: {:+}x{:+})",
+            terminal_width, terminal_height, width_delta, height_delta
+        ));
+    }
+
+    /// Wrapper for resize command - gets terminal size from layout
+    fn resize_to_current_terminal(&mut self) {
+        let width = self.layout.terminal_width.unwrap_or(80);
+        let height = self.layout.terminal_height.unwrap_or(24);
+        self.resize_to_terminal(width, height);
+    }
+
+    /// List all windows
+    fn list_windows(&mut self) {
+        let window_count = self.ui_state.windows.len();
+
+        // Collect window info first to avoid borrow checker issues
+        let mut window_info = Vec::new();
+        for (name, window) in &self.ui_state.windows {
+            let pos = &window.position;
+            let visible = if window.visible { "visible" } else { "hidden" };
+            window_info.push(format!(
+                "  {} - {}x{} at ({},{}) - {} - {}",
+                name,
+                pos.width,
+                pos.height,
+                pos.x,
+                pos.y,
+                visible,
+                format!("{:?}", window.widget_type)
+            ));
+        }
+
+        // Now add all messages
+        self.add_system_message(&format!("=== Windows ({}) ===", window_count));
+        for info in window_info {
+            self.add_system_message(&info);
+        }
+    }
+
+    /// Hide a window (keep in layout for persistence, remove from UI)
+    pub fn hide_window(&mut self, name: &str) {
+        if name == "main" {
+            self.add_system_message("Cannot hide main window");
+            return;
+        }
+
+        // Find ALL windows with this name and mark as hidden (handles duplicates)
+        let mut found_count = 0;
+        for window_def in self.layout.windows.iter_mut() {
+            if window_def.name() == name && window_def.base().visible {
+                window_def.base_mut().visible = false;
+                found_count += 1;
+            }
+        }
+
+        if found_count > 0 {
+            // Remove from UI state (but keep in layout!)
+            self.ui_state.remove_window(name);
+
+            let msg = if found_count > 1 {
+                format!(
+                    "Window '{}' hidden ({} duplicates removed)",
+                    name, found_count
+                )
+            } else {
+                format!("Window '{}' hidden", name)
+            };
+            self.add_system_message(&msg);
+            self.mark_layout_modified();
+            self.needs_render = true;
+            tracing::info!(
+                "Hid {} instance(s) of window '{}' - template(s) preserved in layout",
+                found_count,
+                name
+            );
+        } else {
+            self.add_system_message(&format!("Window '{}' not found or already hidden", name));
+        }
+    }
+
+    /// Show a window (unhide it - restore from layout template)
+    pub fn show_window(&mut self, name: &str, terminal_width: u16, terminal_height: u16) {
+        // Find window in layout and mark as visible
+        let window_def_clone =
+            if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                // Mark as visible
+                window_def.base_mut().visible = true;
+                // Clone for use after the mutable borrow ends
+                window_def.clone()
+            } else {
+                self.add_system_message(&format!("Window template '{}' not found in layout", name));
+                return;
+            };
+
+        // Create in UI state from layout template (borrow checker happy now)
+        self.add_new_window(&window_def_clone, terminal_width, terminal_height);
+
+        self.add_system_message(&format!("Window '{}' shown", name));
+        self.mark_layout_modified();
+        self.needs_render = true;
+        tracing::info!("Showed window '{}' - restored from layout template", name);
+    }
+
+    /// Delete a window (legacy - use hide_window instead)
+    fn delete_window(&mut self, name: &str) {
+        // For backwards compatibility, redirect to hide
+        self.hide_window(name);
+    }
+
+    /// Add a new window
+    fn add_window(
+        &mut self,
+        name: &str,
+        widget_type_str: &str,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    ) {
+        use crate::config::WindowDef;
+        use crate::data::{
+            CompassData, CountdownData, IndicatorData, ProgressData, RoomContent, TextContent,
+            WidgetType, WindowContent, WindowPosition, WindowState,
+        };
+
+        // Check if window already exists
+        if self.ui_state.windows.contains_key(name) {
+            self.add_system_message(&format!("Window '{}' already exists", name));
+            return;
+        }
+
+        // Parse widget type
+        let widget_type = match widget_type_str.to_lowercase().as_str() {
+            "text" => WidgetType::Text,
+            "progress" => WidgetType::Progress,
+            "countdown" => WidgetType::Countdown,
+            "compass" => WidgetType::Compass,
+            "injury_doll" | "injuries" => WidgetType::InjuryDoll,
+            "hand" => WidgetType::Hand,
+            "room" => WidgetType::Room,
+            "indicator" => WidgetType::Indicator,
+            "command_input" | "commandinput" => WidgetType::CommandInput,
+            _ => {
+                self.add_system_message(&format!("Unknown widget type: {}", widget_type_str));
+                self.add_system_message("Types: text, progress, countdown, compass, injury_doll, hand, room, indicator, command_input");
+                return;
+            }
+        };
+
+        // Create window content based on type
+        let content = match widget_type {
+            WidgetType::Text => WindowContent::Text(TextContent::new(name, 1000)),
+            WidgetType::Progress => WindowContent::Progress(ProgressData {
+                value: 100,
+                max: 100,
+                label: name.to_string(),
+                color: None,
+            }),
+            WidgetType::Countdown => WindowContent::Countdown(CountdownData {
+                end_time: 0,
+                label: name.to_string(),
+            }),
+            WidgetType::Compass => WindowContent::Compass(CompassData {
+                directions: Vec::new(),
+            }),
+            WidgetType::InjuryDoll => WindowContent::InjuryDoll(InjuryDollData::new()),
+            WidgetType::Hand => WindowContent::Hand {
+                item: None,
+                link: None,
+            },
+            WidgetType::Room => WindowContent::Room(RoomContent {
+                name: String::new(),
+                description: Vec::new(),
+                exits: Vec::new(),
+                players: Vec::new(),
+                objects: Vec::new(),
+            }),
+            WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
+                status: String::from("standing"),
+                color: None,
+            }),
+            WidgetType::CommandInput => WindowContent::CommandInput {
+                text: String::new(),
+                cursor: 0,
+                history: Vec::new(),
+                history_index: None,
+            },
+            _ => WindowContent::Empty,
+        };
+
+        // Create window state
+        let window = WindowState {
+            name: name.to_string(),
+            widget_type: widget_type.clone(),
+            content,
+            position: WindowPosition {
+                x,
+                y,
+                width,
+                height,
+            },
+            visible: true,
+            focused: false,
+        };
+
+        // Add to UI state
+        self.ui_state.set_window(name.to_string(), window);
+
+        // Create window definition for layout
+        use crate::config::{
+            BorderSides, CommandInputWidgetData, RoomWidgetData, TextWidgetData, WindowBase,
+        };
+
+        let base = WindowBase {
+            name: name.to_string(),
+            row: y,
+            col: x,
+            rows: height,
+            cols: width,
+            show_border: true,
+            border_style: "single".to_string(),
+            border_sides: BorderSides::default(),
+            border_color: None,
+            show_title: true,
+            title: Some(name.to_string()),
+            background_color: None,
+            text_color: None,
+            transparent_background: true,
+            locked: false,
+            min_rows: None,
+            max_rows: None,
+            min_cols: None,
+            max_cols: None,
+            visible: true,
+        };
+
+        let window_def = match widget_type_str.to_lowercase().as_str() {
+            "text" => WindowDef::Text {
+                base,
+                data: TextWidgetData {
+                    streams: vec![],
+                    buffer_size: 1000,
+                },
+            },
+            "room" => WindowDef::Room {
+                base,
+                data: RoomWidgetData {
+                    buffer_size: 0,
+                    show_desc: true,
+                    show_objs: true,
+                    show_players: true,
+                    show_exits: true,
+                    show_name: false,
+                },
+            },
+            "command_input" | "commandinput" => WindowDef::CommandInput {
+                base,
+                data: CommandInputWidgetData::default(),
+            },
+            _ => {
+                // Default to text window for unknown types
+                WindowDef::Text {
+                    base,
+                    data: TextWidgetData {
+                        streams: vec![],
+                        buffer_size: 1000,
+                    },
+                }
+            }
+        };
+
+        // Add to layout at the front (so new windows appear on top)
+        self.layout.windows.insert(0, window_def);
+
+        self.add_system_message(&format!(
+            "Window '{}' added ({}x{} at {},{}) - type: {}",
+            name, width, height, x, y, widget_type_str
+        ));
+        self.needs_render = true;
+    }
+
+    /// Rename a window's title
+    fn rename_window(&mut self, window_name: &str, new_title: &str) {
+        // Update in layout definition
+        if let Some(window_def) = self
+            .layout
+            .windows
+            .iter_mut()
+            .find(|w| w.name() == window_name)
+        {
+            window_def.base_mut().title = Some(new_title.to_string());
+            self.add_system_message(&format!(
+                "Window '{}' renamed to '{}'",
+                window_name, new_title
+            ));
+            self.needs_render = true;
+        } else {
+            self.add_system_message(&format!("Window '{}' not found", window_name));
+        }
+    }
+
+    /// Set window border style and color
+    fn set_window_border(&mut self, window_name: &str, style: &str, color: Option<String>) {
+        if let Some(window_def) = self
+            .layout
+            .windows
+            .iter_mut()
+            .find(|w| w.name() == window_name)
+        {
+            use crate::config::BorderSides;
+
+            let style_lower = style.to_lowercase();
+            let (new_show, new_sides) = match style_lower.as_str() {
+                "none" => (false, window_def.base().border_sides.clone()),
+                "all" => (true, BorderSides::default()),
+                "top" => (
+                    true,
+                    BorderSides {
+                        top: true,
+                        bottom: false,
+                        left: false,
+                        right: false,
+                    },
+                ),
+                "bottom" => (
+                    true,
+                    BorderSides {
+                        top: false,
+                        bottom: true,
+                        left: false,
+                        right: false,
+                    },
+                ),
+                "left" => (
+                    true,
+                    BorderSides {
+                        top: false,
+                        bottom: false,
+                        left: true,
+                        right: false,
+                    },
+                ),
+                "right" => (
+                    true,
+                    BorderSides {
+                        top: false,
+                        bottom: false,
+                        left: false,
+                        right: true,
+                    },
+                ),
+                _ => {
+                    self.add_system_message(&format!("Unknown border style: {}", style));
+                    return;
+                }
+            };
+
+            window_def
+                .base_mut()
+                .apply_border_configuration(new_show, new_sides);
+
+            // Set border color if provided
+            if let Some(c) = color {
+                window_def.base_mut().border_color = Some(c);
+            }
+
+            self.add_system_message(&format!("Border updated for window '{}'", window_name));
+            self.needs_render = true;
+        } else {
+            self.add_system_message(&format!("Window '{}' not found", window_name));
+        }
+    }
+
+    /// Handle terminal resize
+    pub fn resize(&mut self, width: u16, height: u16) {
+        // Recalculate all window positions
+        let positions = self.calculate_window_positions(width, height);
+
+        // Update all window positions
+        for (name, position) in positions {
+            if let Some(window) = self.ui_state.get_window_mut(&name) {
+                window.position = position;
+            }
+        }
+
+        self.needs_render = true;
+    }
+
+    /// Calculate window positions based on layout and terminal size
+    fn calculate_window_positions(
+        &self,
+        width: u16,
+        height: u16,
+    ) -> HashMap<String, WindowPosition> {
+        let mut positions = HashMap::new();
+
+        // Use layout file values directly (row, col, rows, cols from layout)
+        // Scale if terminal size differs from layout's expected terminal size
+        let layout_width = self.layout.terminal_width.unwrap_or(width) as f32;
+        let layout_height = self.layout.terminal_height.unwrap_or(height) as f32;
+        let actual_width = width as f32;
+        let actual_height = height as f32;
+
+        // Calculate scale factors (don't scale if layout size is 0 or terminal size matches)
+        let scale_x = if layout_width > 0.0 && (layout_width - actual_width).abs() > 1.0 {
+            actual_width / layout_width
+        } else {
+            1.0
+        };
+        let scale_y = if layout_height > 0.0 && (layout_height - actual_height).abs() > 1.0 {
+            actual_height / layout_height
+        } else {
+            1.0
+        };
+
+        tracing::debug!(
+            "Layout terminal size: {}x{}, actual: {}x{}, scale: {:.2}x{:.2}",
+            layout_width,
+            layout_height,
+            actual_width,
+            actual_height,
+            scale_x,
+            scale_y
+        );
+
+        for window_def in &self.layout.windows {
+            // Scale window position and size
+            let scaled_x = (window_def.base().col as f32 * scale_x) as u16;
+            let scaled_y = (window_def.base().row as f32 * scale_y) as u16;
+            let mut scaled_width = (window_def.base().cols as f32 * scale_x).max(1.0) as u16;
+            let mut scaled_height = (window_def.base().rows as f32 * scale_y).max(1.0) as u16;
+
+            // Apply min/max constraints from window settings
+            if let Some(min_cols) = window_def.base().min_cols {
+                if scaled_width < min_cols {
+                    tracing::debug!(
+                        "Window '{}': enforcing min_cols={} (was {})",
+                        window_def.name(),
+                        min_cols,
+                        scaled_width
+                    );
+                    scaled_width = min_cols;
+                }
+            }
+            if let Some(max_cols) = window_def.base().max_cols {
+                if scaled_width > max_cols {
+                    tracing::debug!(
+                        "Window '{}': enforcing max_cols={} (was {})",
+                        window_def.name(),
+                        max_cols,
+                        scaled_width
+                    );
+                    scaled_width = max_cols;
+                }
+            }
+            if let Some(min_rows) = window_def.base().min_rows {
+                if scaled_height < min_rows {
+                    tracing::debug!(
+                        "Window '{}': enforcing min_rows={} (was {})",
+                        window_def.name(),
+                        min_rows,
+                        scaled_height
+                    );
+                    scaled_height = min_rows;
+                }
+            }
+            if let Some(max_rows) = window_def.base().max_rows {
+                if scaled_height > max_rows {
+                    tracing::debug!(
+                        "Window '{}': enforcing max_rows={} (was {})",
+                        window_def.name(),
+                        max_rows,
+                        scaled_height
+                    );
+                    scaled_height = max_rows;
+                }
+            }
+
+            tracing::debug!(
+                "Window '{}': layout pos=({},{}) size={}x{}, scaled pos=({},{}) size={}x{}",
+                window_def.name(),
+                window_def.base().col,
+                window_def.base().row,
+                window_def.base().cols,
+                window_def.base().rows,
+                scaled_x,
+                scaled_y,
+                scaled_width,
+                scaled_height
+            );
+
+            positions.insert(
+                window_def.name().to_string(),
+                WindowPosition {
+                    x: scaled_x,
+                    y: scaled_y,
+                    width: scaled_width,
+                    height: scaled_height,
+                },
+            );
+        }
+
+        positions
+    }
+
+    /// Build main menu for .menu command
+    fn build_main_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Colors >".to_string(),
+                command: "__SUBMENU__colors".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Highlights >".to_string(),
+                command: "__SUBMENU__highlights".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Keybinds >".to_string(),
+                command: "__SUBMENU__keybinds".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Layouts >".to_string(),
+                command: "__SUBMENU__layouts".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Themes >".to_string(),
+                command: "__SUBMENU__themes".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Settings".to_string(),
+                command: ".settings".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Windows >".to_string(),
+                command: "__SUBMENU__windows".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build colors submenu
+    fn build_colors_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Add color".to_string(),
+                command: ".addcolor".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse colors".to_string(),
+                command: ".colors".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Add spellcolor".to_string(),
+                command: ".addspellcolor".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse spellcolors".to_string(),
+                command: ".spellcolors".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse UI colors".to_string(),
+                command: ".uicolors".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build highlights submenu
+    fn build_highlights_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Add highlight".to_string(),
+                command: ".addhighlight".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse highlights".to_string(),
+                command: ".highlights".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build keybinds submenu
+    fn build_keybinds_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Add keybind".to_string(),
+                command: ".addkeybind".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse keybinds".to_string(),
+                command: ".keybinds".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build themes submenu
+    fn build_themes_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Browse themes".to_string(),
+                command: ".themes".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Edit theme".to_string(),
+                command: ".edittheme".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build windows submenu
+    fn build_windows_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Add window".to_string(),
+                command: ".addwindow".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Edit window".to_string(),
+                command: ".editwindow".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Hide window".to_string(),
+                command: ".hidewindow".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "List windows".to_string(),
+                command: ".windows".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build layouts submenu
+    fn build_layouts_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let mut items = Vec::new();
+
+        // Get list of saved layouts
+        match Config::list_layouts() {
+            Ok(layouts) => {
+                for layout_name in layouts {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: layout_name.clone(),
+                        command: format!("loadlayout:{}", layout_name),
+                        disabled: false,
+                    });
+                }
+            }
+            Err(_) => {
+                // If we can't load layouts, just show a disabled message
+                items.push(crate::data::ui_state::PopupMenuItem {
+                    text: "No layouts found".to_string(),
+                    command: String::new(),
+                    disabled: true,
+                });
+            }
+        }
+
+        items
+    }
+
+    /// Build submenu based on category name
+    pub fn build_submenu(&self, category: &str) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        match category {
+            "colors" => self.build_colors_submenu(),
+            "highlights" => self.build_highlights_submenu(),
+            "keybinds" => self.build_keybinds_submenu(),
+            "layouts" => self.build_layouts_submenu(),
+            "themes" => self.build_themes_submenu(),
+            "windows" => self.build_windows_submenu(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Handle menu response from server
+    fn handle_menu_response(&mut self, counter: &str, coords: &[(String, Option<String>)]) {
+        // Look up the pending request
+        let pending = match self.pending_menu_requests.remove(counter) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Received menu response for unknown counter: {}", counter);
+                return;
+            }
+        };
+
+        tracing::info!(
+            "Menu response for exist_id {} (noun: {}): {} coords",
+            pending.exist_id,
+            pending.noun,
+            coords.len()
+        );
+
+        // Check if cmdlist is loaded
+        let cmdlist = match &self.cmdlist {
+            Some(list) => list,
+            None => {
+                tracing::warn!("Context menu received but cmdlist not loaded");
+                return;
+            }
+        };
+
+        // Group menu items by category
+        let mut categories: HashMap<String, Vec<crate::data::ui_state::PopupMenuItem>> =
+            HashMap::new();
+
+        for (coord, secondary_noun) in coords {
+            if let Some(entry) = cmdlist.get(coord) {
+                // Skip _dialog commands
+                if entry.command.starts_with("_dialog") {
+                    continue;
+                }
+
+                // Build menu text (remove @ and # placeholders, substitute %)
+                let menu_text = Self::format_menu_text(&entry.menu, secondary_noun.as_deref());
+
+                // Build command with placeholders substituted
+                let command = CmdList::substitute_command(
+                    &entry.command,
+                    &pending.noun,
+                    &pending.exist_id,
+                    secondary_noun.as_deref(),
+                );
+
+                let category = if entry.menu_cat.is_empty() {
+                    "0".to_string()
+                } else {
+                    entry.menu_cat.clone()
+                };
+
+                categories.entry(category).or_insert_with(Vec::new).push(
+                    crate::data::ui_state::PopupMenuItem {
+                        text: menu_text,
+                        command,
+                        disabled: false,
+                    },
+                );
+            }
+        }
+
+        if categories.is_empty() {
+            tracing::warn!("No menu items available for this object");
+            return;
+        }
+
+        // Build final menu with categories
+        let mut menu_items = Vec::new();
+        let mut sorted_cats: Vec<_> = categories.keys().cloned().collect();
+
+        // Sort categories, but keep "0" at the end
+        sorted_cats.sort_by(|a, b| {
+            if a == "0" {
+                std::cmp::Ordering::Greater
+            } else if b == "0" {
+                std::cmp::Ordering::Less
+            } else {
+                a.cmp(b)
+            }
+        });
+
+        // Add items to menu
+        for cat in &sorted_cats {
+            let items = categories.get(cat).unwrap();
+
+            // Categories with _ become submenus (except "0")
+            if cat.contains('_') && cat != "0" {
+                // Cache submenu items
+                self.menu_categories.insert(cat.clone(), items.clone());
+
+                // Add submenu entry to main menu
+                let cat_name = cat.split('_').nth(1).unwrap_or(cat).replace('-', " ");
+                let cat_name = cat_name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_default()
+                    + &cat_name[1..];
+                menu_items.push(crate::data::ui_state::PopupMenuItem {
+                    text: format!("{} >", cat_name),
+                    command: format!("__SUBMENU__{}", cat),
+                    disabled: false,
+                });
+            } else {
+                // Add items directly to main menu
+                menu_items.extend(items.clone());
+            }
+        }
+
+        // Create popup menu at last click position (or centered)
+        let position = self.last_link_click_pos.unwrap_or((40, 12));
+
+        self.ui_state.popup_menu =
+            Some(crate::data::ui_state::PopupMenu::new(menu_items, position));
+        self.ui_state.input_mode = crate::data::ui_state::InputMode::Menu;
+
+        tracing::info!(
+            "Created context menu with {} items",
+            self.ui_state.popup_menu.as_ref().unwrap().get_items().len()
+        );
+    }
+
+    /// Format menu text by removing @ and # placeholders and substituting %
+    fn format_menu_text(menu: &str, secondary_noun: Option<&str>) -> String {
+        let mut text = menu.to_string();
+
+        // Substitute % with secondary noun
+        if let Some(sec_noun) = secondary_noun {
+            text = text.replace('%', sec_noun);
+        }
+
+        // Find first @ or #
+        if let Some(pos) = text.find(|c| c == '@' || c == '#') {
+            let remaining = text[pos + 1..].trim();
+            if remaining.is_empty() {
+                // Placeholder at end - truncate
+                text[..pos].trim_end().to_string()
+            } else {
+                // Placeholder in middle - remove it but keep rest
+                let before = text[..pos].trim_end();
+                let after = text[pos + 1..].trim_start();
+                if before.is_empty() {
+                    after.to_string()
+                } else {
+                    format!("{} {}", before, after)
+                }
+            }
+        } else {
+            text
+        }
+    }
+
+    /// Request context menu for a link
+    /// Returns the _menu command to send to the server
+    pub fn request_menu(
+        &mut self,
+        exist_id: String,
+        noun: String,
+        click_pos: (u16, u16),
+    ) -> String {
+        // Increment counter
+        self.menu_request_counter += 1;
+        let counter = self.menu_request_counter;
+
+        // Store pending request
+        self.pending_menu_requests.insert(
+            counter.to_string(),
+            PendingMenuRequest {
+                exist_id: exist_id.clone(),
+                noun,
+            },
+        );
+
+        // Store click position for menu placement
+        self.last_link_click_pos = Some(click_pos);
+
+        // Return command to send to server
+        format!("_menu #{} {}\n", exist_id, counter)
+    }
+
+    /// Mark layout as modified and show reminder (once per session)
+    pub fn mark_layout_modified(&mut self) {
+        self.layout_modified_since_save = true;
+
+        // Show reminder once per session
+        if !self.save_reminder_shown {
+            self.add_system_message(
+                "Tip: Use .savelayout <name> to preserve changes as a reusable template",
+            );
+            self.save_reminder_shown = true;
+        }
+    }
+
+    /// Quit the application
+    pub fn quit(&mut self) {
+        // Show reminder if layout was modified
+        if self.layout_modified_since_save {
+            self.add_system_message(
+                "Layout modified - use .savelayout <name> to create reusable template",
+            );
+        }
+
+        // Autosave to character-specific layout.toml (if character is set)
+        if let Some(ref character) = self.config.character {
+            let terminal_size = self
+                .layout
+                .terminal_width
+                .and_then(|w| self.layout.terminal_height.map(|h| (w, h)));
+
+            let base_layout_name = self
+                .base_layout_name
+                .clone()
+                .or_else(|| self.layout.base_layout.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            self.layout.theme = Some(self.config.active_theme.clone());
+            if let Err(e) = self
+                .layout
+                .save_auto(character, &base_layout_name, terminal_size)
+            {
+                tracing::warn!("Failed to autosave layout on quit: {}", e);
+            } else {
+                tracing::info!(
+                    "Layout autosaved to character profile '{}' (base: {}, terminal: {:?})",
+                    character,
+                    base_layout_name,
+                    terminal_size
+                );
+            }
+        } else {
+            // No character set - save to shared autolayout
+            let terminal_size = self
+                .layout
+                .terminal_width
+                .and_then(|w| self.layout.terminal_height.map(|h| (w, h)));
+
+            self.layout.theme = Some(self.config.active_theme.clone());
+            if let Err(e) = self.layout.save("autolayout", terminal_size, true) {
+                tracing::warn!("Failed to autosave layout on quit: {}", e);
+            } else {
+                tracing::info!(
+                    "Layout autosaved to 'autolayout' (terminal: {:?})",
+                    terminal_size
+                );
+            }
+        }
+
+        self.running = false;
+    }
+
+    /// Save configuration to disk
+    pub fn save_config(&mut self) -> Result<()> {
+        self.config.save(self.config.character.as_deref())
+    }
+
+    /// Start search mode (Ctrl+F)
+    pub fn start_search_mode(&mut self) {
+        self.ui_state.input_mode = crate::data::ui_state::InputMode::Search;
+        self.ui_state.search_input.clear();
+        self.ui_state.search_cursor = 0;
+        self.needs_render = true;
+    }
+
+    /// Get the focused window name (or "main" as default)
+    pub fn get_focused_window_name(&self) -> String {
+        self.ui_state
+            .focused_window
+            .clone()
+            .unwrap_or_else(|| "main".to_string())
+    }
+
+    /// Clear search mode
+    pub fn clear_search_mode(&mut self) {
+        // Exit search mode
+        if self.ui_state.input_mode == crate::data::ui_state::InputMode::Search {
+            self.ui_state.input_mode = crate::data::ui_state::InputMode::Normal;
+        }
+
+        self.ui_state.search_input.clear();
+        self.ui_state.search_cursor = 0;
+        self.needs_render = true;
+    }
+
+    // ========== Menu Building Methods ==========
+
+    /// Build the top-level "Add Window" menu showing widget categories
+    pub fn build_add_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let categories_map = crate::config::Config::get_addable_templates_by_category(&self.layout);
+
+        // Sort categories for consistent display
+        let mut categories: Vec<_> = categories_map.into_iter().collect();
+        categories.sort_by_key(|(cat, _)| cat.clone());
+
+        categories
+            .into_iter()
+            .map(
+                |(category, _templates)| crate::data::ui_state::PopupMenuItem {
+                    text: category.display_name().to_string(),
+                    command: format!("__SUBMENU_ADD__{:?}", category),
+                    disabled: false,
+                },
+            )
+            .collect()
+    }
+
+    /// Build category submenu showing available windows of that type
+    pub fn build_add_window_category_menu(
+        &self,
+        category: &crate::config::WidgetCategory,
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let categories_map = crate::config::Config::get_addable_templates_by_category(&self.layout);
+
+        if let Some(templates) = categories_map.get(category) {
+            templates
+                .iter()
+                .map(|name| crate::data::ui_state::PopupMenuItem {
+                    text: self.get_window_display_name(name),
+                    command: format!("__ADD__{}", name),
+                    disabled: false,
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Build "Hide Window" menu showing currently visible windows
+    pub fn build_hide_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let visible = crate::config::Config::list_visible_windows(&self.layout);
+
+        visible
+            .into_iter()
+            // Filter out essential windows that should never be hidden
+            .filter(|name| name != "story" && name != "command_input")
+            .map(|name| crate::data::ui_state::PopupMenuItem {
+                text: self.get_window_display_name(&name),
+                command: format!("__HIDE__{}", name),
+                disabled: false,
+            })
+            .collect()
+    }
+
+    /// Build "Edit Window" menu showing currently visible windows
+    pub fn build_edit_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let visible = crate::config::Config::list_visible_windows(&self.layout);
+
+        visible
+            .into_iter()
+            .map(|name| crate::data::ui_state::PopupMenuItem {
+                text: self.get_window_display_name(&name),
+                command: format!("__EDIT__{}", name),
+                disabled: false,
+            })
+            .collect()
+    }
+
+    /// Get display name for a window (uses title from template, or falls back to name)
+    fn get_window_display_name(&self, name: &str) -> String {
+        crate::config::Config::get_window_template(name)
+            .and_then(|t| t.base().title.clone())
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Check if text matches any highlight patterns with sounds and play them
+    pub fn check_sound_triggers(&self, text: &str) {
+        if let Some(ref sound_player) = self.sound_player {
+            for (_name, pattern) in &self.config.highlights {
+                // Skip if no sound configured for this pattern
+                if pattern.sound.is_none() {
+                    continue;
+                }
+
+                let matches = if pattern.fast_parse {
+                    // Fast parse: check if any of the pipe-separated patterns are in the text
+                    pattern.pattern.split('|').any(|p| text.contains(p.trim()))
+                } else {
+                    // Regex parse
+                    if let Ok(regex) = regex::Regex::new(&pattern.pattern) {
+                        regex.is_match(text)
+                    } else {
+                        false
+                    }
+                };
+
+                if matches {
+                    if let Some(ref sound_file) = pattern.sound {
+                        // Play the sound
+                        if let Err(e) =
+                            sound_player.play_from_sounds_dir(sound_file, pattern.sound_volume)
+                        {
+                            tracing::warn!("Failed to play sound '{}': {}", sound_file, e);
+                        }
+                    }
+                }
+            }
         }
     }
 }
