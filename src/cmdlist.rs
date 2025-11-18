@@ -1,3 +1,8 @@
+//! Parser/lookup helpers for the `cmdlist1.xml` dataset distributed with Lich.
+//!
+//! Cmdlist entries power the radial context menu system by mapping coordinates
+//! to displayable text/commands and providing placeholder substitution.
+
 use anyhow::{Context, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -7,16 +12,16 @@ use std::fs;
 /// A single command list entry from cmdlist1.xml
 #[derive(Debug, Clone)]
 pub struct CmdListEntry {
-    pub coord: String,           // e.g., "2524,2061"
-    pub menu: String,            // Display text: e.g., "look @"
-    pub command: String,         // Command to send: e.g., "look #"
-    pub menu_cat: String,        // Category: e.g., "1" or "5_roleplay"
+    pub coord: String,    // e.g., "2524,2061"
+    pub menu: String,     // Display text: e.g., "look @"
+    pub command: String,  // Command to send: e.g., "look #"
+    pub menu_cat: String, // Category: e.g., "1" or "5_roleplay"
 }
 
 /// Parser and lookup for cmdlist1.xml
 #[derive(Clone)]
 pub struct CmdList {
-    entries: HashMap<String, CmdListEntry>,  // coord -> entry
+    entries: HashMap<String, CmdListEntry>, // coord -> entry
 }
 
 impl CmdList {
@@ -73,17 +78,26 @@ impl CmdList {
                         if let (Some(coord), Some(menu), Some(command), Some(menu_cat)) =
                             (coord, menu, command, menu_cat)
                         {
-                            entries.insert(coord.clone(), CmdListEntry {
-                                coord,
-                                menu,
-                                command,
-                                menu_cat,
-                            });
+                            entries.insert(
+                                coord.clone(),
+                                CmdListEntry {
+                                    coord,
+                                    menu,
+                                    command,
+                                    menu_cat,
+                                },
+                            );
                         }
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(anyhow::anyhow!("XML parse error at position {}: {}", reader.buffer_position(), e)),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "XML parse error at position {}: {}",
+                        reader.buffer_position(),
+                        e
+                    ))
+                }
                 _ => {}
             }
             buf.clear();
@@ -102,7 +116,12 @@ impl CmdList {
     /// @ = noun (display text)
     /// # = "#exist_id" (with # prefix)
     /// % = secondary item placeholder (for commands like "transfer @ %")
-    pub fn substitute_command(command: &str, noun: &str, exist_id: &str, secondary: Option<&str>) -> String {
+    pub fn substitute_command(
+        command: &str,
+        noun: &str,
+        exist_id: &str,
+        secondary: Option<&str>,
+    ) -> String {
         let mut result = command.to_string();
 
         // Replace @ with noun

@@ -1,5 +1,11 @@
-use std::time::{Duration, Instant};
+//! Centralized runtime performance telemetry collection.
+//!
+//! `PerformanceStats` keeps rolling metrics for frame timing, parser throughput,
+//! network IO, and general memory indicators so the UI can surface them in the
+//! performance overlay as well as log spikes for diagnostics.
+
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// Performance statistics tracker
 #[derive(Debug, Clone)]
@@ -27,22 +33,22 @@ pub struct PerformanceStats {
     app_start_time: Instant,
 
     // Detailed render timing
-    render_times: VecDeque<Duration>,  // Total render time per frame
-    ui_render_times: VecDeque<Duration>,  // UI widget render time
-    text_wrap_times: VecDeque<Duration>,  // Text wrapping time
+    render_times: VecDeque<Duration>, // Total render time per frame
+    ui_render_times: VecDeque<Duration>, // UI widget render time
+    text_wrap_times: VecDeque<Duration>, // Text wrapping time
     max_render_samples: usize,
 
     // Event processing
-    event_process_times: VecDeque<Duration>,  // Time to process each event
+    event_process_times: VecDeque<Duration>, // Time to process each event
     events_processed: u64,
     max_event_samples: usize,
 
     // Memory tracking (approximate)
-    total_lines_buffered: usize,  // Total lines across all windows
+    total_lines_buffered: usize, // Total lines across all windows
     active_window_count: usize,
 
     // Element counts
-    elements_parsed: u64,  // Total XML elements parsed
+    elements_parsed: u64, // Total XML elements parsed
     elements_sample_start: Instant,
     elements_parsed_last_second: u64,
 }
@@ -54,6 +60,7 @@ impl Default for PerformanceStats {
 }
 
 impl PerformanceStats {
+    /// Construct a tracker with rolling windows sized for second-level summaries.
     pub fn new() -> Self {
         let now = Instant::now();
         Self {
@@ -183,7 +190,8 @@ impl PerformanceStats {
 
     /// Get minimum frame time in milliseconds
     pub fn min_frame_time_ms(&self) -> f64 {
-        self.frame_times.iter()
+        self.frame_times
+            .iter()
             .min()
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0)
@@ -191,7 +199,8 @@ impl PerformanceStats {
 
     /// Get maximum frame time in milliseconds
     pub fn max_frame_time_ms(&self) -> f64 {
-        self.frame_times.iter()
+        self.frame_times
+            .iter()
             .max()
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0)
@@ -303,7 +312,8 @@ impl PerformanceStats {
 
     /// Get max render time in milliseconds
     pub fn max_render_time_ms(&self) -> f64 {
-        self.render_times.iter()
+        self.render_times
+            .iter()
             .max()
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0)
@@ -338,7 +348,8 @@ impl PerformanceStats {
 
     /// Get max event process time in microseconds
     pub fn max_event_process_time_us(&self) -> f64 {
-        self.event_process_times.iter()
+        self.event_process_times
+            .iter()
             .max()
             .map(|d| d.as_secs_f64() * 1_000_000.0)
             .unwrap_or(0.0)

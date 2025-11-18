@@ -1,15 +1,29 @@
+//! Thin cross-platform wrapper over the optional `rodio` crate.
+//!
+//! The sound module exposes a `SoundPlayer` that understands how to load audio
+//! assets from the user's configuration directory, enforce per-sound cooldowns,
+//! and abstract over whether the `sound` cargo feature is enabled.  It also
+//! provides helpers for seeding a default `~/.two-face/sounds` directory so the
+//! application can ship bundled effects.
+
 use anyhow::Result;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, warn};
 
+#[cfg(feature = "sound")]
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+#[cfg(feature = "sound")]
+use std::fs::File;
+#[cfg(feature = "sound")]
+use std::io::BufReader;
+
 /// Sound player for playing audio files
 pub struct SoundPlayer {
+    #[cfg(feature = "sound")]
     _stream: OutputStream,
+    #[cfg(feature = "sound")]
     stream_handle: OutputStreamHandle,
     enabled: bool,
     volume: f32,
@@ -20,16 +34,29 @@ pub struct SoundPlayer {
 impl SoundPlayer {
     /// Create a new sound player
     pub fn new(enabled: bool, volume: f32, cooldown_ms: u64) -> Result<Self> {
-        let (stream, stream_handle) = OutputStream::try_default()?;
+        #[cfg(feature = "sound")]
+        {
+            let (stream, stream_handle) = OutputStream::try_default()?;
 
-        Ok(Self {
-            _stream: stream,
-            stream_handle,
-            enabled,
-            volume: volume.clamp(0.0, 1.0),
-            cooldown_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            cooldown_duration: std::time::Duration::from_millis(cooldown_ms),
-        })
+            Ok(Self {
+                _stream: stream,
+                stream_handle,
+                enabled,
+                volume: volume.clamp(0.0, 1.0),
+                cooldown_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                cooldown_duration: std::time::Duration::from_millis(cooldown_ms),
+            })
+        }
+
+        #[cfg(not(feature = "sound"))]
+        {
+            Ok(Self {
+                enabled,
+                volume: volume.clamp(0.0, 1.0),
+                cooldown_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                cooldown_duration: std::time::Duration::from_millis(cooldown_ms),
+            })
+        }
     }
 
     /// Set whether sounds are enabled
@@ -66,6 +93,7 @@ impl SoundPlayer {
     /// * `path` - Path to the sound file (supports WAV, MP3, OGG, FLAC)
     /// * `volume_override` - Optional volume override for this sound (0.0 to 1.0)
     /// * `sound_id` - Identifier for cooldown tracking (usually the file path)
+    #[cfg(feature = "sound")]
     pub fn play(&self, path: &PathBuf, volume_override: Option<f32>, sound_id: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
@@ -112,10 +140,22 @@ impl SoundPlayer {
         Ok(())
     }
 
+    /// Play stub for when sound feature is disabled
+    #[cfg(not(feature = "sound"))]
+    pub fn play(
+        &self,
+        _path: &PathBuf,
+        _volume_override: Option<f32>,
+        _sound_id: &str,
+    ) -> Result<()> {
+        debug!("Sound playback disabled (sound feature not enabled)");
+        Ok(())
+    }
+
     /// Play a sound from the shared sounds directory
     ///
     /// # Arguments
-    /// * `filename` - Filename in ~/.vellum-fe/sounds/
+    /// * `filename` - Filename in ~/.two-face/sounds/
     /// * `volume_override` - Optional volume override
     pub fn play_from_sounds_dir(&self, filename: &str, volume_override: Option<f32>) -> Result<()> {
         let sounds_dir = crate::config::Config::sounds_dir()
@@ -136,7 +176,10 @@ impl SoundPlayer {
                 }
             }
             if !found {
-                warn!("Sound file not found: {:?} (tried extensions: mp3, wav, ogg, flac)", sounds_dir.join(filename));
+                warn!(
+                    "Sound file not found: {:?} (tried extensions: mp3, wav, ogg, flac)",
+                    sounds_dir.join(filename)
+                );
                 return Ok(()); // Don't error, just skip
             }
         }

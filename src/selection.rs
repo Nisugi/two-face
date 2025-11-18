@@ -1,3 +1,9 @@
+//! Helpers for tracking mouse-driven selections inside text windows.
+//!
+//! The `selection` module tracks the active selection range in window space and
+//! offers utilities for translating between screen coordinates and window
+//! rectangles.
+
 use ratatui::layout::Rect;
 
 /// Represents a position in the text (window, line, column)
@@ -20,6 +26,7 @@ pub struct SelectionState {
 }
 
 impl SelectionState {
+    /// Create a new selection anchored at the provided window/line/column.
     pub fn new(window_index: usize, line: usize, col: usize) -> Self {
         let pos = TextPosition {
             window_index,

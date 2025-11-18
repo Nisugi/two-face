@@ -1,0 +1,956 @@
+//! Core application logic - Pure business logic without UI coupling
+//!
+//! AppCore manages game state, configuration, and message processing.
+//! It has NO knowledge of rendering - all state is stored in data structures
+//! that frontends read from.
+
+use crate::config::{Config, Layout};
+use crate::data::*;
+use crate::core::{GameState, MessageProcessor};
+use crate::parser::{XmlParser, ParsedElement};
+use crate::cmdlist::CmdList;
+use crate::performance::PerformanceStats;
+use anyhow::Result;
+use std::collections::HashMap;
+
+/// Core application state - frontend-agnostic
+pub struct AppCore {
+    // === Configuration ===
+    /// Application configuration (presets, highlights, keybinds, etc.)
+    pub config: Config,
+
+    /// Current window layout definition
+    pub layout: Layout,
+
+    /// Baseline layout for proportional resizing
+    pub baseline_layout: Option<Layout>,
+
+    // === State ===
+    /// Game session state (connection, character, room, vitals, etc.)
+    pub game_state: GameState,
+
+    /// UI state (windows, focus, input, popups, etc.)
+    pub ui_state: UiState,
+
+    // === Message Processing ===
+    /// XML parser for GemStone IV protocol
+    pub parser: XmlParser,
+
+    /// Message processor (routes parsed elements to state updates)
+    pub message_processor: MessageProcessor,
+
+    // === Stream Management ===
+    /// Current active stream ID (where text is being routed)
+    pub current_stream: String,
+
+    /// If true, discard text because no window exists for stream
+    pub discard_current_stream: bool,
+
+    /// Buffer for accumulating multi-line stream content
+    pub stream_buffer: String,
+
+    // === Timing ===
+    /// Server time offset (server_time - local_time) for countdown calculations
+    pub server_time_offset: i64,
+
+    // === Optional Features ===
+    /// Command list for context menus (None if failed to load)
+    pub cmdlist: Option<CmdList>,
+
+    /// Performance statistics tracking
+    pub perf_stats: PerformanceStats,
+
+    /// Whether to show performance stats
+    pub show_perf_stats: bool,
+
+    // === Navigation State ===
+    /// Navigation room ID from <nav rm='...'/>
+    pub nav_room_id: Option<String>,
+
+    /// Lich room ID extracted from room display
+    pub lich_room_id: Option<String>,
+
+    /// Room subtitle (e.g., " - Emberthorn Refuge, Bowery")
+    pub room_subtitle: Option<String>,
+
+    /// Room component buffers (id -> lines of segments)
+    /// Components: "room desc", "room objs", "room players", "room exits"
+    pub room_components: HashMap<String, Vec<Vec<TextSegment>>>,
+
+    /// Current room component being built
+    pub current_room_component: Option<String>,
+
+    /// Flag indicating room window needs sync
+    pub room_window_dirty: bool,
+
+    // === Runtime Flags ===
+    /// Application running flag
+    pub running: bool,
+
+    /// Dirty flag - true if state changed and needs re-render
+    pub needs_render: bool,
+
+    /// Track if current chunk has main stream text
+    pub chunk_has_main_text: bool,
+
+    /// Track if current chunk has silent updates (vitals, buffs, etc.)
+    pub chunk_has_silent_updates: bool,
+
+    /// Track if layout has been modified since last .savelayout
+    pub layout_modified_since_save: bool,
+
+    /// Track if save reminder has been shown this session
+    pub save_reminder_shown: bool,
+
+    /// Base layout name for autosave reference
+    pub base_layout_name: Option<String>,
+}
+
+impl AppCore {
+    /// Create a new AppCore instance
+    pub fn new(config: Config) -> Result<Self> {
+        // Load layout from file system
+        let layout = Layout::load(config.character.as_deref())?;
+
+        // Load command list
+        let cmdlist = CmdList::load().ok();
+
+        // Create message processor
+        let message_processor = MessageProcessor::new(config.clone());
+
+        // Convert presets from config to parser format
+        let preset_list: Vec<(String, Option<String>, Option<String>)> = config.colors.presets
+            .iter()
+            .map(|(id, preset)| (id.clone(), preset.fg.clone(), preset.bg.clone()))
+            .collect();
+
+        // Create parser with presets and event patterns
+        let parser = XmlParser::with_presets(preset_list, config.event_patterns.clone());
+
+        Ok(Self {
+            config,
+            layout: layout.clone(),
+            baseline_layout: Some(layout),
+            game_state: GameState::new(),
+            ui_state: UiState::new(),
+            parser,
+            message_processor,
+            current_stream: String::from("main"),
+            discard_current_stream: false,
+            stream_buffer: String::new(),
+            server_time_offset: 0,
+            cmdlist,
+            perf_stats: PerformanceStats::new(),
+            show_perf_stats: false,
+            nav_room_id: None,
+            lich_room_id: None,
+            room_subtitle: None,
+            room_components: HashMap::new(),
+            current_room_component: None,
+            room_window_dirty: false,
+            running: true,
+            needs_render: true,
+            chunk_has_main_text: false,
+            chunk_has_silent_updates: false,
+            layout_modified_since_save: false,
+            save_reminder_shown: false,
+            base_layout_name: None,
+        })
+    }
+
+    /// Initialize windows based on current layout
+    pub fn init_windows(&mut self, terminal_width: u16, terminal_height: u16) {
+        // Calculate window positions from layout
+        let positions = self.calculate_window_positions(terminal_width, terminal_height);
+
+        // Create windows based on layout
+        for window_def in &self.layout.windows {
+            let position = positions.get(window_def.name()).cloned().unwrap_or(WindowPosition {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 24,
+            });
+
+            let widget_type = match window_def.widget_type() {
+                "text" => WidgetType::Text,
+                "tabbedtext" => WidgetType::TabbedText,
+                "progress" => WidgetType::Progress,
+                "countdown" => WidgetType::Countdown,
+                "compass" => WidgetType::Compass,
+                "indicator" => WidgetType::Indicator,
+                "room" => WidgetType::Room,
+                "inventory" => WidgetType::Inventory,
+                "command_input" | "commandinput" => WidgetType::CommandInput,  // Support both for backward compatibility
+                "dashboard" => WidgetType::Dashboard,
+                "hands" => WidgetType::Hands,
+                _ => WidgetType::Text,
+            };
+
+            let title = window_def.base().title.as_deref().unwrap_or(window_def.name());
+
+            let content = match widget_type {
+                WidgetType::Text => WindowContent::Text(TextContent::new(title, 1000)),
+                WidgetType::CommandInput => WindowContent::CommandInput {
+                    text: String::new(),
+                    cursor: 0,
+                    history: Vec::new(),
+                    history_index: None,
+                },
+                WidgetType::Progress => WindowContent::Progress(ProgressData {
+                    value: 100,
+                    max: 100,
+                    label: title.to_string(),
+                    color: None,
+                }),
+                WidgetType::Countdown => WindowContent::Countdown(CountdownData {
+                    end_time: 0,
+                    label: title.to_string(),
+                }),
+                WidgetType::Compass => WindowContent::Compass(CompassData {
+                    directions: Vec::new(),
+                }),
+                WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
+                    status: String::from("standing"),
+                    color: None,
+                }),
+                WidgetType::Hands => WindowContent::Hands {
+                    left: None,
+                    right: None,
+                },
+                WidgetType::Room => WindowContent::Room(RoomContent {
+                    name: String::new(),
+                    description: Vec::new(),
+                    exits: Vec::new(),
+                    players: Vec::new(),
+                    objects: Vec::new(),
+                }),
+                _ => WindowContent::Empty,
+            };
+
+            let window = WindowState {
+                name: window_def.name.clone(),
+                widget_type,
+                content,
+                position,
+                visible: true,
+                focused: false,
+            };
+
+            self.ui_state.set_window(window_def.name.clone(), window);
+        }
+
+        self.needs_render = true;
+    }
+
+    /// Process incoming XML data from server
+    pub fn process_server_data(&mut self, data: &str) -> Result<()> {
+        // Parse XML line by line
+        for line in data.lines() {
+            let elements = self.parser.parse_line(line);
+
+            // Process each element
+            for element in elements {
+                self.process_element(&element)?;
+            }
+
+            // Finish the current line after processing all elements from this network line
+            // This ensures newlines from the game are preserved (like VellumFE does)
+            self.message_processor.flush_current_stream(&mut self.ui_state);
+        }
+
+        Ok(())
+    }
+
+    /// Process a single parsed XML element
+    fn process_element(&mut self, element: &ParsedElement) -> Result<()> {
+        // Update game state and UI state via message processor
+        self.message_processor.process_element(
+            element,
+            &mut self.game_state,
+            &mut self.ui_state,
+            &mut self.room_components,
+            &mut self.current_room_component,
+            &mut self.room_window_dirty,
+            &mut self.nav_room_id,
+            &mut self.lich_room_id,
+            &mut self.room_subtitle,
+        );
+
+        // Mark that we need to render
+        self.needs_render = true;
+
+        Ok(())
+    }
+
+    /// Send command to server
+    pub fn send_command(&mut self, command: String) -> Result<String> {
+        // Check for dot commands (local client commands)
+        if command.starts_with('.') {
+            return self.handle_dot_command(&command);
+        }
+
+        // Add to command history
+        if !command.is_empty() {
+            self.ui_state.command_history.push(command.clone());
+        }
+
+        // Clear current input
+        self.ui_state.command_input.clear();
+        self.ui_state.command_cursor = 0;
+        self.ui_state.command_history_index = None;
+
+        // Return formatted command for network layer to send
+        Ok(format!("{}\n", command))
+    }
+
+    /// Handle dot commands (local client commands)
+    fn handle_dot_command(&mut self, command: &str) -> Result<String> {
+        let parts: Vec<&str> = command[1..].split_whitespace().collect();
+        let cmd = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
+
+        match cmd.as_str() {
+            // Application commands
+            "quit" | "q" => {
+                self.quit();
+            }
+            "help" | "h" | "?" => {
+                self.show_help();
+            }
+
+            // Layout commands
+            "savelayout" => {
+                let name = parts.get(1).unwrap_or(&"default");
+                self.save_layout(name);
+            }
+            "loadlayout" => {
+                let name = parts.get(1).unwrap_or(&"default");
+                self.load_layout(name);
+            }
+            "layouts" => {
+                self.list_layouts();
+            }
+            "resize" => {
+                self.resize_to_current_terminal();
+            }
+
+            // Window management commands
+            "windows" => {
+                self.list_windows();
+            }
+            "deletewindow" | "delwindow" => {
+                if let Some(name) = parts.get(1) {
+                    self.delete_window(name);
+                } else {
+                    self.add_system_message("Usage: .deletewindow <name>");
+                }
+            }
+            "addwindow" => {
+                if parts.len() >= 6 {
+                    let name = parts[1];
+                    let widget_type = parts[2];
+                    let x = parts[3].parse::<u16>().unwrap_or(0);
+                    let y = parts[4].parse::<u16>().unwrap_or(0);
+                    let width = parts[5].parse::<u16>().unwrap_or(40);
+                    let height = parts.get(6).and_then(|h| h.parse::<u16>().ok()).unwrap_or(10);
+                    self.add_window(name, widget_type, x, y, width, height);
+                } else {
+                    self.add_system_message("Usage: .addwindow <name> <type> <x> <y> <width> [height]");
+                    self.add_system_message("Types: text, progress, countdown, compass, hands, room, indicator");
+                }
+            }
+            "rename" => {
+                if parts.len() >= 3 {
+                    let window_name = parts[1];
+                    let new_title = parts[2..].join(" ");
+                    self.rename_window(window_name, &new_title);
+                } else {
+                    self.add_system_message("Usage: .rename <window> <new title>");
+                }
+            }
+            "border" => {
+                if parts.len() >= 3 {
+                    let window_name = parts[1];
+                    let border_style = parts[2];
+                    let border_color = parts.get(3).map(|s| s.to_string());
+                    self.set_window_border(window_name, border_style, border_color);
+                } else {
+                    self.add_system_message("Usage: .border <window> <style> [color]");
+                    self.add_system_message("Styles: all, none, top, bottom, left, right");
+                }
+            }
+
+            // Highlight commands
+            "highlights" | "hl" => {
+                self.list_highlights();
+            }
+
+            // Menu system
+            "menu" => {
+                // Build main menu
+                let items = self.build_main_menu();
+
+                tracing::debug!("Creating menu with {} items", items.len());
+
+                // Create popup menu at center of screen
+                // Position will be adjusted by frontend based on actual terminal size
+                self.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                    items,
+                    (40, 12), // Default center position
+                ));
+
+                // Switch to Menu input mode
+                self.ui_state.input_mode = crate::data::ui_state::InputMode::Menu;
+                tracing::debug!("Input mode set to Menu: {:?}", self.ui_state.input_mode);
+                self.needs_render = true;
+            }
+
+            _ => {
+                self.add_system_message(&format!("Unknown command: {}", command));
+                self.add_system_message("Type .help for list of commands");
+            }
+        }
+
+        // Clear input
+        self.ui_state.command_input.clear();
+        self.ui_state.command_cursor = 0;
+
+        // Don't send anything to server
+        Ok(String::new())
+    }
+
+    /// List all loaded highlights
+    fn list_highlights(&mut self) {
+        let count = self.config.highlights.len();
+
+        // Collect all highlight info first to avoid borrow checker issues
+        let mut lines = vec![format!("=== Highlights ({}) ===", count)];
+
+        for (name, pattern) in &self.config.highlights {
+            let mut info = format!("  {} - pattern: '{}'", name, pattern.pattern);
+            if let Some(ref fg) = pattern.fg {
+                info.push_str(&format!(" fg:{}", fg));
+            }
+            if let Some(ref bg) = pattern.bg {
+                info.push_str(&format!(" bg:{}", bg));
+            }
+            if pattern.bold {
+                info.push_str(" bold");
+            }
+            lines.push(info);
+        }
+
+        // Add all messages
+        for line in lines {
+            self.add_system_message(&line);
+        }
+    }
+
+    /// Add a system message to the main window
+    fn add_system_message(&mut self, message: &str) {
+        use crate::data::{WindowContent, StyledLine, TextSegment, SpanType};
+
+        if let Some(main_window) = self.ui_state.get_window_mut("main") {
+            if let WindowContent::Text(ref mut content) = main_window.content {
+                let line = StyledLine {
+                    segments: vec![TextSegment {
+                        text: message.to_string(),
+                        fg: Some("#00ff00".to_string()),
+                        bg: None,
+                        bold: true,
+                        span_type: SpanType::Normal,
+                        link_data: None,
+                    }],
+                };
+                content.add_line(line);
+                self.needs_render = true;
+            }
+        }
+    }
+
+    /// Show help for dot commands
+    fn show_help(&mut self) {
+        self.add_system_message("=== Two-Face Dot Commands ===");
+        self.add_system_message("Application: .quit/.q, .help/.h/.?, .menu");
+        self.add_system_message("Layouts: .savelayout [name], .loadlayout [name], .layouts, .resize");
+        self.add_system_message("Windows: .windows, .addwindow <name> <type> <x> <y> <w> [h]");
+        self.add_system_message("         .deletewindow <name>, .rename <win> <title>");
+        self.add_system_message("         .border <win> <style> [color]");
+        self.add_system_message("Highlights: .highlights/.hl");
+    }
+
+    /// Save current layout
+    fn save_layout(&mut self, name: &str) {
+        match self.layout.save(name, None, false) {
+            Ok(_) => {
+                self.add_system_message(&format!("Layout saved as '{}'", name));
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+            }
+            Err(e) => self.add_system_message(&format!("Failed to save layout: {}", e)),
+        }
+    }
+
+    /// Load a saved layout
+    fn load_layout(&mut self, name: &str) {
+        let layout_path = match Config::layout_path(name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.add_system_message(&format!("Failed to get layout path: {}", e));
+                return;
+            }
+        };
+
+        match Layout::load_from_file(&layout_path) {
+            Ok(new_layout) => {
+                self.layout = new_layout.clone();
+                self.baseline_layout = Some(new_layout);
+                self.add_system_message(&format!("Layout '{}' loaded - reinit windows with .resize", name));
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+                self.needs_render = true;
+            }
+            Err(e) => self.add_system_message(&format!("Failed to load layout: {}", e)),
+        }
+    }
+
+    /// Load a saved layout with terminal size for immediate reinitialization
+    pub fn load_layout_with_size(&mut self, name: &str, width: u16, height: u16) {
+        let layout_path = match Config::layout_path(name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.add_system_message(&format!("Failed to get layout path: {}", e));
+                return;
+            }
+        };
+
+        match Layout::load_from_file(&layout_path) {
+            Ok(new_layout) => {
+                self.layout = new_layout.clone();
+                self.baseline_layout = Some(new_layout);
+                self.add_system_message(&format!("Layout '{}' loaded", name));
+
+                // Clear modified flag and update base layout name
+                self.layout_modified_since_save = false;
+                self.base_layout_name = Some(name.to_string());
+
+                // Reinitialize windows from new layout with actual terminal size
+                self.init_windows(width, height);
+                self.needs_render = true;
+            }
+            Err(e) => self.add_system_message(&format!("Failed to load layout: {}", e)),
+        }
+    }
+
+    /// List all saved layouts
+    fn list_layouts(&mut self) {
+        match Config::list_layouts() {
+            Ok(layouts) => {
+                if layouts.is_empty() {
+                    self.add_system_message("No saved layouts");
+                } else {
+                    self.add_system_message(&format!("=== Saved Layouts ({}) ===", layouts.len()));
+                    for layout in layouts {
+                        self.add_system_message(&format!("  {}", layout));
+                    }
+                }
+            }
+            Err(e) => self.add_system_message(&format!("Failed to list layouts: {}", e)),
+        }
+    }
+
+    /// Resize layout to current terminal size (will be enhanced with terminal size tracking)
+    fn resize_to_current_terminal(&mut self) {
+        // For now, just trigger a re-render
+        // In a real implementation, this would get terminal size and proportionally resize
+        self.add_system_message("Resize triggered (terminal size tracking not yet implemented)");
+        self.needs_render = true;
+    }
+
+    /// List all windows
+    fn list_windows(&mut self) {
+        let window_count = self.ui_state.windows.len();
+
+        // Collect window info first to avoid borrow checker issues
+        let mut window_info = Vec::new();
+        for (name, window) in &self.ui_state.windows {
+            let pos = &window.position;
+            let visible = if window.visible { "visible" } else { "hidden" };
+            window_info.push(format!(
+                "  {} - {}x{} at ({},{}) - {} - {}",
+                name,
+                pos.width,
+                pos.height,
+                pos.x,
+                pos.y,
+                visible,
+                format!("{:?}", window.widget_type)
+            ));
+        }
+
+        // Now add all messages
+        self.add_system_message(&format!("=== Windows ({}) ===", window_count));
+        for info in window_info {
+            self.add_system_message(&info);
+        }
+    }
+
+    /// Delete a window
+    fn delete_window(&mut self, name: &str) {
+        if name == "main" {
+            self.add_system_message("Cannot delete main window");
+            return;
+        }
+
+        // Remove from UI state
+        if self.ui_state.windows.remove(name).is_some() {
+            // Remove from layout definition
+            self.layout.windows.retain(|w| w.name != name);
+            self.add_system_message(&format!("Window '{}' deleted", name));
+            self.needs_render = true;
+        } else {
+            self.add_system_message(&format!("Window '{}' not found", name));
+        }
+    }
+
+    /// Add a new window
+    fn add_window(&mut self, name: &str, widget_type_str: &str, x: u16, y: u16, width: u16, height: u16) {
+        use crate::config::WindowDef;
+        use crate::data::{WindowState, WindowPosition, WidgetType, WindowContent, TextContent,
+                          ProgressData, CountdownData, CompassData, IndicatorData, RoomContent};
+
+        // Check if window already exists
+        if self.ui_state.windows.contains_key(name) {
+            self.add_system_message(&format!("Window '{}' already exists", name));
+            return;
+        }
+
+        // Parse widget type
+        let widget_type = match widget_type_str.to_lowercase().as_str() {
+            "text" => WidgetType::Text,
+            "progress" => WidgetType::Progress,
+            "countdown" => WidgetType::Countdown,
+            "compass" => WidgetType::Compass,
+            "hands" => WidgetType::Hands,
+            "room" => WidgetType::Room,
+            "indicator" => WidgetType::Indicator,
+            "command_input" | "commandinput" => WidgetType::CommandInput,
+            _ => {
+                self.add_system_message(&format!("Unknown widget type: {}", widget_type_str));
+                self.add_system_message("Types: text, progress, countdown, compass, hands, room, indicator, command_input");
+                return;
+            }
+        };
+
+        // Create window content based on type
+        let content = match widget_type {
+            WidgetType::Text => WindowContent::Text(TextContent::new(name, 1000)),
+            WidgetType::Progress => WindowContent::Progress(ProgressData {
+                value: 100,
+                max: 100,
+                label: name.to_string(),
+                color: None,
+            }),
+            WidgetType::Countdown => WindowContent::Countdown(CountdownData {
+                end_time: 0,
+                label: name.to_string(),
+            }),
+            WidgetType::Compass => WindowContent::Compass(CompassData {
+                directions: Vec::new(),
+            }),
+            WidgetType::Hands => WindowContent::Hands {
+                left: None,
+                right: None,
+            },
+            WidgetType::Room => WindowContent::Room(RoomContent {
+                name: String::new(),
+                description: Vec::new(),
+                exits: Vec::new(),
+                players: Vec::new(),
+                objects: Vec::new(),
+            }),
+            WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
+                status: String::from("standing"),
+                color: None,
+            }),
+            WidgetType::CommandInput => WindowContent::CommandInput {
+                text: String::new(),
+                cursor: 0,
+                history: Vec::new(),
+                history_index: None,
+            },
+            _ => WindowContent::Empty,
+        };
+
+        // Create window state
+        let window = WindowState {
+            name: name.to_string(),
+            widget_type: widget_type.clone(),
+            content,
+            position: WindowPosition { x, y, width, height },
+            visible: true,
+            focused: false,
+        };
+
+        // Add to UI state
+        self.ui_state.set_window(name.to_string(), window);
+
+        // Create window definition for layout
+        let mut window_def = WindowDef::default();
+        window_def.name = name.to_string();
+        window_def.widget_type = widget_type_str.to_string();
+        window_def.title = Some(name.to_string());
+        window_def.row = y;
+        window_def.col = x;
+        window_def.rows = height;
+        window_def.cols = width;
+        window_def.show_border = true;
+
+        // Add to layout
+        self.layout.windows.push(window_def);
+
+        self.add_system_message(&format!("Window '{}' added ({}x{} at {},{}) - type: {}",
+            name, width, height, x, y, widget_type_str));
+        self.needs_render = true;
+    }
+
+    /// Rename a window's title
+    fn rename_window(&mut self, window_name: &str, new_title: &str) {
+        // Update in layout definition
+        if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name == window_name) {
+            window_def.title = Some(new_title.to_string());
+            self.add_system_message(&format!("Window '{}' renamed to '{}'", window_name, new_title));
+            self.needs_render = true;
+        } else {
+            self.add_system_message(&format!("Window '{}' not found", window_name));
+        }
+    }
+
+    /// Set window border style and color
+    fn set_window_border(&mut self, window_name: &str, style: &str, color: Option<String>) {
+        if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name == window_name) {
+            // Parse border style
+            window_def.show_border = match style.to_lowercase().as_str() {
+                "none" => false,
+                "all" | "top" | "bottom" | "left" | "right" => true,
+                _ => {
+                    self.add_system_message(&format!("Unknown border style: {}", style));
+                    return;
+                }
+            };
+
+            // Set border sides if specified
+            if style.to_lowercase() != "all" && style.to_lowercase() != "none" {
+                window_def.border_sides = Some(vec![style.to_string()]);
+            } else {
+                window_def.border_sides = None;
+            }
+
+            // Set border color if provided
+            if let Some(c) = color {
+                window_def.border_color = Some(c);
+            }
+
+            self.add_system_message(&format!("Border updated for window '{}'", window_name));
+            self.needs_render = true;
+        } else {
+            self.add_system_message(&format!("Window '{}' not found", window_name));
+        }
+    }
+
+    /// Handle terminal resize
+    pub fn resize(&mut self, width: u16, height: u16) {
+        // Recalculate all window positions
+        let positions = self.calculate_window_positions(width, height);
+
+        // Update all window positions
+        for (name, position) in positions {
+            if let Some(window) = self.ui_state.get_window_mut(&name) {
+                window.position = position;
+            }
+        }
+
+        self.needs_render = true;
+    }
+
+    /// Calculate window positions based on layout and terminal size
+    fn calculate_window_positions(&self, width: u16, height: u16) -> HashMap<String, WindowPosition> {
+        let mut positions = HashMap::new();
+
+        // Use layout file values directly (row, col, rows, cols from layout)
+        // Scale if terminal size differs from layout's expected terminal size
+        let layout_width = self.layout.terminal_width.unwrap_or(width) as f32;
+        let layout_height = self.layout.terminal_height.unwrap_or(height) as f32;
+        let actual_width = width as f32;
+        let actual_height = height as f32;
+
+        // Calculate scale factors (don't scale if layout size is 0 or terminal size matches)
+        let scale_x = if layout_width > 0.0 && (layout_width - actual_width).abs() > 1.0 {
+            actual_width / layout_width
+        } else {
+            1.0
+        };
+        let scale_y = if layout_height > 0.0 && (layout_height - actual_height).abs() > 1.0 {
+            actual_height / layout_height
+        } else {
+            1.0
+        };
+
+        tracing::debug!("Layout terminal size: {}x{}, actual: {}x{}, scale: {:.2}x{:.2}",
+            layout_width, layout_height, actual_width, actual_height, scale_x, scale_y);
+
+        for window_def in &self.layout.windows {
+            // Scale window position and size
+            let scaled_x = (window_def.col as f32 * scale_x) as u16;
+            let scaled_y = (window_def.row as f32 * scale_y) as u16;
+            let mut scaled_width = (window_def.cols as f32 * scale_x).max(1.0) as u16;
+            let mut scaled_height = (window_def.rows as f32 * scale_y).max(1.0) as u16;
+
+            // Apply min/max constraints from window settings
+            if let Some(min_cols) = window_def.min_cols {
+                if scaled_width < min_cols {
+                    tracing::debug!("Window '{}': enforcing min_cols={} (was {})", window_def.name, min_cols, scaled_width);
+                    scaled_width = min_cols;
+                }
+            }
+            if let Some(max_cols) = window_def.max_cols {
+                if scaled_width > max_cols {
+                    tracing::debug!("Window '{}': enforcing max_cols={} (was {})", window_def.name, max_cols, scaled_width);
+                    scaled_width = max_cols;
+                }
+            }
+            if let Some(min_rows) = window_def.min_rows {
+                if scaled_height < min_rows {
+                    tracing::debug!("Window '{}': enforcing min_rows={} (was {})", window_def.name, min_rows, scaled_height);
+                    scaled_height = min_rows;
+                }
+            }
+            if let Some(max_rows) = window_def.max_rows {
+                if scaled_height > max_rows {
+                    tracing::debug!("Window '{}': enforcing max_rows={} (was {})", window_def.name, max_rows, scaled_height);
+                    scaled_height = max_rows;
+                }
+            }
+
+            tracing::debug!("Window '{}': layout pos=({},{}) size={}x{}, scaled pos=({},{}) size={}x{}",
+                window_def.name, window_def.col, window_def.row, window_def.cols, window_def.rows,
+                scaled_x, scaled_y, scaled_width, scaled_height);
+
+            positions.insert(
+                window_def.name.clone(),
+                WindowPosition {
+                    x: scaled_x,
+                    y: scaled_y,
+                    width: scaled_width,
+                    height: scaled_height,
+                },
+            );
+        }
+
+        positions
+    }
+
+    /// Build main menu for .menu command
+    fn build_main_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        vec![
+            crate::data::ui_state::PopupMenuItem {
+                text: "Windows".to_string(),
+                command: "menu:windows".to_string(),
+                disabled: false,
+            },
+            crate::data::ui_state::PopupMenuItem {
+                text: "Configuration".to_string(),
+                command: "menu:config".to_string(),
+                disabled: false,
+            },
+        ]
+    }
+
+    /// Build layouts submenu
+    fn build_layouts_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let mut items = Vec::new();
+
+        // Get list of saved layouts
+        match Config::list_layouts() {
+            Ok(layouts) => {
+                for layout_name in layouts {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: layout_name.clone(),
+                        command: format!("loadlayout:{}", layout_name),
+                        disabled: false,
+                    });
+                }
+            }
+            Err(_) => {
+                // If we can't load layouts, just show a disabled message
+                items.push(crate::data::ui_state::PopupMenuItem {
+                    text: "No layouts found".to_string(),
+                    command: String::new(),
+                    disabled: true,
+                });
+            }
+        }
+
+        items
+    }
+
+    /// Mark layout as modified and show reminder (once per session)
+    pub fn mark_layout_modified(&mut self) {
+        self.layout_modified_since_save = true;
+
+        // Show reminder once per session
+        if !self.save_reminder_shown {
+            self.add_system_message("Tip: Use .savelayout <name> to preserve changes as a reusable template");
+            self.save_reminder_shown = true;
+        }
+    }
+
+    /// Quit the application
+    pub fn quit(&mut self) {
+        // Show reminder if layout was modified
+        if self.layout_modified_since_save {
+            self.add_system_message("Layout modified - use .savelayout <name> to create reusable template");
+        }
+
+        // Autosave current layout as "layout"
+        if let Err(e) = self.layout.save("layout", None, false) {
+            tracing::warn!("Failed to autosave layout on quit: {}", e);
+        } else {
+            tracing::info!("Layout autosaved on quit");
+        }
+
+        self.running = false;
+    }
+
+    /// Save configuration to disk
+    pub fn save_config(&mut self) -> Result<()> {
+        self.config.save(self.config.character.as_deref())
+    }
+
+    /// Start search mode (Ctrl+F)
+    pub fn start_search_mode(&mut self) {
+        self.ui_state.input_mode = crate::data::ui_state::InputMode::Search;
+        self.ui_state.search_input.clear();
+        self.ui_state.search_cursor = 0;
+        self.needs_render = true;
+    }
+
+    /// Get the focused window name (or "main" as default)
+    pub fn get_focused_window_name(&self) -> String {
+        self.ui_state.focused_window.clone().unwrap_or_else(|| "main".to_string())
+    }
+
+    /// Clear search mode
+    pub fn clear_search_mode(&mut self) {
+        // Exit search mode
+        if self.ui_state.input_mode == crate::data::ui_state::InputMode::Search {
+            self.ui_state.input_mode = crate::data::ui_state::InputMode::Normal;
+        }
+
+        self.ui_state.search_input.clear();
+        self.ui_state.search_cursor = 0;
+        self.needs_render = true;
+    }
+}

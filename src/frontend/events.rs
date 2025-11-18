@@ -1,3 +1,8 @@
+//! Frontend-agnostic input events used by both the TUI and GUI layers.
+//!
+//! Individual frontends translate their native event streams (crossterm, egui,
+//! etc.) into this enum so the core logic only handles one event shape.
+
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 /// Frontend-agnostic event system
@@ -17,14 +22,9 @@ pub enum FrontendEvent {
         modifiers: KeyModifiers,
     },
     /// Terminal/window resize
-    Resize {
-        width: u16,
-        height: u16,
-    },
+    Resize { width: u16, height: u16 },
     /// Paste event (text from clipboard)
-    Paste {
-        text: String,
-    },
+    Paste { text: String },
     /// Application quit signal
     Quit,
 }
@@ -37,7 +37,12 @@ impl FrontendEvent {
 
     /// Create a mouse event
     pub fn mouse(kind: MouseEventKind, x: u16, y: u16, modifiers: KeyModifiers) -> Self {
-        Self::Mouse { kind, x, y, modifiers }
+        Self::Mouse {
+            kind,
+            x,
+            y,
+            modifiers,
+        }
     }
 
     /// Create a resize event
@@ -66,7 +71,13 @@ mod tests {
         assert!(matches!(key_event, FrontendEvent::Key { .. }));
 
         let resize_event = FrontendEvent::resize(120, 40);
-        assert!(matches!(resize_event, FrontendEvent::Resize { width: 120, height: 40 }));
+        assert!(matches!(
+            resize_event,
+            FrontendEvent::Resize {
+                width: 120,
+                height: 40
+            }
+        ));
 
         let quit_event = FrontendEvent::quit();
         assert!(matches!(quit_event, FrontendEvent::Quit));

@@ -1,0 +1,1507 @@
+//! Two-Face - Multi-frontend GemStone IV client
+//!
+//! Supports both TUI (ratatui) and GUI (egui) frontends with shared core logic.
+
+mod config;
+mod parser;
+mod network;
+mod selection;
+mod performance;
+mod cmdlist;
+mod map_data;
+mod data;
+mod core;
+mod frontend;
+
+use anyhow::Result;
+use clap::{Parser as ClapParser, Subcommand};
+use std::path::PathBuf;
+use frontend::Frontend;
+
+#[derive(ClapParser)]
+#[command(name = "two-face")]
+#[command(about = "Multi-frontend GemStone IV client", long_about = None)]
+struct Cli {
+    /// Configuration file path
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Frontend to use
+    #[arg(short, long, default_value = "tui")]
+    frontend: FrontendType,
+
+    /// Port number to connect to (default: 8000)
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// Character name for loading character-specific settings
+    #[arg(long)]
+    character: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum FrontendType {
+    Tui,
+    Gui,
+}
+
+/// Build windows submenu
+fn build_windows_submenu(_app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
+    let items = vec![
+        data::ui_state::PopupMenuItem {
+            text: "Add Window...".to_string(),
+            command: "menu:addwindow".to_string(),
+            disabled: false,
+        },
+        data::ui_state::PopupMenuItem {
+            text: "Hide Window...".to_string(),
+            command: "menu:hidewindow".to_string(),
+            disabled: false,
+        },
+        data::ui_state::PopupMenuItem {
+            text: "Edit Window...".to_string(),
+            command: "menu:editwindow".to_string(),
+            disabled: false,
+        },
+        data::ui_state::PopupMenuItem {
+            text: "List Windows".to_string(),
+            command: "action:listwindows".to_string(),
+            disabled: false,
+        },
+    ];
+    items
+}
+
+/// Build window picker for editing (shows only visible windows)
+fn build_window_picker(app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
+    let mut items = Vec::new();
+
+    // Collect visible window names
+    let mut visible_names: Vec<String> = app_core.ui_state.windows.keys()
+        .map(|name| name.to_string())
+        .collect();
+
+    // Sort alphabetically by display name
+    visible_names.sort_by_key(|name| get_window_display_name(name));
+
+    for name in visible_names {
+        let display_name = get_window_display_name(&name);
+        items.push(data::ui_state::PopupMenuItem {
+            text: display_name,
+            command: format!("action:editwindow:{}", name),
+            disabled: false,
+        });
+    }
+
+    if items.is_empty() {
+        items.push(data::ui_state::PopupMenuItem {
+            text: "No visible windows to edit".to_string(),
+            command: String::new(),
+            disabled: true,
+        });
+    }
+    items
+}
+
+/// Build configuration submenu
+fn build_config_submenu() -> Vec<data::ui_state::PopupMenuItem> {
+    vec![
+        data::ui_state::PopupMenuItem {
+            text: "Layouts".to_string(),
+            command: "menu:layouts".to_string(),
+            disabled: false,
+        },
+        data::ui_state::PopupMenuItem {
+            text: "Highlights".to_string(),
+            command: "action:highlights".to_string(),
+            disabled: false,
+        },
+    ]
+}
+
+/// Build layouts submenu
+fn build_layouts_submenu() -> Vec<data::ui_state::PopupMenuItem> {
+    let mut items = Vec::new();
+
+    // Get list of saved layouts
+    match config::Config::list_layouts() {
+        Ok(layouts) => {
+            for layout_name in layouts {
+                items.push(data::ui_state::PopupMenuItem {
+                    text: layout_name.clone(),
+                    command: format!("action:loadlayout:{}", layout_name),
+                    disabled: false,
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list layouts: {}", e);
+            items.push(data::ui_state::PopupMenuItem {
+                text: "No layouts found".to_string(),
+                command: String::new(),
+                disabled: true,
+            });
+        }
+    }
+
+    items
+}
+
+/// Build widget type picker menu (shows hidden templates that can be shown)
+/// Get clean display name for a window
+fn get_window_display_name(name: &str) -> String {
+    match name {
+        "encumlevel" => "encumbrance".to_string(),
+        "pbarStance" => "stance".to_string(),
+        "mindState" => "mind".to_string(),
+        "lblBPs" => "blood".to_string(),
+        "active_spells" => "active spells".to_string(),
+        "left_hand" => "left hand".to_string(),
+        "right_hand" => "right hand".to_string(),
+        "spell_hand" => "spell hand".to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn build_widget_picker(app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
+    let mut items = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    // Find all hidden windows in layout
+    // Deduplicate by name to avoid showing duplicates
+    for window_def in &app_core.layout.windows {
+        if !window_def.base().visible {
+            let name = window_def.name();
+            // Only add if we haven't seen this name before
+            if seen_names.insert(name.to_string()) {
+                let display_name = get_window_display_name(name);
+                items.push(data::ui_state::PopupMenuItem {
+                    text: display_name.clone(),
+                    command: format!("action:showwindow:{}", name),
+                    disabled: false,
+                });
+            }
+        }
+    }
+
+    // Sort alphabetically by display name
+    items.sort_by(|a, b| a.text.to_lowercase().cmp(&b.text.to_lowercase()));
+
+    // If no hidden templates, offer to create new ones
+    if items.is_empty() {
+        items.push(data::ui_state::PopupMenuItem {
+            text: "No hidden windows - create new with window editor".to_string(),
+            command: String::new(),
+            disabled: true,
+        });
+    }
+
+    items
+}
+
+/// Build hide window menu (shows currently visible windows that can be hidden)
+fn build_hidewindow_picker(app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
+    let mut items = Vec::new();
+
+    // Get all currently visible window names from ui_state (except main and command_input)
+    let mut visible_names: Vec<String> = app_core.ui_state.windows.keys()
+        .filter(|name| *name != "main" && *name != "command_input")
+        .map(|name| name.to_string())
+        .collect();
+
+    // Sort alphabetically by display name
+    visible_names.sort_by_key(|name| get_window_display_name(name));
+
+    for name in visible_names {
+        let display_name = get_window_display_name(&name);
+        items.push(data::ui_state::PopupMenuItem {
+            text: display_name,
+            command: format!("action:hidewindow:{}", name),
+            disabled: false,
+        });
+    }
+
+    // If no windows can be hidden
+    if items.is_empty() {
+        items.push(data::ui_state::PopupMenuItem {
+            text: "No windows to hide".to_string(),
+            command: String::new(),
+            disabled: true,
+        });
+    }
+
+    items
+}
+
+/// Handle menu action commands
+fn handle_menu_action(
+    app_core: &mut core::AppCore,
+    frontend: &mut frontend::tui::TuiFrontend,
+    command: &str,
+) -> Result<()> {
+    if command.starts_with("action:loadlayout:") {
+        // Load a layout with proper terminal size
+        let layout_name = &command[18..];
+        tracing::info!("[MAIN.RS] Menu action loadlayout: '{}'", layout_name);
+        let (width, height) = frontend.size();
+        tracing::info!("[MAIN.RS] Terminal size from frontend: {}x{}", width, height);
+        app_core.load_layout(layout_name, width, height);
+    } else if command.starts_with("action:createwindow:") {
+        // Create a new window with the specified widget type
+        let widget_type = &command[20..];
+
+        // Get template for this widget type (use widget type name as template name)
+        if let Some(template) = config::Config::get_window_template(widget_type) {
+            // Open window editor with template (proper defaults + marked as new)
+            frontend.window_editor = Some(frontend::tui::window_editor::WindowEditor::new_from_template(template));
+            app_core.ui_state.input_mode = data::ui_state::InputMode::WindowEditor;
+        } else {
+            tracing::warn!("No template found for widget type: {}", widget_type);
+        }
+
+    } else if command.starts_with("action:editwindow:") {
+        // Edit an existing window
+        let window_name = &command[18..];
+
+        // Find the window definition
+        if let Some(window_def) = app_core.layout.windows.iter().find(|w| w.name() == window_name).cloned() {
+            // Open window editor
+            frontend.window_editor = Some(frontend::tui::window_editor::WindowEditor::new(window_def));
+            app_core.ui_state.input_mode = data::ui_state::InputMode::WindowEditor;
+        } else {
+            tracing::warn!("Window not found for editing: {}", window_name);
+        }
+
+    } else if command.starts_with("action:showwindow:") {
+        // Open window editor for the selected window from .addwindow menu
+        let window_name = &command[18..];
+
+        // Find the window definition in the layout
+        if let Some(window_def) = app_core.layout.windows.iter().find(|w| w.name() == window_name).cloned() {
+            // Open window editor as NEW window from template so Ctrl+S creates it
+            frontend.window_editor = Some(frontend::tui::window_editor::WindowEditor::new_from_template(window_def));
+            app_core.ui_state.input_mode = data::ui_state::InputMode::WindowEditor;
+            app_core.ui_state.popup_menu = None;
+        } else {
+            tracing::warn!("Window template not found: {}", window_name);
+        }
+
+    } else if command.starts_with("action:hidewindow:") {
+        // Hide a visible window
+        let window_name = &command[18..];
+        app_core.hide_window(window_name);
+
+    } else {
+        match command {
+            "action:addwindow" => {
+                // Show widget type picker
+                app_core.ui_state.popup_menu = Some(data::ui_state::PopupMenu::new(
+                    build_widget_picker(app_core),
+                    (40, 12),
+                ));
+                // Stay in Menu mode
+            }
+            "action:listwindows" => {
+                // List all windows
+                app_core.send_command(".windows".to_string())?;
+            }
+            "action:highlights" => {
+                // List highlights
+                app_core.send_command(".highlights".to_string())?;
+            }
+            _ => {
+                tracing::warn!("Unknown menu action: {}", command);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Validate layout configuration
+    ValidateLayout {
+        /// Layout file to validate
+        #[arg(value_name = "FILE")]
+        layout: Option<PathBuf>,
+    },
+}
+
+fn main() -> Result<()> {
+    // Initialize logging to file (use RUST_LOG env var to control level, e.g. RUST_LOG=debug)
+    // TUI apps can't log to stdout, so we write to a file
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("two-face.log")?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"))
+        )
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_ansi(false)  // No color codes in log file
+        .init();
+
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        match command {
+            Commands::ValidateLayout { .. } => {
+                eprintln!("Layout validation not yet implemented in new architecture");
+                return Ok(());
+            }
+        }
+    }
+
+    // Load configuration
+    let port = cli.port.unwrap_or(8000);
+    let character = cli.character.as_deref();
+    let config = if cli.config.is_some() {
+        eprintln!("Warning: Custom config paths not yet supported, using default config");
+        config::Config::load_with_options(character, port)?
+    } else {
+        config::Config::load_with_options(character, port)?
+    };
+
+    // Run appropriate frontend
+    let character = cli.character.clone();
+    match cli.frontend {
+        FrontendType::Tui => run_tui(config, character)?,
+        FrontendType::Gui => run_gui(config)?,
+    }
+
+    Ok(())
+}
+
+/// Run TUI frontend
+fn run_tui(config: config::Config, character: Option<String>) -> Result<()> {
+    // Use tokio runtime for async network I/O
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async_run_tui(config, character))
+}
+
+/// Async TUI main loop with network support
+async fn async_run_tui(config: config::Config, character: Option<String>) -> Result<()> {
+    use frontend::{TuiFrontend, Frontend};
+    use core::AppCore;
+    use network::{LichConnection, ServerMessage};
+    use tokio::sync::mpsc;
+
+    // Create channels for network communication
+    let (server_tx, mut server_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<String>();
+
+    // Store connection info
+    let host = config.connection.host.clone();
+    let port = config.connection.port;
+
+    // Create core application state
+    let mut app_core = AppCore::new(config)?;
+
+    // Create TUI frontend
+    let mut frontend = TuiFrontend::new()?;
+
+    // Initialize command input widget BEFORE any rendering
+    // This ensures it exists when we start routing keys to it
+    frontend.ensure_command_input_exists("command_input");
+
+    // Load command history
+    if let Err(e) = frontend.command_input_load_history("command_input", character.as_deref()) {
+        tracing::warn!("Failed to load command history: {}", e);
+    }
+
+    // Get terminal size and initialize windows
+    let (width, height) = frontend.size();
+    app_core.init_windows(width, height);
+
+    // Spawn network connection task
+    let network_handle = tokio::spawn(async move {
+        if let Err(e) = LichConnection::start(&host, port, server_tx, command_rx).await {
+            tracing::error!("Network connection error: {}", e);
+        }
+    });
+
+    // Track time for periodic countdown updates
+    let mut last_countdown_update = std::time::Instant::now();
+
+    // Main event loop
+    while app_core.running {
+        // Poll for frontend events (keyboard, mouse, resize)
+        let events = frontend.poll_events()?;
+
+        // Process frontend events
+        for event in events {
+            // Handle events that need frontend access directly
+            match &event {
+                frontend::FrontendEvent::Mouse { kind, x, y, modifiers } => {
+                    use crossterm::event::{MouseEventKind, KeyModifiers};
+                    use data::{MouseDragState, DragOperation, LinkDragState, PendingLinkClick};
+                    use crate::data::ui_state::InputMode;
+
+                    // Handle window editor mouse events first (if open)
+                    if frontend.window_editor.is_some() {
+                        let (width, height) = frontend.size();
+                        let area = ratatui::layout::Rect { x: 0, y: 0, width, height };
+
+                        if let Some(ref mut window_editor) = frontend.window_editor {
+                            match kind {
+                                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                    window_editor.handle_mouse(*x, *y, true, area);
+                                    app_core.needs_render = true;
+                                    continue;
+                                }
+                                MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                                    window_editor.handle_mouse(*x, *y, true, area);
+                                    app_core.needs_render = true;
+                                    continue;
+                                }
+                                MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                                    window_editor.handle_mouse(*x, *y, false, area);
+                                    app_core.needs_render = true;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    match kind {
+                        MouseEventKind::ScrollUp => {
+                            // Find which window the mouse is over
+                            let mut target_window = "main".to_string();
+                            for (name, window) in &app_core.ui_state.windows {
+                                let pos = &window.position;
+                                if *x >= pos.x && *x < pos.x + pos.width && *y >= pos.y && *y < pos.y + pos.height {
+                                    target_window = name.clone();
+                                    break;
+                                }
+                            }
+                            frontend.scroll_window(&target_window, 10);
+                            app_core.needs_render = true;
+                            continue;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            // Find which window the mouse is over
+                            let mut target_window = "main".to_string();
+                            for (name, window) in &app_core.ui_state.windows {
+                                let pos = &window.position;
+                                if *x >= pos.x && *x < pos.x + pos.width && *y >= pos.y && *y < pos.y + pos.height {
+                                    target_window = name.clone();
+                                    break;
+                                }
+                            }
+                            frontend.scroll_window(&target_window, -10);
+                            app_core.needs_render = true;
+                            continue;
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            // If in menu mode, handle menu clicks first
+                            if app_core.ui_state.input_mode == InputMode::Menu {
+                                let mut clicked_item = None;
+
+                                // Check popup menu first (top layer)
+                                if let Some(ref menu) = app_core.ui_state.popup_menu {
+                                    let pos = menu.get_position();
+                                    let menu_height = menu.get_items().len() as u16 + 2; // +2 for borders
+                                    let menu_width = menu.get_items().iter()
+                                        .map(|item| item.text.len())
+                                        .max()
+                                        .unwrap_or(10) as u16 + 4; // +4 for borders and padding
+
+                                    let menu_area = ratatui::layout::Rect {
+                                        x: pos.0,
+                                        y: pos.1,
+                                        width: menu_width,
+                                        height: menu_height,
+                                    };
+
+                                    if let Some(index) = menu.check_click(*x, *y, menu_area) {
+                                        clicked_item = menu.get_items().get(index).cloned();
+                                    }
+                                }
+
+                                if let Some(item) = clicked_item {
+                                    let command = item.command.clone();
+                                    tracing::info!("Menu item clicked: {} (command: {})", item.text, command);
+
+                                    // Handle command same way as Enter key
+                                    if command.starts_with("menu:") {
+                                        // Config menu submenu
+                                        let submenu_name = &command[5..];
+                                        // ... handle like in keyboard code ...
+                                        tracing::debug!("Clicked config submenu: {}", submenu_name);
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+                                    } else if command.starts_with("__SUBMENU__") {
+                                        // Context menu submenu
+                                        let category = &command[11..];
+                                        if let Some(items) = app_core.menu_categories.get(category) {
+                                            let position = app_core.ui_state.popup_menu
+                                                .as_ref()
+                                                .map(|m| m.get_position())
+                                                .unwrap_or((40, 12));
+                                            let submenu_pos = (position.0 + 20, position.1);
+                                            app_core.ui_state.submenu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items.clone(),
+                                                submenu_pos,
+                                            ));
+                                            tracing::info!("Clicked context menu submenu: {}", category);
+                                        }
+                                    } else if !command.is_empty() {
+                                        // Close menu first
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.submenu = None;
+                                        app_core.ui_state.nested_submenu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+
+                                        // Check if this is an internal action or game command
+                                        if command.starts_with("action:") {
+                                            // Internal action - handle it
+                                            if let Err(e) = handle_menu_action(&mut app_core, &mut frontend, &command) {
+                                                tracing::error!("Menu action error: {}", e);
+                                            }
+                                        } else {
+                                            // Game command - send to server
+                                            let _ = command_tx.send(format!("{}\n", command));
+                                            tracing::info!("Sent context menu command via click: {}", command);
+                                        }
+                                    }
+                                    app_core.needs_render = true;
+                                } else {
+                                    // Click outside menu - close it
+                                    app_core.ui_state.popup_menu = None;
+                                    app_core.ui_state.submenu = None;
+                                    app_core.ui_state.nested_submenu = None;
+                                    app_core.ui_state.input_mode = InputMode::Normal;
+                                    app_core.needs_render = true;
+                                }
+
+                                // Don't process other clicks while in menu mode
+                                continue;
+                            }
+
+                            // Mouse down handling (find links, start drags)
+                            app_core.ui_state.selection_state = None;
+
+                            let mut found_window = None;
+                            let mut drag_op = None;
+                            let mut clicked_window_name: Option<String> = None;
+
+                            for (name, window) in &app_core.ui_state.windows {
+                                let pos = &window.position;
+                                if *x >= pos.x && *x < pos.x + pos.width && *y >= pos.y && *y < pos.y + pos.height {
+                                    clicked_window_name = Some(name.clone());
+
+                                    if *x == pos.x + pos.width - 1 && *y == pos.y + pos.height - 1 {
+                                        drag_op = Some(DragOperation::ResizeBottomRight);
+                                        found_window = Some(name.clone());
+                                        break;
+                                    } else if *x == pos.x + pos.width - 1 {
+                                        drag_op = Some(DragOperation::ResizeRight);
+                                        found_window = Some(name.clone());
+                                        break;
+                                    } else if *y == pos.y + pos.height - 1 {
+                                        drag_op = Some(DragOperation::ResizeBottom);
+                                        found_window = Some(name.clone());
+                                        break;
+                                    } else if *y == pos.y {
+                                        drag_op = Some(DragOperation::Move);
+                                        found_window = Some(name.clone());
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let (Some(window_name), Some(operation)) = (found_window, drag_op) {
+                                if let Some(window) = app_core.ui_state.get_window(&window_name) {
+                                    let pos = &window.position;
+                                    app_core.ui_state.mouse_drag = Some(MouseDragState {
+                                        operation,
+                                        window_name,
+                                        start_pos: (*x, *y),
+                                        original_window_pos: (pos.x, pos.y, pos.width, pos.height),
+                                    });
+                                }
+                            } else if let Some(window_name) = clicked_window_name {
+                                if let Some(window) = app_core.ui_state.get_window(&window_name) {
+                                    let pos = &window.position;
+                                    let window_rect = ratatui::layout::Rect {
+                                        x: pos.x,
+                                        y: pos.y,
+                                        width: pos.width,
+                                        height: pos.height,
+                                    };
+
+                                    if let Some(link_data) = frontend.link_at_position(&window_name, *x, *y, window_rect) {
+                                        let has_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+                                        if has_ctrl {
+                                            app_core.ui_state.link_drag_state = Some(LinkDragState {
+                                                link_data,
+                                                start_pos: (*x, *y),
+                                                current_pos: (*x, *y),
+                                            });
+                                        } else {
+                                            app_core.ui_state.pending_link_click = Some(PendingLinkClick {
+                                                link_data,
+                                                click_pos: (*x, *y),
+                                            });
+                                        }
+                                    } else {
+                                        // Start text selection
+                                        app_core.ui_state.selection_drag_start = Some((*x, *y));
+
+                                        // Convert mouse coords to text coords for selection
+                                        if let Some((line, col)) = frontend.mouse_to_text_coords(&window_name, *x, *y, window_rect) {
+                                            // Find window index (for now just use 0 for main window)
+                                            let window_index = 0;
+                                            app_core.ui_state.selection_state = Some(
+                                                crate::selection::SelectionState::new(window_index, line, col)
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                            if let Some(ref mut link_drag) = app_core.ui_state.link_drag_state {
+                                link_drag.current_pos = (*x, *y);
+                                app_core.needs_render = true;
+                            } else if let Some(drag_state) = app_core.ui_state.mouse_drag.clone() {
+                                let dx = *x as i32 - drag_state.start_pos.0 as i32;
+                                let dy = *y as i32 - drag_state.start_pos.1 as i32;
+
+                                // Get terminal size for clamping windows within bounds
+                                let (term_width, term_height) = frontend.size();
+
+                                if let Some(window) = app_core.ui_state.get_window_mut(&drag_state.window_name) {
+                                    match drag_state.operation {
+                                        DragOperation::Move => {
+                                            // Calculate new position
+                                            let new_x = (drag_state.original_window_pos.0 as i32 + dx).max(0) as u16;
+                                            let new_y = (drag_state.original_window_pos.1 as i32 + dy).max(0) as u16;
+
+                                            // Clamp to prevent overflow beyond terminal boundaries
+                                            let max_x = term_width.saturating_sub(window.position.width);
+                                            let max_y = term_height.saturating_sub(window.position.height);
+
+                                            window.position.x = new_x.min(max_x);
+                                            window.position.y = new_y.min(max_y);
+                                        }
+                                        DragOperation::ResizeRight => {
+                                            // Calculate new width
+                                            let new_width = (drag_state.original_window_pos.2 as i32 + dx).max(10) as u16;
+
+                                            // Clamp to prevent overflow beyond terminal edge
+                                            let max_width = term_width.saturating_sub(window.position.x);
+                                            window.position.width = new_width.min(max_width);
+                                        }
+                                        DragOperation::ResizeBottom => {
+                                            // Calculate new height
+                                            let new_height = (drag_state.original_window_pos.3 as i32 + dy).max(3) as u16;
+
+                                            // Clamp to prevent overflow beyond terminal edge
+                                            let max_height = term_height.saturating_sub(window.position.y);
+                                            window.position.height = new_height.min(max_height);
+                                        }
+                                        DragOperation::ResizeBottomRight => {
+                                            // Calculate new dimensions
+                                            let new_width = (drag_state.original_window_pos.2 as i32 + dx).max(10) as u16;
+                                            let new_height = (drag_state.original_window_pos.3 as i32 + dy).max(3) as u16;
+
+                                            // Clamp to prevent overflow beyond terminal edges
+                                            let max_width = term_width.saturating_sub(window.position.x);
+                                            let max_height = term_height.saturating_sub(window.position.y);
+
+                                            window.position.width = new_width.min(max_width);
+                                            window.position.height = new_height.min(max_height);
+                                        }
+                                    }
+                                    app_core.needs_render = true;
+                                }
+                            } else if app_core.ui_state.pending_link_click.is_some() {
+                                app_core.ui_state.pending_link_click = None;
+                            } else if let Some(_drag_start) = app_core.ui_state.selection_drag_start {
+                                // Update text selection on drag
+                                if let Some(ref mut selection) = app_core.ui_state.selection_state {
+                                    // Find which window we're dragging in
+                                    for (name, window) in &app_core.ui_state.windows {
+                                        let pos = &window.position;
+                                        if *x >= pos.x && *x < pos.x + pos.width && *y >= pos.y && *y < pos.y + pos.height {
+                                            let window_rect = ratatui::layout::Rect {
+                                                x: pos.x,
+                                                y: pos.y,
+                                                width: pos.width,
+                                                height: pos.height,
+                                            };
+                                            if let Some((line, col)) = frontend.mouse_to_text_coords(name, *x, *y, window_rect) {
+                                                let window_index = 0; // For now just use 0 for main window
+                                                selection.update_end(window_index, line, col);
+                                                app_core.needs_render = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                            if let Some(link_drag) = app_core.ui_state.link_drag_state.take() {
+                                let dx = (*x as i16 - link_drag.start_pos.0 as i16).abs();
+                                let dy = (*y as i16 - link_drag.start_pos.1 as i16).abs();
+
+                                if dx > 2 || dy > 2 {
+                                    let mut drop_target_id: Option<String> = None;
+
+                                    for (name, window) in &app_core.ui_state.windows {
+                                        let pos = &window.position;
+                                        if *x >= pos.x && *x < pos.x + pos.width && *y >= pos.y && *y < pos.y + pos.height {
+                                            let window_rect = ratatui::layout::Rect {
+                                                x: pos.x,
+                                                y: pos.y,
+                                                width: pos.width,
+                                                height: pos.height,
+                                            };
+                                            if let Some(target_link) = frontend.link_at_position(name, *x, *y, window_rect) {
+                                                drop_target_id = Some(target_link.exist_id);
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    let command = if let Some(target_id) = drop_target_id {
+                                        format!("_drag #{} #{}\n", link_drag.link_data.exist_id, target_id)
+                                    } else {
+                                        format!("_drag #{} drop\n", link_drag.link_data.exist_id)
+                                    };
+                                    let _ = command_tx.send(command);
+                                }
+                            } else if let Some(pending_click) = app_core.ui_state.pending_link_click.take() {
+                                let dx = (*x as i16 - pending_click.click_pos.0 as i16).abs();
+                                let dy = (*y as i16 - pending_click.click_pos.1 as i16).abs();
+
+                                if dx <= 2 && dy <= 2 {
+                                    // Handle <d> tags differently (direct commands vs context menus)
+                                    if pending_click.link_data.exist_id == "_direct_" {
+                                        // <d> tag: Send text/noun as direct command
+                                        let command = if !pending_click.link_data.noun.is_empty() {
+                                            format!("{}\n", pending_click.link_data.noun)  // Use cmd attribute
+                                        } else {
+                                            format!("{}\n", pending_click.link_data.text)  // Use text content
+                                        };
+                                        tracing::info!("Executing <d> direct command: {}", command.trim());
+                                        let _ = command_tx.send(command);
+                                    } else {
+                                        // Regular <a> tag: Request context menu
+                                        let command = app_core.request_menu(
+                                            pending_click.link_data.exist_id.clone(),
+                                            pending_click.link_data.noun.clone(),
+                                            pending_click.click_pos,
+                                        );
+                                        tracing::info!("Sending _menu command for '{}' (exist_id: {})",
+                                            pending_click.link_data.noun, pending_click.link_data.exist_id);
+                                        let _ = command_tx.send(command);
+                                    }
+                                } else {
+                                    tracing::debug!("Link click cancelled - dragged {} pixels", dx.max(dy));
+                                }
+                            }
+
+                            // Sync UI state positions back to layout WindowDefs after mouse resize/move
+                            if let Some(drag_state) = &app_core.ui_state.mouse_drag {
+                                if let Some(window) = app_core.ui_state.get_window(&drag_state.window_name) {
+                                    // Find the corresponding WindowDef in layout and update it
+                                    if let Some(window_def) = app_core.layout.windows.iter_mut().find(|w| w.name() == drag_state.window_name) {
+                                        let base = window_def.base_mut();
+                                        base.col = window.position.x;
+                                        base.row = window.position.y;
+                                        base.cols = window.position.width;
+                                        base.rows = window.position.height;
+                                        tracing::info!("Synced mouse resize/move for '{}' to layout: pos=({},{}) size={}x{}",
+                                            drag_state.window_name, base.col, base.row, base.cols, base.rows);
+                                        app_core.layout_modified_since_save = true;
+                                    }
+                                }
+                            }
+
+                            app_core.ui_state.mouse_drag = None;
+                            app_core.ui_state.selection_drag_start = None;
+
+                            // Handle text selection copy to clipboard
+                            if let Some(ref selection) = app_core.ui_state.selection_state {
+                                if !selection.is_empty() {
+                                    // Extract text from selection
+                                    let (start, end) = selection.normalized_range();
+
+                                    // Find the window (for now assume main window)
+                                    if let Some((_line, _col)) = frontend.mouse_to_text_coords("main", *x, *y,
+                                        ratatui::layout::Rect {
+                                            x: app_core.ui_state.windows.get("main").map(|w| w.position.x).unwrap_or(0),
+                                            y: app_core.ui_state.windows.get("main").map(|w| w.position.y).unwrap_or(0),
+                                            width: app_core.ui_state.windows.get("main").map(|w| w.position.width).unwrap_or(80),
+                                            height: app_core.ui_state.windows.get("main").map(|w| w.position.height).unwrap_or(24),
+                                        })
+                                    {
+                                        if let Some(text) = frontend.extract_selection_text("main",
+                                            start.line, start.col, end.line, end.col)
+                                        {
+                                            // Copy to clipboard
+                                            match arboard::Clipboard::new() {
+                                                Ok(mut clipboard) => {
+                                                    if let Err(e) = clipboard.set_text(&text) {
+                                                        tracing::warn!("Failed to copy to clipboard: {}", e);
+                                                    } else {
+                                                        tracing::info!("Copied {} chars to clipboard", text.len());
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to access clipboard: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Clear selection
+                                app_core.ui_state.selection_state = None;
+                                app_core.needs_render = true;
+                            }
+
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                frontend::FrontendEvent::Key { code, modifiers } => {
+                    use crossterm::event::{KeyCode, KeyModifiers};
+
+                    // Only handle PageUp/PageDown if Ctrl is NOT pressed
+                    // If Ctrl is pressed, let it pass through to handle_frontend_event for search navigation
+                    if !modifiers.contains(KeyModifiers::CONTROL) {
+                        match code {
+                            KeyCode::PageUp => {
+                                frontend.scroll_window("main", 10);
+                                app_core.needs_render = true;
+                                continue;
+                            }
+                            KeyCode::PageDown => {
+                                frontend.scroll_window("main", -10);
+                                app_core.needs_render = true;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if let Some(command) = handle_frontend_event(&mut app_core, &mut frontend, event)? {
+                let _ = command_tx.send(command);
+            }
+        }
+
+        // Poll for server messages (non-blocking)
+        while let Ok(msg) = server_rx.try_recv() {
+            match msg {
+                ServerMessage::Text(line) => {
+                    // Process incoming server data through parser
+                    if let Err(e) = app_core.process_server_data(&line) {
+                        tracing::error!("Error processing server data: {}", e);
+                    }
+                }
+                ServerMessage::Connected => {
+                    tracing::info!("Connected to game server");
+                    app_core.game_state.connected = true;
+                    app_core.needs_render = true;
+                }
+                ServerMessage::Disconnected => {
+                    tracing::info!("Disconnected from game server");
+                    app_core.game_state.connected = false;
+                    app_core.needs_render = true;
+                }
+            }
+        }
+
+        // Force render every second for countdown widgets
+        if last_countdown_update.elapsed().as_secs() >= 1 {
+            app_core.needs_render = true;
+            last_countdown_update = std::time::Instant::now();
+        }
+
+        // Render if needed
+        if app_core.needs_render {
+            frontend.render(&mut app_core)?;
+            app_core.needs_render = false;
+        }
+
+        // Small sleep to avoid busy-waiting
+        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await; // ~60 FPS
+    }
+
+    // Save command history
+    if let Err(e) = frontend.command_input_save_history("command_input", character.as_deref()) {
+        tracing::warn!("Failed to save command history: {}", e);
+    }
+
+    // Cleanup
+    frontend.cleanup()?;
+
+    // Wait for network task to finish (or abort it)
+    network_handle.abort();
+    let _ = network_handle.await;
+
+    Ok(())
+}
+
+/// Run GUI frontend
+fn run_gui(config: config::Config) -> Result<()> {
+    use frontend::EguiApp;
+    use core::AppCore;
+
+    // Create core application state
+    let app_core = AppCore::new(config)?;
+
+    // Create and run GUI
+    let app = EguiApp::new(app_core);
+    app.run()?;
+
+    Ok(())
+}
+
+/// Handle a frontend event
+/// Returns Some(command) if a command should be sent to the server
+fn handle_frontend_event(
+    app_core: &mut core::AppCore,
+    frontend: &mut frontend::TuiFrontend,
+    event: frontend::FrontendEvent,
+) -> Result<Option<String>> {
+    use frontend::FrontendEvent;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    match event {
+        FrontendEvent::Key { code, modifiers } => {
+            use crate::data::ui_state::InputMode;
+
+            tracing::debug!("Key event: code={:?}, modifiers={:?}, input_mode={:?}", code, modifiers, app_core.ui_state.input_mode);
+
+            // Handle Ctrl+C to quit
+            if (code == KeyCode::Char('c') || code == KeyCode::Char('C')) && modifiers.contains(KeyModifiers::CONTROL) {
+                app_core.quit();
+                return Ok(None);
+            }
+
+            // Handle Ctrl+F to start search
+            if (code == KeyCode::Char('f') || code == KeyCode::Char('F')) && modifiers.contains(KeyModifiers::CONTROL) {
+                app_core.start_search_mode();
+                return Ok(None);
+            }
+
+            // Handle Ctrl+PageUp/PageDown for search navigation
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                match code {
+                    KeyCode::PageDown => {
+                        tracing::debug!("Ctrl+PageDown detected - next search match");
+                        let window_name = app_core.get_focused_window_name();
+                        if frontend.next_search_match(&window_name) {
+                            app_core.needs_render = true;
+                        }
+                        return Ok(None);
+                    }
+                    KeyCode::PageUp => {
+                        tracing::debug!("Ctrl+PageUp detected - previous search match");
+                        let window_name = app_core.get_focused_window_name();
+                        if frontend.prev_search_match(&window_name) {
+                            app_core.needs_render = true;
+                        }
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Debug log for PageUp/PageDown without Ctrl
+            if matches!(code, KeyCode::PageDown | KeyCode::PageUp) {
+                tracing::debug!("PageUp/PageDown without Ctrl: code={:?}, modifiers={:?}", code, modifiers);
+            }
+
+            // Handle Esc
+            if code == KeyCode::Esc {
+                // If in window editor mode, cancel and close editor
+                if app_core.ui_state.input_mode == InputMode::WindowEditor {
+                    frontend.window_editor = None;
+                    app_core.ui_state.input_mode = InputMode::Normal;
+                    app_core.needs_render = true;
+                    return Ok(None);
+                }
+                // If in menu mode, close menu
+                if app_core.ui_state.input_mode == InputMode::Menu {
+                    app_core.ui_state.popup_menu = None;
+                    app_core.ui_state.input_mode = InputMode::Normal;
+                    app_core.needs_render = true;
+                    return Ok(None);
+                }
+                // If in search mode, clear search and exit search mode
+                if app_core.ui_state.input_mode == InputMode::Search {
+                    frontend.clear_all_searches();
+                    app_core.clear_search_mode();
+                    return Ok(None);
+                }
+                // Otherwise quit
+                app_core.quit();
+                return Ok(None);
+            }
+
+            // Route keys based on input mode
+            if app_core.ui_state.input_mode == InputMode::Menu {
+                tracing::debug!("Menu mode active - handling key: {:?}, modifiers: {:?}", code, modifiers);
+                // Handle menu navigation
+                match code {
+                    KeyCode::Tab | KeyCode::Down => {
+                        tracing::debug!("Tab/Down pressed in menu mode - selecting next");
+                        // Next item
+                        if let Some(ref mut menu) = app_core.ui_state.popup_menu {
+                            menu.select_next();
+                            app_core.needs_render = true;
+                        }
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        tracing::debug!("BackTab/Up pressed in menu mode - selecting previous");
+                        // Previous item
+                        if let Some(ref mut menu) = app_core.ui_state.popup_menu {
+                            menu.select_prev();
+                            app_core.needs_render = true;
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        // Select current menu item
+                        if let Some(menu) = &app_core.ui_state.popup_menu {
+                            if let Some(item) = menu.selected_item() {
+                                let command = item.command.clone();
+
+                                tracing::info!("Menu command selected: {}", command);
+
+                                // Handle submenu commands (from config menus)
+                                if command.starts_with("menu:") {
+                                    // This is a submenu - open it
+                                    let submenu_name = &command[5..];
+                                    match submenu_name {
+                                        "windows" => {
+                                            // Build windows submenu
+                                            let items = build_windows_submenu(&app_core);
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "config" => {
+                                            // Build config submenu
+                                            let items = build_config_submenu();
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "layouts" => {
+                                            // Build layouts submenu
+                                            let items = build_layouts_submenu();
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "editwindow" => {
+                                            // Build window picker for editing
+                                            let items = build_window_picker(&app_core);
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "widgetpicker" => {
+                                            // Build widget type picker for adding windows
+                                            let items = build_widget_picker(&app_core);
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "addwindow" => {
+                                            // Build hierarchical add window menu (categories)
+                                            let items = app_core.build_add_window_menu();
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "hidewindow" => {
+                                            // Build hide window menu (flat list)
+                                            let items = app_core.build_hide_window_menu();
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        "editwindow" => {
+                                            // Build edit window menu (flat list)
+                                            let items = app_core.build_edit_window_menu();
+                                            app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                                items,
+                                                (40, 12),
+                                            ));
+                                        }
+                                        _ => {
+                                            // Unknown submenu - close menu
+                                            app_core.ui_state.popup_menu = None;
+                                            app_core.ui_state.input_mode = InputMode::Normal;
+                                        }
+                                    }
+                                    app_core.needs_render = true;
+                                } else if command.starts_with("__SUBMENU__") {
+                                    // Context menu category submenu - look up in menu_categories
+                                    let category = &command[11..]; // Skip "__SUBMENU__" prefix
+                                    if let Some(items) = app_core.menu_categories.get(category) {
+                                        // Get current menu position
+                                        let position = app_core.ui_state.popup_menu
+                                            .as_ref()
+                                            .map(|m| m.get_position())
+                                            .unwrap_or((40, 12));
+
+                                        // Create submenu offset to the right
+                                        let submenu_pos = (position.0 + 20, position.1);
+
+                                        app_core.ui_state.submenu = Some(crate::data::ui_state::PopupMenu::new(
+                                            items.clone(),
+                                            submenu_pos,
+                                        ));
+                                        tracing::info!("Opened context menu submenu: {}", category);
+                                    } else {
+                                        tracing::warn!("Context menu category not found: {}", category);
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+                                    }
+                                    app_core.needs_render = true;
+                                } else if command.starts_with("__SUBMENU_ADD__") {
+                                    // Add Window category submenu - parse category and show windows
+                                    let category_str = &command[15..]; // Skip "__SUBMENU_ADD__" prefix
+
+                                    use config::WidgetCategory;
+                                    let category = match category_str {
+                                        "ProgressBar" => WidgetCategory::ProgressBar,
+                                        "TextWindow" => WidgetCategory::TextWindow,
+                                        "Countdown" => WidgetCategory::Countdown,
+                                        "Hand" => WidgetCategory::Hand,
+                                        "ActiveEffects" => WidgetCategory::ActiveEffects,
+                                        "Other" => WidgetCategory::Other,
+                                        _ => {
+                                            tracing::warn!("Unknown widget category: {}", category_str);
+                                            app_core.ui_state.popup_menu = None;
+                                            app_core.ui_state.input_mode = InputMode::Normal;
+                                            app_core.needs_render = true;
+                                            WidgetCategory::Other // Fallback
+                                        }
+                                    };
+
+                                    // Build window list for this category
+                                    let items = app_core.build_add_window_category_menu(&category);
+
+                                    if items.is_empty() {
+                                        tracing::info!("No windows available in category: {:?}", category);
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+                                    } else {
+                                        app_core.ui_state.popup_menu = Some(crate::data::ui_state::PopupMenu::new(
+                                            items,
+                                            (40, 12),
+                                        ));
+                                    }
+                                    app_core.needs_render = true;
+                                } else if command.starts_with("__ADD__") {
+                                    // Add window command
+                                    let window_name = &command[7..]; // Skip "__ADD__" prefix
+
+                                    match app_core.layout.add_window(window_name) {
+                                        Ok(_) => {
+                                            let (width, height) = frontend.size();
+                                            app_core.sync_layout_to_ui_state(width, height, &app_core.layout.clone());
+                                            app_core.layout_modified_since_save = true;
+                                            app_core.add_system_message(&format!("Window '{}' added", window_name));
+                                            tracing::info!("Added window: {}", window_name);
+                                        }
+                                        Err(e) => {
+                                            app_core.add_system_message(&format!("Failed to add window: {}", e));
+                                            tracing::error!("Failed to add window '{}': {}", window_name, e);
+                                        }
+                                    }
+
+                                    app_core.ui_state.popup_menu = None;
+                                    app_core.ui_state.input_mode = InputMode::Normal;
+                                    app_core.needs_render = true;
+                                } else if command.starts_with("__HIDE__") {
+                                    // Hide window command
+                                    let window_name = &command[8..]; // Skip "__HIDE__" prefix
+
+                                    match app_core.layout.hide_window(window_name) {
+                                        Ok(_) => {
+                                            app_core.ui_state.windows.remove(window_name);
+                                            app_core.layout_modified_since_save = true;
+                                            app_core.add_system_message(&format!("Window '{}' hidden", window_name));
+                                            tracing::info!("Hidden window: {}", window_name);
+
+                                            // Optional: Clean up if window is unmodified
+                                            app_core.layout.remove_window_if_default(window_name);
+                                        }
+                                        Err(e) => {
+                                            app_core.add_system_message(&format!("Failed to hide window: {}", e));
+                                            tracing::error!("Failed to hide window '{}': {}", window_name, e);
+                                        }
+                                    }
+
+                                    app_core.ui_state.popup_menu = None;
+                                    app_core.ui_state.input_mode = InputMode::Normal;
+                                    app_core.needs_render = true;
+                                } else if command.starts_with("__EDIT__") {
+                                    // Edit window command
+                                    let window_name = &command[8..]; // Skip "__EDIT__" prefix
+
+                                    if let Some(window_def) = app_core.layout.get_window(window_name) {
+                                        // Open window editor
+                                        frontend.window_editor = Some(frontend::tui::window_editor::WindowEditor::new(window_def.clone()));
+                                        app_core.ui_state.input_mode = data::ui_state::InputMode::WindowEditor;
+                                        tracing::info!("Opening window editor for: {}", window_name);
+                                    } else {
+                                        app_core.add_system_message(&format!("Window '{}' not found", window_name));
+                                        tracing::warn!("Window '{}' not found in layout", window_name);
+                                    }
+
+                                    app_core.ui_state.popup_menu = None;
+                                    app_core.needs_render = true;
+                                } else {
+                                    // Close menu first
+                                    app_core.ui_state.popup_menu = None;
+                                    app_core.ui_state.submenu = None;
+                                    app_core.ui_state.nested_submenu = None;
+                                    app_core.ui_state.input_mode = InputMode::Normal;
+                                    app_core.needs_render = true;
+
+                                    // Check if this is an internal action or game command
+                                    if command.starts_with("action:") {
+                                        // Internal action - handle it
+                                        handle_menu_action(app_core, frontend, &command)?;
+                                    } else if !command.is_empty() {
+                                        // Game command - send to server
+                                        tracing::info!("Sending context menu command: {}", command);
+                                        return Ok(Some(format!("{}\n", command)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(None);
+            } else if app_core.ui_state.input_mode == InputMode::WindowEditor {
+                // Handle window editor navigation and input
+                if let Some(ref mut editor) = frontend.window_editor {
+                    match code {
+                        KeyCode::Tab => {
+                            editor.next();
+                            app_core.needs_render = true;
+                        }
+                        KeyCode::BackTab => {
+                            editor.previous();
+                            app_core.needs_render = true;
+                        }
+                        KeyCode::Char(' ') | KeyCode::Enter if editor.is_on_checkbox() => {
+                            // Space or Enter toggles checkboxes only when focused on a checkbox
+                            editor.toggle_field();
+                            app_core.needs_render = true;
+                        }
+                        KeyCode::Char('s') | KeyCode::Char('S') if modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Save window definition
+                            let (width, height) = frontend.size();
+                            if let Some(ref mut editor) = frontend.window_editor {
+                                let window_def = editor.get_window_def().clone();
+
+                                // Add to layout
+                                if editor.is_new() {
+                                    // New window - add to front of layout (so it appears on top)
+                                    app_core.layout.windows.insert(0, window_def.clone());
+                                    tracing::info!("Added new window: {}", window_def.name());
+
+                                    // Create WindowState for new window WITHOUT destroying existing ones
+                                    app_core.add_new_window(&window_def, width, height);
+                                } else {
+                                    // Editing existing - update it
+                                    if let Some(existing) = app_core.layout.windows.iter_mut().find(|w| w.name() == window_def.name()) {
+                                        *existing = window_def.clone();
+                                        tracing::info!("Updated window: {}", window_def.name());
+
+                                        // Update window position if size/position changed
+                                        app_core.update_window_position(&window_def, width, height);
+                                    }
+                                }
+
+                                // Mark layout as modified
+                                app_core.mark_layout_modified();
+
+                                // Close editor
+                                frontend.window_editor = None;
+                                app_core.ui_state.input_mode = InputMode::Normal;
+                                app_core.needs_render = true;
+                            }
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') if modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Delete window
+                            if let Some(ref mut editor) = frontend.window_editor {
+                                let window_name = editor.get_window_def().name().to_string();
+
+                                // Don't delete main window or command_input
+                                if window_name == "main" || window_name == "command_input" {
+                                    tracing::warn!("Cannot hide {} window", window_name);
+                                } else {
+                                    // Hide window (keep in layout, remove from UI)
+                                    app_core.hide_window(&window_name);
+
+                                    // Close editor
+                                    frontend.window_editor = None;
+                                    app_core.ui_state.input_mode = InputMode::Normal;
+                                }
+                            }
+                        }
+                        _ => {
+                            // Route all other input to the editor's TextArea widgets
+                            use tui_textarea::Input;
+                            let key_event = crossterm::event::KeyEvent::new(code, modifiers);
+                            let input: Input = key_event.into();
+                            editor.input(input);
+                            app_core.needs_render = true;
+                        }
+                    }
+                }
+                return Ok(None);
+            } else if app_core.ui_state.input_mode == InputMode::Search {
+                // Handle search input
+                match code {
+                    KeyCode::Enter => {
+                        // Execute search
+                        let pattern = app_core.ui_state.search_input.clone();
+                        if !pattern.is_empty() {
+                            let window_name = app_core.get_focused_window_name();
+                            match frontend.execute_search(&window_name, &pattern) {
+                                Ok(count) => {
+                                    if count > 0 {
+                                        tracing::info!("Found {} matches for '{}'", count, pattern);
+                                    } else {
+                                        tracing::info!("No matches found for '{}'", pattern);
+                                    }
+                                    app_core.needs_render = true;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Invalid search regex '{}': {}", pattern, e);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        // Insert character into search input
+                        let pos = app_core.ui_state.search_cursor;
+                        app_core.ui_state.search_input.insert(pos, c);
+                        app_core.ui_state.search_cursor += 1;
+                        app_core.needs_render = true;
+                    }
+                    KeyCode::Backspace => {
+                        // Delete character before cursor
+                        if app_core.ui_state.search_cursor > 0 {
+                            app_core.ui_state.search_cursor -= 1;
+                            app_core.ui_state.search_input.remove(app_core.ui_state.search_cursor);
+                            app_core.needs_render = true;
+                        }
+                    }
+                    KeyCode::Left => {
+                        // Move cursor left
+                        if app_core.ui_state.search_cursor > 0 {
+                            app_core.ui_state.search_cursor -= 1;
+                            app_core.needs_render = true;
+                        }
+                    }
+                    KeyCode::Right => {
+                        // Move cursor right
+                        if app_core.ui_state.search_cursor < app_core.ui_state.search_input.len() {
+                            app_core.ui_state.search_cursor += 1;
+                            app_core.needs_render = true;
+                        }
+                    }
+                    KeyCode::Home => {
+                        app_core.ui_state.search_cursor = 0;
+                        app_core.needs_render = true;
+                    }
+                    KeyCode::End => {
+                        app_core.ui_state.search_cursor = app_core.ui_state.search_input.len();
+                        app_core.needs_render = true;
+                    }
+                    _ => {}
+                }
+            } else {
+                // Normal mode - handle command input
+                match code {
+                    KeyCode::Enter => {
+                        // Submit command from CommandInput widget
+                        if let Some(command) = frontend.command_input_submit("command_input") {
+                            // Special handling for .savelayout - needs terminal size
+                            if command.starts_with(".savelayout ") || command == ".savelayout" {
+                                let name = command.strip_prefix(".savelayout ")
+                                    .unwrap_or("default")
+                                    .trim();
+                                tracing::info!("[MAIN.RS] User entered .savelayout command: '{}'", name);
+                                let (width, height) = frontend.size();
+                                tracing::info!("[MAIN.RS] Terminal size from frontend: {}x{}", width, height);
+                                app_core.save_layout(name, width, height);
+                                app_core.needs_render = true;
+                            }
+                            // Special handling for .loadlayout - needs terminal size
+                            else if command.starts_with(".loadlayout ") || command == ".loadlayout" {
+                                let name = command.strip_prefix(".loadlayout ")
+                                    .unwrap_or("default")
+                                    .trim();
+                                tracing::info!("[MAIN.RS] User entered .loadlayout command: '{}'", name);
+                                let (width, height) = frontend.size();
+                                tracing::info!("[MAIN.RS] Terminal size from frontend: {}x{}", width, height);
+                                app_core.load_layout(name, width, height);
+                                app_core.needs_render = true;
+                            }
+                            // Special handling for .resize - scales windows proportionally
+                            else if command == ".resize" {
+                                tracing::info!("[MAIN.RS] User entered .resize command");
+                                let (width, height) = frontend.size();
+                                tracing::info!("[MAIN.RS] Terminal size from frontend: {}x{}", width, height);
+                                app_core.resize_windows(width, height);
+                                app_core.needs_render = true;
+                            } else {
+                                let to_send = app_core.send_command(command)?;
+                                app_core.needs_render = true;
+                                return Ok(Some(to_send));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Route all other keys to CommandInput widget
+                        frontend.command_input_key("command_input", code, modifiers);
+                        app_core.needs_render = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}

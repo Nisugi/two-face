@@ -4,11 +4,13 @@
 //! It provides a unified interface for event polling, rendering, and cleanup.
 
 pub mod events;
+pub mod gui;
 pub mod tui;
 
-pub use events::FrontendEvent;
-pub use tui::TuiFrontend;
 use anyhow::Result;
+pub use events::FrontendEvent;
+pub use gui::EguiApp;
+pub use tui::TuiFrontend;
 
 /// Frontend trait - must be implemented by both TUI and GUI frontends
 ///
@@ -61,4 +63,7 @@ pub trait Frontend {
     /// # Returns
     /// - `(width, height)` tuple
     fn size(&self) -> (u16, u16);
+
+    /// Downcast to concrete type (for accessing frontend-specific methods)
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }

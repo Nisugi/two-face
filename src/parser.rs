@@ -1,8 +1,38 @@
+//! Streaming XML parser that converts GemStone IV data into strongly typed events.
+//!
+//! The parser keeps track of nested styles, open streams, dialog fragments, and
+//! ad-hoc pattern detectors (e.g., event timers) so the rest of the client can
+//! operate on higher-level `ParsedElement` values instead of raw XML.
+
+use crate::config::EventAction;
+use crate::data::LinkData;
 use regex::Regex;
 use std::collections::HashMap;
-use crate::ui::{SpanType, LinkData};
-use crate::config::EventAction;
 
+/// Text categories emitted by the XML stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanType {
+    Normal,      // Regular text
+    Link,        // <a> tag from parser
+    Monsterbold, // <preset id="monsterbold"> from parser
+    Spell,       // <spell> tag from parser
+    Speech,      // <preset id="speech"> from parser
+}
+
+/// Convenience struct used while normalizing spans before they are wrapped in a
+/// higher-level `ParsedElement`.
+#[derive(Clone, Debug)]
+pub struct ParsedSpan {
+    pub text: String,
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+    pub bold: bool,
+    pub span_type: SpanType,
+    pub preset: Option<String>,
+    pub link_data: Option<LinkData>,
+}
+
+/// Top-level representation of any XML fragment we care about.
 #[derive(Debug, Clone)]
 pub enum ParsedElement {
     Text {
@@ -23,9 +53,11 @@ pub enum ParsedElement {
     },
     LeftHand {
         item: String,
+        link: Option<LinkData>,
     },
     RightHand {
         item: String,
+        link: Option<LinkData>,
     },
     SpellHand {
         spell: String,
@@ -70,30 +102,27 @@ pub enum ParsedElement {
         id: String,
         subtitle: Option<String>,
     },
-    BloodPoints {
-        value: u32,
-    },
     InjuryImage {
-        id: String,      // Body part: "head", "leftArm", etc.
-        name: String,    // Injury level: "Injury1", "Injury2", "Injury3", "Scar1", "Scar2", "Scar3"
+        id: String,   // Body part: "head", "leftArm", etc.
+        name: String, // Injury level: "Injury1", "Injury2", "Injury3", "Scar1", "Scar2", "Scar3"
     },
     StatusIndicator {
-        id: String,      // Status type: "poisoned", "diseased", "bleeding", "stunned"
-        active: bool,    // true = active, false = clear
+        id: String,   // Status type: "poisoned", "diseased", "bleeding", "stunned"
+        active: bool, // true = active, false = clear
     },
     ActiveEffect {
-        category: String,  // "ActiveSpells", "Buffs", "Debuffs", "Cooldowns"
+        category: String, // "ActiveSpells", "Buffs", "Debuffs", "Cooldowns"
         id: String,
         value: u32,
         text: String,
-        time: String,      // Format: "HH:MM:SS"
+        time: String, // Format: "HH:MM:SS"
     },
     ClearActiveEffects {
-        category: String,  // Which category to clear
+        category: String, // Which category to clear
     },
     MenuResponse {
-        id: String,                              // Correlation ID (counter)
-        coords: Vec<(String, Option<String>)>,  // List of (coord, optional noun) pairs from <mi> tags
+        id: String,                            // Correlation ID (counter)
+        coords: Vec<(String, Option<String>)>, // List of (coord, optional noun) pairs from <mi> tags
     },
     Event {
         event_type: String,  // "stun", "webbed", "prone", etc.
@@ -101,11 +130,12 @@ pub enum ParsedElement {
         duration: u32,       // Duration in seconds (for countdowns)
     },
     LaunchURL {
-        url: String,  // URL path to append to https://www.play.net
+        url: String, // URL path to append to https://www.play.net
     },
 }
 
-// Color/style tracking for nested tags
+/// Tracks the currently active foreground/background/bold settings while the
+/// parser walks nested XML tags.
 #[derive(Debug, Clone)]
 pub(crate) struct ColorStyle {
     fg: Option<String>,
@@ -123,6 +153,8 @@ impl Default for ColorStyle {
     }
 }
 
+/// Stateful streaming parser that consumes wizard XML chunks and emits
+/// high-level `ParsedElement` values.
 #[derive(Clone)]
 pub struct XmlParser {
     current_stream: String,
@@ -135,25 +167,28 @@ pub struct XmlParser {
     pub(crate) bold_stack: Vec<bool>,
 
     // Semantic type tracking
-    pub(crate) link_depth: usize,      // Track nested links
-    pub(crate) spell_depth: usize,     // Track nested spells
-    pub(crate) current_link_data: Option<LinkData>,  // Current link metadata (exist_id, noun)
+    pub(crate) link_depth: usize,                   // Track nested links
+    pub(crate) spell_depth: usize,                  // Track nested spells
+    pub(crate) current_link_data: Option<LinkData>, // Current link metadata (exist_id, noun)
+    pub(crate) current_preset_id: Option<String>, // Current preset ID (e.g., "speech", "monsterbold")
     // Menu tracking
-    current_menu_id: Option<String>,  // ID of menu being parsed
+    current_menu_id: Option<String>, // ID of menu being parsed
     current_menu_coords: Vec<(String, Option<String>)>, // (coord, optional noun) pairs for current menu
 
     // Inventory tag tracking (to discard content)
-    in_inv_tag: bool,  // True when inside <inv>...</inv> tags
+    in_inv_tag: bool, // True when inside <inv>...</inv> tags
 
     // Event pattern matching
-    event_matchers: Vec<(Regex, crate::config::EventPattern)>,  // Compiled regexes + patterns
+    event_matchers: Vec<(Regex, crate::config::EventPattern)>, // Compiled regexes + patterns
 }
 
 impl XmlParser {
+    /// Create a parser with empty preset/event tables.
     pub fn new() -> Self {
         Self::with_presets(vec![], HashMap::new())
     }
 
+    /// Create a parser primed with preset definitions and event patterns.
     pub fn with_presets(
         preset_list: Vec<(String, Option<String>, Option<String>)>,
         event_patterns: HashMap<String, crate::config::EventPattern>,
@@ -177,11 +212,7 @@ impl XmlParser {
                     event_matchers.push((regex, pattern));
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Invalid event pattern '{}': {}",
-                        name,
-                        e
-                    );
+                    tracing::warn!("Invalid event pattern '{}': {}", name, e);
                 }
             }
         }
@@ -196,6 +227,7 @@ impl XmlParser {
             link_depth: 0,
             spell_depth: 0,
             current_link_data: None,
+            current_preset_id: None,
             current_menu_id: None,
             current_menu_coords: Vec::new(),
             in_inv_tag: false,
@@ -221,7 +253,16 @@ impl XmlParser {
             // Check for paired tags first (manually check for each type)
             let mut found_paired = false;
 
-            for tag_name in &["prompt", "spell", "left", "right", "compass", "dialogData", "component", "compDef"] {
+            for tag_name in &[
+                "prompt",
+                "spell",
+                "left",
+                "right",
+                "compass",
+                "dialogData",
+                "component",
+                "compDef",
+            ] {
                 let start_pattern = format!("<{}", tag_name);
                 let end_pattern = format!("</{}>", tag_name);
 
@@ -292,15 +333,29 @@ impl XmlParser {
         elements
     }
 
-    fn process_tag(&mut self, tag: &str, text_buffer: &mut String, elements: &mut Vec<ParsedElement>) {
+    fn process_tag(
+        &mut self,
+        tag: &str,
+        text_buffer: &mut String,
+        elements: &mut Vec<ParsedElement>,
+    ) {
         // Determine if this tag changes color state
-        let color_opening = tag.starts_with("<preset ") || tag.starts_with("<color ") ||
-                           tag.starts_with("<style ") || tag.starts_with("<pushBold") ||
-                           tag.starts_with("<b>") ||
-                           tag.starts_with("<a ") || tag.starts_with("<d ");
+        let color_opening = tag.starts_with("<preset ")
+            || tag.starts_with("<color ")
+            || tag.starts_with("<style ")
+            || tag.starts_with("<pushBold")
+            || tag.starts_with("<b>")
+            || tag.starts_with("<a ")
+            || tag == "<a>"
+            || tag.starts_with("<d ")
+            || tag == "<d>";
 
-        let color_closing = tag == "</preset>" || tag == "</color>" || tag == "</a>" ||
-                           tag == "</d>" || tag == "<popBold/>" || tag == "</b>";
+        let color_closing = tag == "</preset>"
+            || tag == "</color>"
+            || tag == "</a>"
+            || tag == "</d>"
+            || tag == "<popBold/>"
+            || tag == "</b>";
 
         // Flush before opening new colors (so old styled text is emitted with old colors)
         if color_opening && !text_buffer.is_empty() {
@@ -397,6 +452,8 @@ impl XmlParser {
             // Call both handlers to cover all dialogData processing
             self.handle_dialog_data(tag, elements);
             self.handle_dialogdata(tag, elements);
+        } else if tag.starts_with("<indicator ") {
+            self.handle_indicator(tag, elements);
         } else if tag.starts_with("<progressBar ") {
             self.handle_progressbar(tag, elements);
         } else if tag.starts_with("<label ") {
@@ -437,11 +494,15 @@ impl XmlParser {
             self.in_inv_tag = false;
         }
         // Silently ignore these tags
-        else if tag.starts_with("<compDef ") || tag == "</compDef>" ||
-                tag.starts_with("<streamWindow ") || tag.starts_with("<dropDownBox ") ||
-                tag.starts_with("<skin ") ||
-                tag.starts_with("<clearContainer ") ||
-                tag.starts_with("<container ") || tag.starts_with("<exposeContainer ") {
+        else if tag.starts_with("<compDef ")
+            || tag == "</compDef>"
+            || tag.starts_with("<streamWindow ")
+            || tag.starts_with("<dropDownBox ")
+            || tag.starts_with("<skin ")
+            || tag.starts_with("<clearContainer ")
+            || tag.starts_with("<container ")
+            || tag.starts_with("<exposeContainer ")
+        {
             // Ignore these entirely (inventory window tags)
         }
     }
@@ -449,6 +510,9 @@ impl XmlParser {
     fn handle_preset_open(&mut self, tag: &str) {
         // <preset id='speech'>
         if let Some(id) = Self::extract_attribute(tag, "id") {
+            // Track preset ID for semantic type detection
+            self.current_preset_id = Some(id.clone());
+
             if let Some((fg, bg)) = self.presets.get(&id) {
                 self.preset_stack.push(ColorStyle {
                     fg: fg.clone(),
@@ -463,6 +527,8 @@ impl XmlParser {
 
     fn handle_preset_close(&mut self) {
         self.preset_stack.pop();
+        // Clear preset ID when closing
+        self.current_preset_id = None;
     }
 
     fn handle_color_open(&mut self, tag: &str) {
@@ -525,11 +591,19 @@ impl XmlParser {
             } else {
                 String::new()
             };
-            elements.push(ParsedElement::Prompt { time, text: self.decode_entities(&text) });
+            elements.push(ParsedElement::Prompt {
+                time,
+                text: self.decode_entities(&text),
+            });
         }
     }
 
-    fn handle_spell(&mut self, whole_tag: &str, _text_buffer: &mut String, elements: &mut Vec<ParsedElement>) {
+    fn handle_spell(
+        &mut self,
+        whole_tag: &str,
+        _text_buffer: &mut String,
+        elements: &mut Vec<ParsedElement>,
+    ) {
         // <spell>text</spell> or <spell exist="...">text</spell>
         // Extract text content between tags
         if let Some(start) = whole_tag.find('>') {
@@ -542,22 +616,48 @@ impl XmlParser {
         }
     }
 
-    fn handle_left_hand(&mut self, whole_tag: &str, _text_buffer: &mut String, elements: &mut Vec<ParsedElement>) {
+    fn handle_left_hand(
+        &mut self,
+        whole_tag: &str,
+        _text_buffer: &mut String,
+        elements: &mut Vec<ParsedElement>,
+    ) {
         // <left>text</left> or <left exist="...">text</left>
         if let Some(start) = whole_tag.find('>') {
             if let Some(end) = whole_tag.rfind("</left>") {
                 let item = whole_tag[start + 1..end].to_string();
-                elements.push(ParsedElement::LeftHand { item });
+                let link = Self::extract_attribute(whole_tag, "exist")
+                    .zip(Self::extract_attribute(whole_tag, "noun"))
+                    .map(|(exist, noun)| LinkData {
+                        exist_id: exist,
+                        noun,
+                        text: item.clone(),
+                        coord: Self::extract_attribute(whole_tag, "coord"),
+                    });
+                elements.push(ParsedElement::LeftHand { item, link });
             }
         }
     }
 
-    fn handle_right_hand(&mut self, whole_tag: &str, _text_buffer: &mut String, elements: &mut Vec<ParsedElement>) {
+    fn handle_right_hand(
+        &mut self,
+        whole_tag: &str,
+        _text_buffer: &mut String,
+        elements: &mut Vec<ParsedElement>,
+    ) {
         // <right>text</right> or <right exist="...">text</right>
         if let Some(start) = whole_tag.find('>') {
             if let Some(end) = whole_tag.rfind("</right>") {
                 let item = whole_tag[start + 1..end].to_string();
-                elements.push(ParsedElement::RightHand { item });
+                let link = Self::extract_attribute(whole_tag, "exist")
+                    .zip(Self::extract_attribute(whole_tag, "noun"))
+                    .map(|(exist, noun)| LinkData {
+                        exist_id: exist,
+                        noun,
+                        text: item.clone(),
+                        coord: Self::extract_attribute(whole_tag, "coord"),
+                    });
+                elements.push(ParsedElement::RightHand { item, link });
             }
         }
     }
@@ -571,6 +671,21 @@ impl XmlParser {
             .map(|cap| cap[1].to_string())
             .collect();
         elements.push(ParsedElement::Compass { directions });
+    }
+
+    fn handle_indicator(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
+        // <indicator id='IconHIDDEN' visible='y'/>
+        // <indicator id='IconSTUNNED' visible='n'/>
+        if let Some(id) = Self::extract_attribute(tag, "id") {
+            // Strip "Icon" prefix and convert to lowercase
+            let status = id.strip_prefix("Icon").unwrap_or(&id).to_lowercase();
+
+            // Extract visible attribute ('y' or 'n')
+            if let Some(visible) = Self::extract_attribute(tag, "visible") {
+                let active = visible == "y";
+                elements.push(ParsedElement::StatusIndicator { id: status, active });
+            }
+        }
     }
 
     fn handle_dialog_data(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
@@ -592,9 +707,14 @@ impl XmlParser {
                 if clear == "t" {
                     // For injuries and active effects, we have specialized handling below
                     // For everything else, emit a generic ClearDialogData event
-                    if id != "injuries" && id != "Active Spells" && id != "Buffs" && id != "Debuffs" && id != "Cooldowns" {
+                    if id != "injuries"
+                        && id != "Active Spells"
+                        && id != "Buffs"
+                        && id != "Debuffs"
+                        && id != "Cooldowns"
+                    {
                         elements.push(ParsedElement::ClearDialogData { id: id.clone() });
-                        tracing::debug!("Clearing dialogData window: {}", id);
+                        // tracing::debug!("Clearing dialogData window: {}", id);
                     }
                 }
             }
@@ -609,17 +729,28 @@ impl XmlParser {
 
             // Handle injuries dialogData - extract all <image> tags for body parts
             if id == "injuries" {
-                tracing::debug!("Parser found dialogData for injuries");
+                // tracing::debug!("Parser found dialogData for injuries");
 
                 // Check for clear='t' attribute - this clears ALL injuries
                 if let Some(clear) = Self::extract_attribute(tag, "clear") {
                     if clear == "t" {
-                        tracing::debug!("Clearing all injuries (clear='t')");
+                        // tracing::debug!("Clearing all injuries (clear='t')");
                         // Emit clear events for all body parts
                         let body_parts = vec![
-                            "head", "neck", "chest", "abdomen", "back",
-                            "leftArm", "rightArm", "leftHand", "rightHand",
-                            "leftLeg", "rightLeg", "leftEye", "rightEye", "nsys"
+                            "head",
+                            "neck",
+                            "chest",
+                            "abdomen",
+                            "back",
+                            "leftArm",
+                            "rightArm",
+                            "leftHand",
+                            "rightHand",
+                            "leftLeg",
+                            "rightLeg",
+                            "leftEye",
+                            "rightEye",
+                            "nsys",
                         ];
                         for part in body_parts {
                             elements.push(ParsedElement::InjuryImage {
@@ -641,10 +772,7 @@ impl XmlParser {
                         // Extract id and name attributes from image tag
                         if let Some(body_id) = Self::extract_attribute(img_tag, "id") {
                             if let Some(name) = Self::extract_attribute(img_tag, "name") {
-                                elements.push(ParsedElement::InjuryImage {
-                                    id: body_id,
-                                    name,
-                                });
+                                elements.push(ParsedElement::InjuryImage { id: body_id, name });
                                 count += 1;
                             }
                         }
@@ -654,13 +782,13 @@ impl XmlParser {
                         break;
                     }
                 }
-                tracing::debug!("Parsed {} injury image(s)", count);
+                // tracing::debug!("Parsed {} injury image(s)", count);
                 return;
             }
 
             // Handle Active Effects (Active Spells, Buffs, Debuffs, Cooldowns)
             if id == "Active Spells" || id == "Buffs" || id == "Debuffs" || id == "Cooldowns" {
-                tracing::debug!("Parser found dialogData for active effects category: {}", id);
+                // tracing::debug!("Parser found dialogData for active effects category: {}", id);
 
                 // Normalize category name: "Active Spells" → "ActiveSpells" (remove space for consistency)
                 let category = if id == "Active Spells" {
@@ -672,10 +800,8 @@ impl XmlParser {
                 // Check for clear='t' attribute
                 if let Some(clear) = Self::extract_attribute(tag, "clear") {
                     if clear == "t" {
-                        tracing::debug!("Clearing active effects for category: {}", category);
-                        elements.push(ParsedElement::ClearActiveEffects {
-                            category
-                        });
+                        // tracing::debug!("Clearing active effects for category: {}", category);
+                        elements.push(ParsedElement::ClearActiveEffects { category });
                         return;
                     }
                 }
@@ -711,7 +837,7 @@ impl XmlParser {
                         break;
                     }
                 }
-                tracing::debug!("Parsed {} active effect(s) for category {}", count, id);
+                // tracing::debug!("Parsed {} active effect(s) for category {}", count, id);
                 return;
             }
         }
@@ -746,15 +872,25 @@ impl XmlParser {
                 // Find the number before the slash
                 let before_slash = &text[..slash_pos];
                 // Extract the last number before the slash (current value)
-                let current = before_slash.split_whitespace()
+                let current = before_slash
+                    .split_whitespace()
                     .rev()
-                    .find_map(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok())
+                    .find_map(|s| {
+                        s.trim_matches(|c: char| !c.is_ascii_digit())
+                            .parse::<u32>()
+                            .ok()
+                    })
                     .unwrap_or(percentage);
 
                 // Extract the number after the slash (max value)
                 let after_slash = &text[slash_pos + 1..];
-                let maximum = after_slash.split_whitespace()
-                    .find_map(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok())
+                let maximum = after_slash
+                    .split_whitespace()
+                    .find_map(|s| {
+                        s.trim_matches(|c: char| !c.is_ascii_digit())
+                            .parse::<u32>()
+                            .ok()
+                    })
                     .unwrap_or(100);
 
                 (current, maximum)
@@ -763,7 +899,12 @@ impl XmlParser {
                 (percentage, 100)
             };
 
-            elements.push(ParsedElement::ProgressBar { id, value, max, text });
+            elements.push(ParsedElement::ProgressBar {
+                id,
+                value,
+                max,
+                text,
+            });
         }
     }
 
@@ -771,6 +912,37 @@ impl XmlParser {
         // <label id='lblBPs' value='Blood Points: 100' />
         if let Some(id) = Self::extract_attribute(tag, "id") {
             if let Some(value) = Self::extract_attribute(tag, "value") {
+                // Check if this is the Blood Points label - emit as ProgressBar instead
+                if id == "lblBPs" && value.contains("Blood Points:") {
+                    // Extract the number after "Blood Points: "
+                    if let Some(bp_start) = value.find("Blood Points:") {
+                        let after_bp = &value[bp_start + 14..].trim_start();
+                        if let Some(end) = after_bp.find(|c: char| !c.is_ascii_digit()) {
+                            let num_str = &after_bp[..end];
+                            if let Ok(bp_value) = num_str.parse::<u32>() {
+                                // Emit as ProgressBar so we can reuse the existing handler
+                                elements.push(ParsedElement::ProgressBar {
+                                    id: id.clone(),
+                                    value: bp_value,
+                                    max: 100,
+                                    text: value.clone(),
+                                });
+                                return;
+                            }
+                        } else if let Ok(bp_value) = after_bp.parse::<u32>() {
+                            // Emit as ProgressBar so we can reuse the existing handler
+                            elements.push(ParsedElement::ProgressBar {
+                                id: id.clone(),
+                                value: bp_value,
+                                max: 100,
+                                text: value.clone(),
+                            });
+                            return;
+                        }
+                    }
+                }
+
+                // Otherwise just emit the label as-is
                 elements.push(ParsedElement::Label { id, value });
             }
         }
@@ -813,7 +985,7 @@ impl XmlParser {
 
     fn handle_dialogdata(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
         // <dialogData id='BetrayerPanel'><label id='lblBPs' value='Blood Points: 100' ...
-        // Extract blood points if present
+        // Extract blood points if present - emit as ProgressBar for consistency
         if tag.contains("id='BetrayerPanel'") || tag.contains("id=\"BetrayerPanel\"") {
             // Look for Blood Points label
             if let Some(bp_start) = tag.find("Blood Points:") {
@@ -823,12 +995,24 @@ impl XmlParser {
                 if let Some(end) = after_bp.find(|c: char| !c.is_ascii_digit()) {
                     let num_str = &after_bp[..end];
                     if let Ok(value) = num_str.parse::<u32>() {
-                        elements.push(ParsedElement::BloodPoints { value });
+                        // Emit as ProgressBar so we can reuse the existing handler
+                        elements.push(ParsedElement::ProgressBar {
+                            id: "lblBPs".to_string(),
+                            value,
+                            max: 100,
+                            text: format!("Blood Points: {}", value),
+                        });
                     }
                 } else {
                     // All remaining characters are digits
                     if let Ok(value) = after_bp.parse::<u32>() {
-                        elements.push(ParsedElement::BloodPoints { value });
+                        // Emit as ProgressBar so we can reuse the existing handler
+                        elements.push(ParsedElement::ProgressBar {
+                            id: "lblBPs".to_string(),
+                            value,
+                            max: 100,
+                            text: format!("Blood Points: {}", value),
+                        });
                     }
                 }
             }
@@ -855,6 +1039,12 @@ impl XmlParser {
         // <d cmd='look' fg='#FFFFFF'>LOOK</d> - direct command tag
         // <d>SKILLS BASE</d> - direct command (uses text content as command)
 
+        tracing::debug!(
+            "handle_d_tag called: tag='{}', link_depth before={}",
+            tag,
+            self.link_depth
+        );
+
         // Track link depth for semantic type (treat <d> like <a> for clickability)
         self.link_depth += 1;
 
@@ -864,10 +1054,10 @@ impl XmlParser {
         // Create link data for this direct command
         // For <d>, we use a special exist_id to indicate it's a direct command
         self.current_link_data = Some(LinkData {
-            exist_id: String::from("_direct_"),  // Special marker for direct commands
-            noun: cmd.clone().unwrap_or_default(),  // Store cmd in noun field temporarily
-            text: String::new(),  // Will be populated as text is rendered
-            coord: None,  // <d> tags don't use coords
+            exist_id: String::from("_direct_"), // Special marker for direct commands
+            noun: cmd.clone().unwrap_or_default(), // Store cmd in noun field temporarily
+            text: String::new(),                // Will be populated as text is rendered
+            coord: None,                        // <d> tags don't use coords
         });
 
         // Don't apply color if we're inside monsterbold (bold has priority)
@@ -904,6 +1094,16 @@ impl XmlParser {
             self.link_depth -= 1;
         }
 
+        // For <d> tags without cmd attribute, populate noun from text content
+        if self.link_depth == 0 {
+            if let Some(ref mut link_data) = self.current_link_data {
+                if link_data.noun.is_empty() && !link_data.text.is_empty() {
+                    link_data.noun = link_data.text.clone();
+                    tracing::debug!("Populated <d> tag noun from text: '{}'", link_data.noun);
+                }
+            }
+        }
+
         // Clear link data when closing d tag
         if self.link_depth == 0 {
             self.current_link_data = None;
@@ -929,8 +1129,8 @@ impl XmlParser {
             self.current_link_data = Some(LinkData {
                 exist_id: exist,
                 noun: n,
-                text: String::new(),  // Will be populated as text is rendered
-                coord,  // Optional coord for direct commands
+                text: String::new(), // Will be populated as text is rendered
+                coord,               // Optional coord for direct commands
             });
         }
 
@@ -982,7 +1182,7 @@ impl XmlParser {
     fn handle_menu_open(&mut self, tag: &str) {
         // <menu id="123" ...>
         if let Some(id) = Self::extract_attribute(tag, "id") {
-            tracing::debug!("Starting menu collection for id={}", id);
+            // tracing::debug!("Starting menu collection for id={}", id);
             self.current_menu_id = Some(id);
             self.current_menu_coords.clear();
         } else {
@@ -995,10 +1195,10 @@ impl XmlParser {
         if self.current_menu_id.is_some() {
             if let Some(coord) = Self::extract_attribute(tag, "coord") {
                 let secondary_noun = Self::extract_attribute(tag, "noun");
-                if let Some(ref noun) = secondary_noun {
-                    tracing::debug!("Adding coord to menu: {} with secondary noun: {}", coord, noun);
+                if let Some(ref _noun) = secondary_noun {
+                    // tracing::debug!("Adding coord to menu: {} with secondary noun: {}", coord, noun);
                 } else {
-                    tracing::debug!("Adding coord to menu: {}", coord);
+                    // tracing::debug!("Adding coord to menu: {}", coord);
                 }
                 self.current_menu_coords.push((coord, secondary_noun));
             }
@@ -1008,7 +1208,7 @@ impl XmlParser {
     fn handle_launch_url(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
         // <LaunchURL src="/gs4/play/cm/loader.asp?uname=..."/>
         if let Some(src) = Self::extract_attribute(tag, "src") {
-            tracing::debug!("Parsed LaunchURL: src={}", src);
+            // tracing::debug!("Parsed LaunchURL: src={}", src);
             elements.push(ParsedElement::LaunchURL { url: src });
         }
     }
@@ -1017,12 +1217,9 @@ impl XmlParser {
         // </menu>
         if let Some(id) = self.current_menu_id.take() {
             let coords = std::mem::take(&mut self.current_menu_coords);
-            tracing::debug!("Finished menu collection for id={}, {} coords", id, coords.len());
+            // tracing::debug!("Finished menu collection for id={}, {} coords", id, coords.len());
 
-            elements.push(ParsedElement::MenuResponse {
-                id,
-                coords,
-            });
+            elements.push(ParsedElement::MenuResponse { id, coords });
         }
     }
 
@@ -1058,16 +1255,28 @@ impl XmlParser {
 
         // Check stacks in order: color > preset > style
         for style in &self.color_stack {
-            if style.fg.is_some() { fg = style.fg.clone(); }
-            if style.bg.is_some() { bg = style.bg.clone(); }
+            if style.fg.is_some() {
+                fg = style.fg.clone();
+            }
+            if style.bg.is_some() {
+                bg = style.bg.clone();
+            }
         }
         for style in &self.preset_stack {
-            if fg.is_none() && style.fg.is_some() { fg = style.fg.clone(); }
-            if bg.is_none() && style.bg.is_some() { bg = style.bg.clone(); }
+            if fg.is_none() && style.fg.is_some() {
+                fg = style.fg.clone();
+            }
+            if bg.is_none() && style.bg.is_some() {
+                bg = style.bg.clone();
+            }
         }
         for style in &self.style_stack {
-            if fg.is_none() && style.fg.is_some() { fg = style.fg.clone(); }
-            if bg.is_none() && style.bg.is_some() { bg = style.bg.clone(); }
+            if fg.is_none() && style.fg.is_some() {
+                fg = style.fg.clone();
+            }
+            if bg.is_none() && style.bg.is_some() {
+                bg = style.bg.clone();
+            }
         }
 
         // Decode HTML entities
@@ -1081,13 +1290,15 @@ impl XmlParser {
         }
 
         // Determine semantic type based on current state
-        // Priority: Monsterbold > Spell > Link > Normal
+        // Priority: Monsterbold > Spell > Link > Speech > Normal
         let span_type = if !self.bold_stack.is_empty() {
             SpanType::Monsterbold
         } else if self.spell_depth > 0 {
             SpanType::Spell
         } else if self.link_depth > 0 {
             SpanType::Link
+        } else if self.current_preset_id.as_deref() == Some("speech") {
+            SpanType::Speech
         } else {
             SpanType::Normal
         };
@@ -1117,6 +1328,32 @@ impl XmlParser {
             return;
         }
 
+        // Check if we should auto-exit inventory stream
+        // Inventory updates don't send <popStream/>, so we detect terminator lines
+        if self.current_stream == "inv" {
+            const INV_TERMINATORS: &[&str] = &[
+                "You pick up",
+                "You drop",
+                "You retrieve",
+                "You sheathe",
+                "You draw",
+                "You put",
+            ];
+
+            // Check if this line terminates the inventory stream
+            for terminator in INV_TERMINATORS {
+                if text.trim_start().starts_with(terminator) {
+                    tracing::debug!(
+                        "Detected inventory terminator: '{}' - switching to main stream",
+                        terminator
+                    );
+                    self.current_stream = "main".to_string();
+                    elements.push(ParsedElement::StreamPop);
+                    break;
+                }
+            }
+        }
+
         // Check for event patterns on the text
         let event_elements = self.check_event_patterns(&text);
         elements.extend(event_elements);
@@ -1143,12 +1380,12 @@ impl XmlParser {
                     }
                 }
 
-                tracing::debug!(
-                    "Event pattern '{}' matched: '{}' (duration: {}s)",
-                    pattern.pattern,
-                    text,
-                    duration
-                );
+                // tracing::debug!(
+                //                     "Event pattern '{}' matched: '{}' (duration: {}s)",
+                //                     pattern.pattern,
+                //                     text,
+                //                     duration
+                //                 );
 
                 events.push(ParsedElement::Event {
                     event_type: pattern.event_type.clone(),

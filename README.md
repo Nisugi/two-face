@@ -14,6 +14,7 @@ Multi-frontend (TUI/GUI) client for GemStone IV - Refactored architecture from V
 2. Implement TUI frontend (ratatui) maintaining all existing functionality
 3. Implement GUI frontend (egui) with proportional font support
 4. Allow users to choose between TUI (`--tui`) or GUI (`--gui`) modes
+5. Support direct eAccess authentication (standalone mode without Lich)
 
 ## Architecture
 
@@ -40,12 +41,21 @@ cargo build --release
 ## Running
 
 ```bash
-# TUI mode (default)
+# Direct connection (standalone - no Lich required)
+two-face.exe --direct \
+  --direct-account YOUR_ACCOUNT \
+  --direct-password YOUR_PASSWORD \
+  --direct-game prime \
+  --direct-character CHARACTER_NAME
+
+# Via Lich proxy (traditional)
 two-face.exe --character Zoleta --port 8000
 
 # GUI mode (future)
 two-face.exe --gui --character Zoleta --port 8000
 ```
+
+See [docs/wiki/getting_connected.md](docs/wiki/getting_connected.md) for detailed connection options.
 
 ## Development Roadmap
 

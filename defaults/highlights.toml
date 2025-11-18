@@ -2,6 +2,23 @@
 # This file contains all highlight patterns
 # Editable via .addhl/.highlights commands
 
+# Test highlight - should be very visible
+[test_obvious]
+pattern = "Obvious"
+fg = "#00ff00"
+bg = "#ff0000"
+bold = true
+fast_parse = true
+category = "Testing"
+
+# Exits highlight
+[exits]
+pattern = "exits:"
+fg = "#00ffff"
+bold = true
+fast_parse = true
+category = "Room"
+
 # Example highlights - customize these for your gameplay
 [friends]
 pattern = "Mandrill|Monolis|Chiora|Exdeo|Kawhi|Aldhelm"
