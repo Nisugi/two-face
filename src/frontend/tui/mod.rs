@@ -500,7 +500,7 @@ impl TuiFrontend {
             theme_browser: None,
             theme_editor: None,
             settings_editor: None,
-            resize_debouncer: ResizeDebouncer::new(100), // 100ms debounce
+            resize_debouncer: ResizeDebouncer::new(300), // 300ms debounce
             cached_theme: crate::theme::ThemePresets::dark(),
             cached_theme_id: "dark".to_string(),
         })

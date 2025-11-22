@@ -1772,25 +1772,8 @@ async fn async_run_tui(
                     }
                 }
                 frontend::FrontendEvent::Key { code, modifiers } => {
-                    use crossterm::event::{KeyCode, KeyModifiers};
-
-                    // Only handle PageUp/PageDown if Ctrl is NOT pressed
-                    // If Ctrl is pressed, let it pass through to handle_frontend_event for search navigation
-                    if !modifiers.contains(KeyModifiers::CONTROL) {
-                        match code {
-                            KeyCode::PageUp => {
-                                frontend.scroll_window("main", 10);
-                                app_core.needs_render = true;
-                                continue;
-                            }
-                            KeyCode::PageDown => {
-                                frontend.scroll_window("main", -10);
-                                app_core.needs_render = true;
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
+                    // Key events are handled in handle_frontend_event()
+                    // No early intercepts - let the 3-layer routing handle everything
                 }
                 _ => {}
             }
@@ -1890,6 +1873,19 @@ fn handle_frontend_event(
                 app_core.ui_state.input_mode
             );
 
+            // ═══════════════════════════════════════════════════════════════
+            // 3-LAYER KEYBIND ROUTING SYSTEM
+            // ═══════════════════════════════════════════════════════════════
+            // 1. PRIORITY: Global keybinds (Ctrl+C, Ctrl+F, Esc)
+            // 2. PRIORITY: High-priority windows (editors, browsers, forms)
+            //              → Checked via has_priority_window()
+            //              → Routes to widgets via menu keybinds
+            // 3. NORMAL:   User keybinds (keybinds.toml)
+            // 4. FALLBACK: CommandInput (typing)
+            // ═══════════════════════════════════════════════════════════════
+
+            // LAYER 1: Global keybinds (always checked first)
+
             // Handle Ctrl+C to quit
             if (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
                 && modifiers.contains(KeyModifiers::CONTROL)
@@ -1940,12 +1936,22 @@ fn handle_frontend_event(
 
             // Handle Esc
             if code == KeyCode::Esc {
-                // If in window editor mode, cancel and close editor
+                // If in window editor mode, handle context-aware navigation
                 if app_core.ui_state.input_mode == InputMode::WindowEditor {
-                    frontend.window_editor = None;
-                    app_core.ui_state.input_mode = InputMode::Normal;
-                    app_core.needs_render = true;
-                    return Ok(None);
+                    if let Some(ref mut editor) = frontend.window_editor {
+                        if editor.is_on_meta() {
+                            // On meta section - close editor
+                            frontend.window_editor = None;
+                            app_core.ui_state.input_mode = InputMode::Normal;
+                            app_core.needs_render = true;
+                            return Ok(None);
+                        } else {
+                            // In a numbered section - return to meta section
+                            editor.return_to_meta();
+                            app_core.needs_render = true;
+                            return Ok(None);
+                        }
+                    }
                 }
                 // If in menu mode, close menus one layer at a time
                 if app_core.ui_state.input_mode == InputMode::Menu {
@@ -1968,7 +1974,7 @@ fn handle_frontend_event(
                     return Ok(None);
                 }
                 // For browser/form modes, close the widget and return to normal
-                if input_router::should_use_menu_keybinds(&app_core.ui_state.input_mode) {
+                if input_router::has_priority_window(&app_core.ui_state.input_mode) {
                     // Close the browser/form widget
                     frontend.highlight_browser = None;
                     frontend.highlight_form = None;
@@ -1990,9 +1996,9 @@ fn handle_frontend_event(
                 return Ok(None);
             }
 
-            // Handle menu widget input modes using the input router
+            // LAYER 2: Priority windows (editors, browsers, forms)
             use crate::core::input_router;
-            if input_router::should_use_menu_keybinds(&app_core.ui_state.input_mode) {
+            if input_router::has_priority_window(&app_core.ui_state.input_mode) {
                 let key_event = crossterm::event::KeyEvent::new(code, modifiers);
 
                 // Browser widgets
@@ -2991,6 +2997,58 @@ fn handle_frontend_event(
             } else if app_core.ui_state.input_mode == InputMode::WindowEditor {
                 // Handle window editor navigation and input
                 if let Some(ref mut editor) = frontend.window_editor {
+                    // Handle Ctrl+1..9 for section jumping (high priority - before menu keybinds)
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        match code {
+                            KeyCode::Char('1') => {
+                                editor.jump_to_section(1);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('2') => {
+                                editor.jump_to_section(2);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('3') => {
+                                editor.jump_to_section(3);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('4') => {
+                                editor.jump_to_section(4);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('5') => {
+                                editor.jump_to_section(5);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('6') => {
+                                editor.jump_to_section(6);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('7') => {
+                                editor.jump_to_section(7);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('8') => {
+                                editor.jump_to_section(8);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            KeyCode::Char('9') => {
+                                editor.jump_to_section(9);
+                                app_core.needs_render = true;
+                                return Ok(None);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     let key_event = crossterm::event::KeyEvent::new(code, modifiers);
                     let action = input_router::route_input(
                         key_event,
@@ -3007,19 +3065,27 @@ fn handle_frontend_event(
                             editor.previous();
                             app_core.needs_render = true;
                         }
-                        crate::core::menu_actions::MenuAction::Toggle
-                            if editor.is_on_checkbox() =>
-                        {
-                            // Toggle only works on checkboxes
-                            editor.toggle_field();
-                            app_core.needs_render = true;
+                        crate::core::menu_actions::MenuAction::Toggle => {
+                            if editor.is_on_checkbox() {
+                                // Toggle only works on checkboxes
+                                editor.toggle_field();
+                                app_core.needs_render = true;
+                            } else if editor.is_on_border_style() {
+                                // Cycle border style dropdown
+                                editor.cycle_border_style();
+                                app_core.needs_render = true;
+                            }
                         }
-                        crate::core::menu_actions::MenuAction::Select
-                            if editor.is_on_checkbox() =>
-                        {
-                            // Enter/Select also toggles checkboxes
-                            editor.toggle_field();
-                            app_core.needs_render = true;
+                        crate::core::menu_actions::MenuAction::Select => {
+                            if editor.is_on_checkbox() {
+                                // Enter/Select also toggles checkboxes
+                                editor.toggle_field();
+                                app_core.needs_render = true;
+                            } else if editor.is_on_border_style() {
+                                // Cycle border style dropdown
+                                editor.cycle_border_style();
+                                app_core.needs_render = true;
+                            }
                         }
                         crate::core::menu_actions::MenuAction::Save => {
                             // Save window definition
@@ -3161,7 +3227,9 @@ fn handle_frontend_event(
                     _ => {}
                 }
             } else {
-                // Normal mode - handle command input
+                // LAYER 3 & 4: Normal mode (no priority window)
+                // Layer 3: Check user keybinds (keybinds.toml)
+                // Layer 4: Fallback to CommandInput (typing)
 
                 // Handle Enter key specially - always submit command, never keybind
                 match code {
@@ -3237,16 +3305,48 @@ fn handle_frontend_event(
                         }
                     }
                     _ => {
-                        // Check if this key matches a keybind first
+                        // Check for non-command-input keybinds first (Tab, F12, Ctrl+R, Ctrl+T, etc.)
                         let key_event = crossterm::event::KeyEvent::new(code, modifiers);
                         if let Some(action) = app_core.keybind_map.get(&key_event).cloned() {
-                            // Execute the keybind action
-                            if let Err(e) = app_core.execute_keybind_action(&action) {
-                                tracing::warn!("Keybind action failed: {}", e);
+                            // Check if this is a command-input action that should be handled by the widget
+                            let is_command_input_action = matches!(&action,
+                                config::KeyBindAction::Action(s) if matches!(s.as_str(),
+                                    "cursor_left" | "cursor_right" | "cursor_word_left" | "cursor_word_right" |
+                                    "cursor_home" | "cursor_end" | "cursor_backspace" | "cursor_delete" |
+                                    "previous_command" | "next_command" | "send_last_command" | "send_second_last_command"
+                                )
+                            );
+
+                            if is_command_input_action {
+                                // Route to CommandInput widget instead of app_core
+                                let available_commands = app_core.get_available_commands();
+                                let available_window_names = app_core.get_window_names();
+                                frontend.command_input_key(
+                                    "command_input",
+                                    code,
+                                    modifiers,
+                                    &available_commands,
+                                    &available_window_names,
+                                );
+                                app_core.needs_render = true;
+                            } else {
+                                // Execute non-command-input keybind actions
+                                match app_core.execute_keybind_action(&action) {
+                                    Ok(commands) => {
+                                        // Return first command from macro (if any) to be sent to server
+                                        if let Some(cmd) = commands.into_iter().next() {
+                                            app_core.needs_render = true;
+                                            return Ok(Some(cmd));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Keybind action failed: {}", e);
+                                    }
+                                }
+                                app_core.needs_render = true;
                             }
-                            app_core.needs_render = true;
                         } else {
-                            // No keybind found - route to CommandInput widget
+                            // No keybind - route to CommandInput widget for typing
                             let available_commands = app_core.get_available_commands();
                             let available_window_names = app_core.get_window_names();
                             frontend.command_input_key(
@@ -3261,6 +3361,11 @@ fn handle_frontend_event(
                     }
                 }
             }
+        }
+        FrontendEvent::Resize { width, height } => {
+            // Automatically resize layout when terminal is resized (using VellumFE algorithm)
+            app_core.resize_windows(width, height);
+            app_core.needs_render = true;
         }
         _ => {}
     }

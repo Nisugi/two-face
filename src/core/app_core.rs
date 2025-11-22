@@ -295,149 +295,6 @@ impl AppCore {
     }
 
     // ===========================================================================================
-    // Command Input Methods (for keybind actions)
-    // ===========================================================================================
-
-    /// Move cursor left in command input
-    pub fn cursor_left(&mut self) {
-        if self.ui_state.command_cursor > 0 {
-            self.ui_state.command_cursor -= 1;
-        }
-    }
-
-    /// Move cursor right in command input
-    pub fn cursor_right(&mut self) {
-        if self.ui_state.command_cursor < self.ui_state.command_input.len() {
-            self.ui_state.command_cursor += 1;
-        }
-    }
-
-    /// Move cursor to previous word boundary
-    pub fn cursor_word_left(&mut self) {
-        let input = &self.ui_state.command_input;
-        let mut pos = self.ui_state.command_cursor;
-
-        // Skip whitespace before current position
-        while pos > 0 && input.chars().nth(pos - 1).map_or(false, |c| c.is_whitespace()) {
-            pos -= 1;
-        }
-
-        // Skip non-whitespace to find word start
-        while pos > 0 && input.chars().nth(pos - 1).map_or(false, |c| !c.is_whitespace()) {
-            pos -= 1;
-        }
-
-        self.ui_state.command_cursor = pos;
-    }
-
-    /// Move cursor to next word boundary
-    pub fn cursor_word_right(&mut self) {
-        let input = &self.ui_state.command_input;
-        let len = input.len();
-        let mut pos = self.ui_state.command_cursor;
-
-        // Skip non-whitespace to find word end
-        while pos < len && input.chars().nth(pos).map_or(false, |c| !c.is_whitespace()) {
-            pos += 1;
-        }
-
-        // Skip whitespace after word
-        while pos < len && input.chars().nth(pos).map_or(false, |c| c.is_whitespace()) {
-            pos += 1;
-        }
-
-        self.ui_state.command_cursor = pos;
-    }
-
-    /// Move cursor to start of command input
-    pub fn cursor_home(&mut self) {
-        self.ui_state.command_cursor = 0;
-    }
-
-    /// Move cursor to end of command input
-    pub fn cursor_end(&mut self) {
-        self.ui_state.command_cursor = self.ui_state.command_input.len();
-    }
-
-    /// Delete character before cursor (backspace)
-    pub fn cursor_backspace(&mut self) {
-        if self.ui_state.command_cursor > 0 {
-            let pos = self.ui_state.command_cursor;
-            self.ui_state.command_input.remove(pos - 1);
-            self.ui_state.command_cursor -= 1;
-        }
-    }
-
-    /// Delete character at cursor (delete key)
-    pub fn cursor_delete(&mut self) {
-        let pos = self.ui_state.command_cursor;
-        if pos < self.ui_state.command_input.len() {
-            self.ui_state.command_input.remove(pos);
-        }
-    }
-
-    // ===========================================================================================
-    // Command History Methods
-    // ===========================================================================================
-
-    /// Navigate to previous command in history
-    pub fn previous_command(&mut self) {
-        if self.ui_state.command_history.is_empty() {
-            return;
-        }
-
-        let new_index = match self.ui_state.command_history_index {
-            None => Some(self.ui_state.command_history.len() - 1),
-            Some(idx) if idx > 0 => Some(idx - 1),
-            Some(idx) => Some(idx), // Already at oldest
-        };
-
-        if let Some(idx) = new_index {
-            self.ui_state.command_input = self.ui_state.command_history[idx].clone();
-            self.ui_state.command_cursor = self.ui_state.command_input.len();
-            self.ui_state.command_history_index = Some(idx);
-        }
-    }
-
-    /// Navigate to next command in history
-    pub fn next_command(&mut self) {
-        if let Some(idx) = self.ui_state.command_history_index {
-            if idx + 1 < self.ui_state.command_history.len() {
-                let new_idx = idx + 1;
-                self.ui_state.command_input = self.ui_state.command_history[new_idx].clone();
-                self.ui_state.command_cursor = self.ui_state.command_input.len();
-                self.ui_state.command_history_index = Some(new_idx);
-            } else {
-                // At newest history entry - clear to empty
-                self.ui_state.command_input.clear();
-                self.ui_state.command_cursor = 0;
-                self.ui_state.command_history_index = None;
-            }
-        }
-    }
-
-    /// Send the last command from history
-    pub fn send_last_command(&mut self) -> Result<String> {
-        if let Some(cmd) = self.ui_state.command_history.last() {
-            let command = cmd.clone();
-            self.send_command(command)
-        } else {
-            Ok(String::new())
-        }
-    }
-
-    /// Send the second-to-last command from history
-    pub fn send_second_last_command(&mut self) -> Result<String> {
-        let len = self.ui_state.command_history.len();
-        if len >= 2 {
-            let command = self.ui_state.command_history[len - 2].clone();
-            self.send_command(command)
-        } else {
-            Ok(String::new())
-        }
-    }
-
-    // ===========================================================================================
     // Window Scrolling Methods
     // ===========================================================================================
 
@@ -492,7 +349,8 @@ impl AppCore {
     // ===========================================================================================
 
     /// Execute a keybind action (called when a bound key is pressed)
-    pub fn execute_keybind_action(&mut self, action: &crate::config::KeyBindAction) -> Result<()> {
+    /// Returns a list of commands to send to the server (for macros)
+    pub fn execute_keybind_action(&mut self, action: &crate::config::KeyBindAction) -> Result<Vec<String>> {
         use crate::config::{KeyAction, KeyBindAction};
 
         match action {
@@ -503,26 +361,22 @@ impl AppCore {
                 } else {
                     tracing::warn!("Unknown keybind action: '{}'", action_str);
                 }
+                Ok(vec![]) // Actions don't send commands to server
             }
             KeyBindAction::Macro(macro_action) => {
-                // Send the macro text as a command
-                // Replace \r with actual Enter (send command)
-                let macro_text = &macro_action.macro_text;
-                if macro_text.contains("\\r") {
-                    // Split on \r and send each part as a command
-                    for part in macro_text.split("\\r") {
-                        if !part.is_empty() {
-                            self.send_command(part.to_string())?;
-                        }
-                    }
-                } else {
-                    // Just add to command input (no Enter)
-                    self.ui_state.command_input.push_str(macro_text);
-                    self.ui_state.command_cursor = self.ui_state.command_input.len();
-                }
+                // Strip any trailing \r or \n from macro text (legacy from wrayth-style macros)
+                // These control characters corrupt the StyledLine and cause rendering artifacts
+                let clean_text = macro_action.macro_text.trim_end_matches(&['\r', '\n'][..]).to_string();
+
+                tracing::info!("[MACRO] Executing macro: '{}' (raw: '{}')",
+                    clean_text, macro_action.macro_text);
+
+                // Send the macro text as a command (posts prompt+echo, returns command for server)
+                let command = self.send_command(clean_text)?;
+                tracing::info!("[MACRO] send_command returned: '{}'", command);
+                Ok(vec![command]) // Return command for network layer to send
             }
         }
-        Ok(())
     }
 
     /// Execute a KeyAction (dispatch to the appropriate method)
@@ -530,37 +384,27 @@ impl AppCore {
         use crate::config::KeyAction;
 
         match action {
-            // Command input actions
-            KeyAction::SendCommand => {
-                let cmd = self.ui_state.command_input.clone();
-                if !cmd.is_empty() {
-                    // Add to history
-                    self.ui_state.command_history.push(cmd.clone());
-                    self.ui_state.command_history_index = None;
-                    // Clear input
-                    self.ui_state.command_input.clear();
-                    self.ui_state.command_cursor = 0;
-                    // Send command
-                    self.send_command(cmd)?;
-                }
-            }
-            KeyAction::CursorLeft => self.cursor_left(),
-            KeyAction::CursorRight => self.cursor_right(),
-            KeyAction::CursorWordLeft => self.cursor_word_left(),
-            KeyAction::CursorWordRight => self.cursor_word_right(),
-            KeyAction::CursorHome => self.cursor_home(),
-            KeyAction::CursorEnd => self.cursor_end(),
-            KeyAction::CursorBackspace => self.cursor_backspace(),
-            KeyAction::CursorDelete => self.cursor_delete(),
-
-            // History actions
-            KeyAction::PreviousCommand => self.previous_command(),
-            KeyAction::NextCommand => self.next_command(),
-            KeyAction::SendLastCommand => {
-                self.send_last_command()?;
-            }
-            KeyAction::SendSecondLastCommand => {
-                self.send_second_last_command()?;
+            // Command input actions - now handled by CommandInput widget
+            KeyAction::SendCommand
+            | KeyAction::CursorLeft
+            | KeyAction::CursorRight
+            | KeyAction::CursorWordLeft
+            | KeyAction::CursorWordRight
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::CursorBackspace
+            | KeyAction::CursorDelete
+            | KeyAction::PreviousCommand
+            | KeyAction::NextCommand
+            | KeyAction::SendLastCommand
+            | KeyAction::SendSecondLastCommand => {
+                // These actions are now handled by the CommandInput widget
+                // via frontend.command_input_key() in main.rs
+                // If we get here, it means the routing logic in main.rs missed something
+                tracing::warn!(
+                    "Command input action {:?} reached execute_key_action - should be routed to widget",
+                    action
+                );
             }
 
             // Window actions
@@ -1100,11 +944,13 @@ impl AppCore {
 
         // Echo command to main window (prompt + command)
         if !command.is_empty() {
+            tracing::info!("[SEND_COMMAND] Echoing command to main window: '{}'", command);
             if let Some(main_window) = self.ui_state.windows.get_mut("main") {
                 if let WindowContent::Text(ref mut content) = main_window.content {
                     let mut segments = Vec::new();
 
                     // Add prompt with per-character coloring (same as prompt rendering)
+                    tracing::debug!("[SEND_COMMAND] Building styled line with prompt: '{}'", self.game_state.last_prompt);
                     for ch in self.game_state.last_prompt.chars() {
                         let char_str = ch.to_string();
 
@@ -1142,20 +988,13 @@ impl AppCore {
                     });
 
                     // Add the styled line to the main window
-                    content.add_line(StyledLine { segments });
+                    content.add_line(StyledLine { segments: segments.clone() });
+                    tracing::info!("[SEND_COMMAND] Added StyledLine with {} segments to main window", segments.len());
                 }
             }
         }
 
-        // Add to command history
-        if !command.is_empty() {
-            self.ui_state.command_history.push(command.clone());
-        }
-
-        // Clear current input
-        self.ui_state.command_input.clear();
-        self.ui_state.command_cursor = 0;
-        self.ui_state.command_history_index = None;
+        // Command history is now managed by the CommandInput widget
 
         // Return formatted command for network layer to send
         Ok(format!("{}\n", command))
@@ -1403,9 +1242,7 @@ impl AppCore {
             }
         }
 
-        // Clear input
-        self.ui_state.command_input.clear();
-        self.ui_state.command_cursor = 0;
+        // Command input is now managed by the CommandInput widget
 
         // Don't send anything to server
         Ok(String::new())
@@ -1871,9 +1708,25 @@ impl AppCore {
             }
         }
 
+        // Snapshot baseline row positions BEFORE any resizing
+        // This ensures width distribution uses original row groupings
+        let baseline_rows: Vec<(String, u16, u16)> = if let Some(ref baseline) = self.baseline_layout {
+            baseline
+                .windows
+                .iter()
+                .map(|w| (w.name().to_string(), w.base().row, w.base().rows))
+                .collect()
+        } else {
+            self.layout
+                .windows
+                .iter()
+                .map(|w| (w.base().name.clone(), w.base().row, w.base().rows))
+                .collect()
+        };
+
         // Apply VellumFE's proportional distribution algorithm
         self.apply_height_resize(height_delta, &static_both, &static_height);
-        self.apply_width_resize(width_delta, &static_both);
+        self.apply_width_resize(width_delta, &static_both, &baseline_rows);
 
         // Update layout terminal size to current
         self.layout.terminal_width = Some(terminal_width);
@@ -1950,15 +1803,12 @@ impl AppCore {
 
         let mut height_applied = HashSet::new();
 
-        // Build list of all scalable widgets with their column ranges
+        // Build list of ALL widgets that participate in column stacks
+        // Include static_both + static_height + scalable for natural cascading
+        // Everything flows together - no special cases, no gap preservation
         let mut scalable_widgets: Vec<(String, u16, u16, u16, u16)> = Vec::new();
         for window_def in &self.layout.windows {
             let base = window_def.base();
-            if static_both.contains(base.name.as_str())
-                || static_height.contains(base.name.as_str())
-            {
-                continue;
-            }
             scalable_widgets.push((base.name.clone(), base.row, base.rows, base.col, base.cols));
         }
 
@@ -1982,7 +1832,9 @@ impl AppCore {
             scalable_widgets.retain(|(name, row, rows, col, cols)| {
                 let col_end = *col + *cols;
                 let overlaps = *col < anchor_col_end && col_end > anchor_col;
-                if overlaps && !height_applied.contains(name) {
+                if overlaps {
+                    // Include ALL overlapping windows (even if already processed)
+                    // This ensures correct proportional calculations
                     widgets_in_col.push((name.clone(), *row, *rows, *cols));
                     false
                 } else {
@@ -1993,9 +1845,13 @@ impl AppCore {
             // Sort by row and distribute proportionally
             widgets_in_col.sort_by_key(|(_, row, _, _)| *row);
 
+            // Calculate total height of ONLY truly scalable windows
+            // Exclude static_both and static_height since they don't resize
             let total_scalable_height: u16 = widgets_in_col
                 .iter()
-                .filter(|(n, _, _, _)| !height_applied.contains(n))
+                .filter(|(name, _, _, _)| {
+                    !static_height.contains(name.as_str()) && !static_both.contains(name.as_str())
+                })
                 .map(|(_, _, rows, _)| *rows)
                 .sum();
 
@@ -2004,6 +1860,7 @@ impl AppCore {
             }
 
             let mut adjustments: Vec<(String, i32)> = Vec::new();
+            let mut redistribution_pool = 0i32;
             let mut leftover = height_delta;
 
             tracing::debug!(
@@ -2014,20 +1871,49 @@ impl AppCore {
                 total_scalable_height
             );
 
-            // Distribute proportionally based on current size
+            // Calculate proportions for ALL scalable windows (including already-processed ones)
+            // This ensures consistent proportions across all column stacks
+            // static_both and static_height get adjustment of 0 but cascade
             for (name, _row, rows, _cols) in &widgets_in_col {
-                if !height_applied.contains(name) {
-                    let proportion = *rows as f64 / total_scalable_height as f64;
-                    let share = (proportion * height_delta as f64).floor() as i32;
-                    leftover -= share;
+                // Skip static windows - they don't resize, but cascade in position
+                if static_height.contains(name.as_str()) || static_both.contains(name.as_str()) {
+                    let widget_type = if static_both.contains(name.as_str()) {
+                        "static_both"
+                    } else {
+                        "static_height"
+                    };
                     tracing::debug!(
-                        "  {} (rows={}): proportion={:.4}, share={}",
+                        "  {} (rows={}): {}, no adjustment (will cascade)",
+                        name,
+                        rows,
+                        widget_type
+                    );
+                    continue;
+                }
+
+                let proportion = *rows as f64 / total_scalable_height as f64;
+                let share = (proportion * height_delta as f64).floor() as i32;
+
+                // Only add to adjustments if NOT already processed
+                // (we calculate for all, but only apply to unprocessed)
+                if !height_applied.contains(name) {
+                    leftover -= share;
+                    adjustments.push((name.clone(), share));
+                    tracing::debug!(
+                        "  {} (rows={}): proportion={:.4}, share={} (will apply)",
                         name,
                         rows,
                         proportion,
                         share
                     );
-                    adjustments.push((name.clone(), share));
+                } else {
+                    tracing::debug!(
+                        "  {} (rows={}): proportion={:.4}, share={} (already applied, skipping)",
+                        name,
+                        rows,
+                        proportion,
+                        share
+                    );
                 }
             }
 
@@ -2046,6 +1932,72 @@ impl AppCore {
                 tracing::debug!("  Distributing -1 leftover row to {}", adjustments[idx].0);
                 leftover += 1;
                 idx += 1;
+            }
+
+            // Check for max_rows constraints and redistribute unused adjustments
+            let mut capped_widgets = HashSet::new();
+            for (name, adjustment) in &adjustments {
+                let window_def = self
+                    .layout
+                    .windows
+                    .iter()
+                    .find(|w| w.name() == name)
+                    .unwrap();
+                let base = window_def.base();
+                if let Some(max_rows) = base.max_rows {
+                    let current_rows = base.rows;
+                    let target_rows = (current_rows as i32 + adjustment).max(0) as u16;
+                    if target_rows > max_rows {
+                        let actual_adjustment = (max_rows as i32 - current_rows as i32).max(0);
+                        let unused = adjustment - actual_adjustment;
+                        redistribution_pool += unused;
+                        capped_widgets.insert(name.clone());
+                        tracing::debug!(
+                            "  {} capped at max_rows={}, unused adjustment={} added to pool",
+                            name,
+                            max_rows,
+                            unused
+                        );
+                    }
+                }
+            }
+
+            // Redistribute unused adjustments to non-capped windows
+            if redistribution_pool != 0 {
+                let recipients: Vec<_> = adjustments
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .filter(|n| !capped_widgets.contains(n))
+                    .collect();
+                let recip_count = recipients.len() as i32;
+                if recip_count > 0 {
+                    let each = redistribution_pool / recip_count;
+                    let mut remainder = redistribution_pool % recip_count;
+                    tracing::debug!(
+                        "  Redistributing {} rows to {} recipients (each={}, remainder={})",
+                        redistribution_pool,
+                        recip_count,
+                        each,
+                        remainder
+                    );
+                    for (name, adj) in &mut adjustments {
+                        if !capped_widgets.contains(name) {
+                            let before = *adj;
+                            *adj += each;
+                            if remainder != 0 {
+                                *adj += remainder.signum();
+                                remainder -= remainder.signum();
+                            }
+                            tracing::debug!(
+                                "    {} receives redistribution: {} -> {}",
+                                name,
+                                before,
+                                *adj
+                            );
+                        }
+                    }
+                    redistribution_pool = 0;
+                }
             }
 
             tracing::debug!("  Final adjustments:");
@@ -2093,7 +2045,13 @@ impl AppCore {
                 if let Some(max) = max_constraint {
                     new_rows = new_rows.min(max);
                 }
-                let new_row = if idx == 0 { *orig_row } else { current_row };
+
+                // Cascade from previous widget (VellumFE behavior)
+                let new_row = if idx == 0 {
+                    *orig_row  // First widget keeps original row
+                } else {
+                    current_row  // Cascade from previous widget
+                };
 
                 // Apply changes
                 if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
@@ -2102,6 +2060,7 @@ impl AppCore {
                     base.rows = new_rows;
                     height_applied.insert(name.clone());
                 }
+
                 current_row = new_row + new_rows;
             }
         }
@@ -2120,95 +2079,19 @@ impl AppCore {
         // Snapshot baseline rows to avoid mixing updates while computing the stack
         let baseline_rows: Vec<u16> = self.layout.windows.iter().map(|w| w.base().row).collect();
 
-        // Collect static-height windows by baseline row (exclude command_input)
-        use std::collections::BTreeMap;
-        let mut statics_by_row: BTreeMap<u16, Vec<(u16, u16, usize)>> = BTreeMap::new();
-        for (i, w) in self.layout.windows.iter().enumerate() {
-            let base = w.base();
-            if w.widget_type() == "command_input" {
-                continue;
-            }
-            if static_both.contains(base.name.as_str())
-                || static_height.contains(base.name.as_str())
-            {
-                let start = base.col;
-                let end = base.col.saturating_add(base.cols);
-                statics_by_row
-                    .entry(baseline_rows[i])
-                    .or_default()
-                    .push((start, end, i));
-            }
-        }
-
-        // Build the top stack: start with row 0 statics
-        use std::collections::HashSet as _HashSetAlias;
-        let mut stack_indices: _HashSetAlias<usize> = _HashSetAlias::new();
-        let prev_spans: Vec<(u16, u16, usize)> =
-            statics_by_row.get(&0).cloned().unwrap_or_default();
-        for (_, _, i) in &prev_spans {
-            stack_indices.insert(*i);
-        }
-
-        // Track contiguous overlapping rows
-        let mut current_row_opt = Some(0u16);
-        let mut last_spans = prev_spans;
-        while let Some(current_row) = current_row_opt {
-            let next_row = current_row.saturating_add(1);
-            if let Some(candidates) = statics_by_row.get(&next_row) {
-                let mut next_spans: Vec<(u16, u16, usize)> = Vec::new();
-                for (s, e, idx) in candidates.iter().copied() {
-                    let overlaps = last_spans.iter().any(|(ps, pe, _)| s < *pe && e > *ps);
-                    if overlaps {
-                        next_spans.push((s, e, idx));
-                        stack_indices.insert(idx);
-                    }
-                }
-                if next_spans.is_empty() {
-                    break;
-                } else {
-                    last_spans = next_spans;
-                    current_row_opt = Some(next_row);
-                }
-            } else {
-                break;
-            }
-        }
-
-        // Apply anchoring: command_input to bottom; top-stack statics remain at baseline; others shift by delta
-        for (i, window_def) in self.layout.windows.iter_mut().enumerate() {
-            let widget_type = window_def.widget_type().to_string();
-            let base_name = window_def.base().name.clone();
-
-            let base = window_def.base_mut();
-            if widget_type == "command_input" {
-                let old_row = base.row;
-                base.row = new_height.saturating_sub(base.rows);
-                tracing::debug!(
-                    "Command input anchored: old_row={}, new_row={}",
-                    old_row,
-                    base.row
-                );
-                continue;
-            }
-            if static_both.contains(base_name.as_str())
-                || static_height.contains(base_name.as_str())
-            {
-                let baseline_row = baseline_rows[i];
-                if stack_indices.contains(&i) {
-                    base.row = baseline_row.min(new_height.saturating_sub(base.rows));
-                } else {
-                    base.row = (baseline_row as i32 + height_delta).max(0) as u16;
-                }
-            }
-        }
+        // All widgets (static_both, static_height, scalable) are now positioned
+        // as part of column stacks with natural cascading
+        // No additional positioning logic needed!
     }
 
     /// Apply proportional width resize (from VellumFE apply_width_resize)
     /// Adapted for WindowDef enum structure
+    /// baseline_rows: Vec of (name, baseline_row, baseline_rows) for grouping windows by original row
     fn apply_width_resize(
         &mut self,
         width_delta: i32,
         static_both: &std::collections::HashSet<String>,
+        baseline_rows: &[(String, u16, u16)],
     ) {
         use std::collections::HashSet;
         if width_delta == 0 {
@@ -2218,11 +2101,10 @@ impl AppCore {
         tracing::debug!("--- WIDTH SCALING ---");
 
         let mut width_applied = HashSet::new();
-        let max_row = self
-            .layout
-            .windows
+        // Use baseline rows for max_row calculation
+        let max_row = baseline_rows
             .iter()
-            .map(|w| w.base().row + w.base().rows)
+            .map(|(_, row, rows)| *row + *rows)
             .max()
             .unwrap_or(0);
 
@@ -2230,16 +2112,24 @@ impl AppCore {
             let mut widgets_at_row: Vec<(String, String, u16, u16, u16, u16)> = Vec::new();
             for window_def in &self.layout.windows {
                 let base = window_def.base();
-                if width_applied.contains(&base.name) {
-                    continue;
-                }
-                if current_row >= base.row && current_row < base.row + base.rows {
+
+                // Use BASELINE row positions to group windows, not current (height-adjusted) positions
+                // This ensures windows that were on the same row originally are processed together
+                let (baseline_row, baseline_rows) = baseline_rows
+                    .iter()
+                    .find(|(name, _, _)| name == &base.name)
+                    .map(|(_, row, rows)| (*row, *rows))
+                    .unwrap_or((base.row, base.rows));
+
+                // Include ALL windows that touch this baseline row (even if already processed)
+                // This ensures correct proportional calculations across all rows
+                if current_row >= baseline_row && current_row < baseline_row + baseline_rows {
                     widgets_at_row.push((
                         base.name.clone(),
                         window_def.widget_type().to_string(),
-                        base.row,
+                        baseline_row,  // Use baseline row for grouping
                         base.col,
-                        base.rows,
+                        baseline_rows,  // Use baseline rows for grouping
                         base.cols,
                     ));
                 }
@@ -2267,6 +2157,7 @@ impl AppCore {
                 if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
                     continue;
                 }
+                // Include ALL windows in total, even if already processed (for correct proportions)
                 total_scalable_width += *cols;
             }
             if total_scalable_width == 0 {
@@ -2277,16 +2168,23 @@ impl AppCore {
             let mut redistribution_pool = 0i32;
             let mut leftover = width_delta;
 
-            // Distribute proportionally based on current size
+            // Calculate proportions for ALL windows (including already-processed ones)
+            // This ensures consistent proportions across all rows
             for (name, _wt, _row, _col, _rows, cols) in &widgets_at_row {
                 if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
                     continue;
                 }
+                let proportion = *cols as f64 / total_scalable_width as f64;
+                let share = (proportion * width_delta as f64).floor() as i32;
+
+                // Only add to adjustments if NOT already processed
+                // (we calculate for all, but only apply to unprocessed)
                 if !width_applied.contains(name) {
-                    let proportion = *cols as f64 / total_scalable_width as f64;
-                    let share = (proportion * width_delta as f64).floor() as i32;
                     leftover -= share;
                     adjustments.push((name.clone(), share));
+                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (will apply)", name, cols, proportion, share);
+                } else {
+                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (already applied, skipping)", name, cols, proportion, share);
                 }
             }
 
@@ -2352,12 +2250,6 @@ impl AppCore {
             for (idx, (name, _wt, _row, orig_col, _rows, orig_cols)) in
                 widgets_at_row.iter().enumerate()
             {
-                if static_both.contains(name.as_str()) {
-                    previous_original_col = *orig_col;
-                    previous_original_width = *orig_cols;
-                    current_col = *orig_col + *orig_cols;
-                    continue;
-                }
                 if width_applied.contains(name) {
                     let window_def = self
                         .layout
@@ -2365,15 +2257,18 @@ impl AppCore {
                         .iter()
                         .find(|w| w.name() == name)
                         .unwrap();
-                    let current_width = window_def.base().cols;
-                    current_col += current_width;
+                    let base = window_def.base();
+                    // Update tracking vars for already-processed windows
+                    previous_original_col = *orig_col;
+                    previous_original_width = *orig_cols;
+                    current_col = base.col + base.cols;
                     continue;
                 }
                 let adjustment = adjustments
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, a)| *a)
-                    .unwrap_or(0);
+                    .unwrap_or(0);  // static_both gets 0 adjustment
                 let window_def = self
                     .layout
                     .windows
@@ -2711,6 +2606,44 @@ impl AppCore {
                     base.rows -= 1;
                     height_remainder += 1;
                 }
+            }
+        }
+
+        // Recalculate positions for vertically stacked windows
+        // Sort windows by baseline Y position to maintain stacking order
+        let mut window_positions: Vec<(String, u16, u16, u16, u16)> = baseline
+            .windows
+            .iter()
+            .map(|w| {
+                (
+                    w.name().to_string(),
+                    w.base().col,
+                    w.base().row,
+                    w.base().cols,
+                    w.base().rows,
+                )
+            })
+            .collect();
+        window_positions.sort_by_key(|(_, _, row, _, _)| *row);
+
+        // Track the bottom edge of the previous window for each column group
+        let mut col_groups: std::collections::HashMap<u16, u16> = std::collections::HashMap::new();
+
+        // Recalculate Y positions for stacked windows
+        for (name, baseline_col, baseline_row, _baseline_cols, baseline_rows) in window_positions {
+            if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                let base = window_def.base_mut();
+
+                // Check if this window should be stacked under a previous window
+                if let Some(&prev_bottom) = col_groups.get(&baseline_col) {
+                    // If baseline Y matches the previous window's bottom, they're stacked
+                    if baseline_row == prev_bottom {
+                        base.row = col_groups[&baseline_col];
+                    }
+                }
+
+                // Update the bottom edge for this column group
+                col_groups.insert(baseline_col, base.row + base.rows);
             }
         }
 
@@ -3651,18 +3584,28 @@ impl AppCore {
                 );
             }
         } else {
-            // No character set - save to shared autolayout
+            // No character set - save to default profile: ~/.two-face/default/layout.toml
             let terminal_size = self
                 .layout
                 .terminal_width
                 .and_then(|w| self.layout.terminal_height.map(|h| (w, h)));
 
+            let base_layout_name = self
+                .base_layout_name
+                .clone()
+                .or_else(|| self.layout.base_layout.clone())
+                .unwrap_or_else(|| "default".to_string());
+
             self.layout.theme = Some(self.config.active_theme.clone());
-            if let Err(e) = self.layout.save("autolayout", terminal_size, true) {
+            if let Err(e) = self
+                .layout
+                .save_auto("default", &base_layout_name, terminal_size)
+            {
                 tracing::warn!("Failed to autosave layout on quit: {}", e);
             } else {
                 tracing::info!(
-                    "Layout autosaved to 'autolayout' (terminal: {:?})",
+                    "Layout autosaved to default profile (base: {}, terminal: {:?})",
+                    base_layout_name,
                     terminal_size
                 );
             }
