@@ -417,7 +417,7 @@ impl WindowEditor {
 
     pub fn new_window(widget_type: String) -> Self {
         use crate::config::{
-            BorderSides, CommandInputWidgetData, RoomWidgetData, TextWidgetData, WindowBase,
+            BorderSides, CommandInputWidgetData, RoomWidgetData, SpacerWidgetData, TextWidgetData, WindowBase,
             WindowDef,
         };
 
@@ -468,6 +468,10 @@ impl WindowEditor {
             "command_input" => WindowDef::CommandInput {
                 base,
                 data: CommandInputWidgetData::default(),
+            },
+            "spacer" => WindowDef::Spacer {
+                base,
+                data: SpacerWidgetData {},
             },
             _ => WindowDef::Text {
                 base,

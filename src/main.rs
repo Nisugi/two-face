@@ -573,7 +573,7 @@ fn build_widget_category_picker(app_core: &core::AppCore, category: &str) -> Vec
     let category_windows: Vec<&str> = match category {
         "countdown" => vec!["roundtime", "casttime", "stuntime"],
         "hand" => vec!["left_hand", "right_hand", "spell_hand"],
-        "other" => vec!["compass", "inventory", "room", "spells", "injuries"],
+        "other" => vec!["compass", "inventory", "room", "spells", "injuries", "spacer"],
         "progressbar" => vec!["health", "mana", "stamina", "spirit", "encumlevel", "pbarStance", "mindState", "lblBPs"],
         "text" => vec!["thoughts", "speech", "announcements", "loot", "death", "logons", "familiar", "ambients", "bounty"],
         _ => vec![],
@@ -581,16 +581,27 @@ fn build_widget_category_picker(app_core: &core::AppCore, category: &str) -> Vec
 
     // Filter out windows that are already visible
     for template_name in category_windows {
-        // Skip if this window is already visible in ui_state
-        if app_core.ui_state.windows.contains_key(template_name) {
+        // Special case: spacer is always createable (not a singleton window)
+        let is_spacer = template_name == "spacer";
+
+        // Skip if this window is already visible in ui_state (unless it's spacer)
+        if !is_spacer && app_core.ui_state.windows.contains_key(template_name) {
             continue;
         }
 
         // Add to menu
         let display_name = get_window_display_name(template_name);
+        let command = if is_spacer {
+            // Spacers are created (not shown from layout)
+            format!("action:createwindow:{}", template_name)
+        } else {
+            // Other windows are shown from layout
+            format!("action:showwindow:{}", template_name)
+        };
+
         items.push(data::ui_state::PopupMenuItem {
             text: display_name.clone(),
-            command: format!("action:showwindow:{}", template_name),
+            command,
             disabled: false,
         });
     }
