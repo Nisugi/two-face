@@ -24,14 +24,6 @@ pub struct UiState {
     /// Current input mode
     pub input_mode: InputMode,
 
-    /// Command history
-    pub command_history: Vec<String>,
-    pub command_history_index: Option<usize>,
-
-    /// Current command being typed
-    pub command_input: String,
-    pub command_cursor: usize,
-
     /// Search input (when in Search mode)
     pub search_input: String,
     pub search_cursor: usize,
@@ -161,10 +153,6 @@ impl UiState {
             widget_type_index: HashMap::new(),
             focused_window: None,
             input_mode: InputMode::Normal,
-            command_history: Vec::new(),
-            command_history_index: None,
-            command_input: String::new(),
-            command_cursor: 0,
             search_input: String::new(),
             search_cursor: 0,
             popup_menu: None,

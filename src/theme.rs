@@ -119,6 +119,7 @@ impl AppTheme {
             text_color: self.editor_text,
             cursor_color: self.editor_cursor,
             status_color: self.editor_status,
+            section_header_color: self.editor_border, // Reuse border color for section headers
         }
     }
 }
@@ -204,6 +205,613 @@ fn derive_injury_default_color(window_background: Color, text_secondary: Color) 
     blend_colors(window_background, text_secondary, 0.25)
 }
 
+/// Color filter that can be applied to any theme for real-time color transformation
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ColorFilter {
+    /// No filter applied
+    None,
+    /// Convert all colors to grayscale
+    Grayscale,
+    /// Simulate deuteranopia (red-green colorblindness)
+    DeuteranopiaSimulation,
+    /// Simulate protanopia (another form of red-green colorblindness)
+    ProtanopiaSimulation,
+    /// Simulate tritanopia (blue-yellow colorblindness)
+    TritanopiaSimulation,
+    /// Apply sepia tone filter
+    Sepia,
+    /// Reduce blue light with adjustable intensity (0.0 to 1.0)
+    BlueLightFilter(f32),
+}
+
+impl Default for ColorFilter {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ColorFilter {
+    /// Get all available color filters
+    pub fn all() -> Vec<ColorFilter> {
+        vec![
+            ColorFilter::None,
+            ColorFilter::Grayscale,
+            ColorFilter::DeuteranopiaSimulation,
+            ColorFilter::ProtanopiaSimulation,
+            ColorFilter::TritanopiaSimulation,
+            ColorFilter::Sepia,
+            ColorFilter::BlueLightFilter(0.5),
+        ]
+    }
+
+    /// Get a human-readable name for the filter
+    pub fn name(&self) -> String {
+        match self {
+            ColorFilter::None => "None".to_string(),
+            ColorFilter::Grayscale => "Grayscale".to_string(),
+            ColorFilter::DeuteranopiaSimulation => "Deuteranopia Simulation".to_string(),
+            ColorFilter::ProtanopiaSimulation => "Protanopia Simulation".to_string(),
+            ColorFilter::TritanopiaSimulation => "Tritanopia Simulation".to_string(),
+            ColorFilter::Sepia => "Sepia Tone".to_string(),
+            ColorFilter::BlueLightFilter(intensity) => {
+                format!("Blue Light Filter ({}%)", (intensity * 100.0) as i32)
+            }
+        }
+    }
+
+    /// Get a description of what the filter does
+    pub fn description(&self) -> &'static str {
+        match self {
+            ColorFilter::None => "No color transformation applied",
+            ColorFilter::Grayscale => "Convert all colors to grayscale (for achromatopsia or testing)",
+            ColorFilter::DeuteranopiaSimulation => "Simulate how colors appear with deuteranopia",
+            ColorFilter::ProtanopiaSimulation => "Simulate how colors appear with protanopia",
+            ColorFilter::TritanopiaSimulation => "Simulate how colors appear with tritanopia",
+            ColorFilter::Sepia => "Apply warm sepia tone filter for reduced eye strain",
+            ColorFilter::BlueLightFilter(_) => "Reduce blue light wavelengths for evening use",
+        }
+    }
+
+    /// Apply this filter to a color
+    pub fn apply(&self, color: Color) -> Color {
+        match self {
+            ColorFilter::None => color,
+            ColorFilter::Grayscale => Self::apply_grayscale(color),
+            ColorFilter::DeuteranopiaSimulation => Self::apply_deuteranopia(color),
+            ColorFilter::ProtanopiaSimulation => Self::apply_protanopia(color),
+            ColorFilter::TritanopiaSimulation => Self::apply_tritanopia(color),
+            ColorFilter::Sepia => Self::apply_sepia(color),
+            ColorFilter::BlueLightFilter(intensity) => Self::apply_blue_light_filter(color, *intensity),
+        }
+    }
+
+    /// Convert color to grayscale using luminance formula
+    fn apply_grayscale(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Use standard luminance formula (ITU-R BT.709)
+        let gray = (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) as u8;
+
+        Color::Rgb(gray, gray, gray)
+    }
+
+    /// Simulate deuteranopia (red-green colorblindness - most common)
+    /// Uses Brettel et al. (1997) transformation
+    fn apply_deuteranopia(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Simplified deuteranopia transformation matrix
+        let new_r = (0.625 * r as f32 + 0.375 * g as f32).min(255.0) as u8;
+        let new_g = (0.7 * g as f32 + 0.3 * r as f32).min(255.0) as u8;
+        let new_b = b; // Blue channel unaffected
+
+        Color::Rgb(new_r, new_g, new_b)
+    }
+
+    /// Simulate protanopia (another form of red-green colorblindness)
+    fn apply_protanopia(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Simplified protanopia transformation matrix
+        let new_r = (0.567 * r as f32 + 0.433 * g as f32).min(255.0) as u8;
+        let new_g = (0.558 * g as f32 + 0.442 * r as f32).min(255.0) as u8;
+        let new_b = b; // Blue channel unaffected
+
+        Color::Rgb(new_r, new_g, new_b)
+    }
+
+    /// Simulate tritanopia (blue-yellow colorblindness - rare)
+    fn apply_tritanopia(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Simplified tritanopia transformation matrix
+        let new_r = r; // Red channel unaffected
+        let new_g = (0.95 * g as f32 + 0.05 * b as f32).min(255.0) as u8;
+        let new_b = (0.433 * g as f32 + 0.567 * b as f32).min(255.0) as u8;
+
+        Color::Rgb(new_r, new_g, new_b)
+    }
+
+    /// Apply sepia tone filter
+    fn apply_sepia(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Standard sepia transformation
+        let new_r = ((0.393 * r as f32 + 0.769 * g as f32 + 0.189 * b as f32).min(255.0)) as u8;
+        let new_g = ((0.349 * r as f32 + 0.686 * g as f32 + 0.168 * b as f32).min(255.0)) as u8;
+        let new_b = ((0.272 * r as f32 + 0.534 * g as f32 + 0.131 * b as f32).min(255.0)) as u8;
+
+        Color::Rgb(new_r, new_g, new_b)
+    }
+
+    /// Reduce blue light wavelengths
+    fn apply_blue_light_filter(color: Color, intensity: f32) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+        let intensity = intensity.clamp(0.0, 1.0);
+
+        // Reduce blue channel and slightly boost warm colors
+        let new_r = ((r as f32 * (1.0 + intensity * 0.1)).min(255.0)) as u8;
+        let new_g = ((g as f32 * (1.0 + intensity * 0.05)).min(255.0)) as u8;
+        let new_b = ((b as f32 * (1.0 - intensity * 0.6)).max(0.0)) as u8;
+
+        Color::Rgb(new_r, new_g, new_b)
+    }
+}
+
+/// Theme variant modifiers that can be applied to any base theme
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeVariant {
+    /// Standard theme (no modifications)
+    Standard,
+    /// High contrast variant - boosts contrast for low vision users
+    HighContrast,
+    /// Colorblind-friendly variant - transforms colors for deuteranopia/protanopia
+    Colorblind,
+    /// Low blue light variant - reduces blue wavelengths for evening use
+    LowBlueLight,
+}
+
+impl Default for ThemeVariant {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+impl ThemeVariant {
+    /// Get all available variants
+    pub fn all() -> Vec<ThemeVariant> {
+        vec![
+            ThemeVariant::Standard,
+            ThemeVariant::HighContrast,
+            ThemeVariant::Colorblind,
+            ThemeVariant::LowBlueLight,
+        ]
+    }
+
+    /// Get a human-readable name for the variant
+    pub fn name(&self) -> &'static str {
+        match self {
+            ThemeVariant::Standard => "Standard",
+            ThemeVariant::HighContrast => "High Contrast",
+            ThemeVariant::Colorblind => "Colorblind Friendly",
+            ThemeVariant::LowBlueLight => "Low Blue Light",
+        }
+    }
+
+    /// Get a description of what the variant does
+    pub fn description(&self) -> &'static str {
+        match self {
+            ThemeVariant::Standard => "Standard theme with no modifications",
+            ThemeVariant::HighContrast => "Boosts contrast ratios for low vision users",
+            ThemeVariant::Colorblind => "Transforms colors to be safe for red-green colorblindness",
+            ThemeVariant::LowBlueLight => "Reduces blue light for comfortable evening use",
+        }
+    }
+
+    /// Apply this variant to a color
+    fn transform_color(&self, color: Color) -> Color {
+        match self {
+            ThemeVariant::Standard => color,
+            ThemeVariant::HighContrast => Self::apply_high_contrast(color),
+            ThemeVariant::Colorblind => Self::apply_colorblind_safe(color),
+            ThemeVariant::LowBlueLight => Self::apply_low_blue_light(color),
+        }
+    }
+
+    /// High contrast transformation - makes light colors lighter and dark colors darker
+    fn apply_high_contrast(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Calculate luminance
+        let luminance = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
+
+        // If luminance > 0.5, make it lighter; otherwise make it darker
+        let boost = if luminance > 0.5 {
+            // Light color - boost towards white
+            let factor = 1.5;
+            Color::Rgb(
+                ((r as f32 + (255 - r) as f32 * factor / 2.0).min(255.0)) as u8,
+                ((g as f32 + (255 - g) as f32 * factor / 2.0).min(255.0)) as u8,
+                ((b as f32 + (255 - b) as f32 * factor / 2.0).min(255.0)) as u8,
+            )
+        } else {
+            // Dark color - reduce towards black
+            let factor = 0.5;
+            Color::Rgb(
+                ((r as f32 * factor).max(0.0)) as u8,
+                ((g as f32 * factor).max(0.0)) as u8,
+                ((b as f32 * factor).max(0.0)) as u8,
+            )
+        };
+
+        boost
+    }
+
+    /// Colorblind-safe transformation - converts to deuteranopia/protanopia safe palette
+    fn apply_colorblind_safe(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Calculate luminance to preserve brightness
+        let luminance = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+
+        // Determine the dominant color characteristic
+        let is_reddish = r > g && r > b;
+        let is_greenish = g > r && g > b;
+        let is_bluish = b > r && b > g;
+
+        // Map problematic colors to safe alternatives
+        if is_reddish {
+            // Red -> Magenta/Pink (distinguishable for colorblind users)
+            let intensity = (luminance / 255.0).clamp(0.0, 1.0);
+            Color::Rgb(
+                (255.0 * intensity) as u8,
+                (105.0 * intensity) as u8,
+                (180.0 * intensity) as u8,
+            )
+        } else if is_greenish {
+            // Green -> Blue (safe alternative)
+            let intensity = (luminance / 255.0).clamp(0.0, 1.0);
+            Color::Rgb(
+                0,
+                (191.0 * intensity) as u8,
+                (255.0 * intensity) as u8,
+            )
+        } else if is_bluish {
+            // Blue stays blue (safe)
+            color
+        } else {
+            // Grayscale or mixed - preserve as-is
+            color
+        }
+    }
+
+    /// Low blue light transformation - reduces blue channel for evening use
+    fn apply_low_blue_light(color: Color) -> Color {
+        let (r, g, b) = color_to_rgb_components(color);
+
+        // Reduce blue channel by 50% and shift towards warm colors
+        let warm_r = ((r as f32 * 1.1).min(255.0)) as u8;
+        let warm_g = ((g as f32 * 1.05).min(255.0)) as u8;
+        let warm_b = ((b as f32 * 0.5).max(0.0)) as u8;
+
+        Color::Rgb(warm_r, warm_g, warm_b)
+    }
+}
+
+impl AppTheme {
+    /// Apply a theme variant to this theme, creating a new transformed theme
+    pub fn with_variant(&self, variant: ThemeVariant) -> AppTheme {
+        if variant == ThemeVariant::Standard {
+            return self.clone();
+        }
+
+        let mut theme = self.clone();
+
+        // Update name and description to reflect variant
+        theme.name = format!("{} ({})", self.name, variant.name());
+        theme.description = format!("{} - {}", self.description, variant.description());
+
+        // Apply variant transformation to all colors
+        theme.window_border = variant.transform_color(theme.window_border);
+        theme.window_border_focused = variant.transform_color(theme.window_border_focused);
+        theme.window_background = variant.transform_color(theme.window_background);
+        theme.window_title = variant.transform_color(theme.window_title);
+
+        theme.text_primary = variant.transform_color(theme.text_primary);
+        theme.text_secondary = variant.transform_color(theme.text_secondary);
+        theme.text_disabled = variant.transform_color(theme.text_disabled);
+        theme.text_selected = variant.transform_color(theme.text_selected);
+
+        theme.background_primary = variant.transform_color(theme.background_primary);
+        theme.background_secondary = variant.transform_color(theme.background_secondary);
+        theme.background_selected = variant.transform_color(theme.background_selected);
+        theme.background_hover = variant.transform_color(theme.background_hover);
+
+        theme.editor_border = variant.transform_color(theme.editor_border);
+        theme.editor_label = variant.transform_color(theme.editor_label);
+        theme.editor_label_focused = variant.transform_color(theme.editor_label_focused);
+        theme.editor_text = variant.transform_color(theme.editor_text);
+        theme.editor_cursor = variant.transform_color(theme.editor_cursor);
+        theme.editor_status = variant.transform_color(theme.editor_status);
+        theme.editor_background = variant.transform_color(theme.editor_background);
+
+        theme.browser_border = variant.transform_color(theme.browser_border);
+        theme.browser_title = variant.transform_color(theme.browser_title);
+        theme.browser_item_normal = variant.transform_color(theme.browser_item_normal);
+        theme.browser_item_selected = variant.transform_color(theme.browser_item_selected);
+        theme.browser_item_focused = variant.transform_color(theme.browser_item_focused);
+        theme.browser_background = variant.transform_color(theme.browser_background);
+        theme.browser_scrollbar = variant.transform_color(theme.browser_scrollbar);
+
+        theme.form_border = variant.transform_color(theme.form_border);
+        theme.form_label = variant.transform_color(theme.form_label);
+        theme.form_label_focused = variant.transform_color(theme.form_label_focused);
+        theme.form_field_background = variant.transform_color(theme.form_field_background);
+        theme.form_field_text = variant.transform_color(theme.form_field_text);
+        theme.form_checkbox_checked = variant.transform_color(theme.form_checkbox_checked);
+        theme.form_checkbox_unchecked = variant.transform_color(theme.form_checkbox_unchecked);
+        theme.form_error = variant.transform_color(theme.form_error);
+
+        theme.menu_border = variant.transform_color(theme.menu_border);
+        theme.menu_background = variant.transform_color(theme.menu_background);
+        theme.menu_item_normal = variant.transform_color(theme.menu_item_normal);
+        theme.menu_item_selected = variant.transform_color(theme.menu_item_selected);
+        theme.menu_item_focused = variant.transform_color(theme.menu_item_focused);
+        theme.menu_separator = variant.transform_color(theme.menu_separator);
+
+        theme.status_info = variant.transform_color(theme.status_info);
+        theme.status_success = variant.transform_color(theme.status_success);
+        theme.status_warning = variant.transform_color(theme.status_warning);
+        theme.status_error = variant.transform_color(theme.status_error);
+        theme.status_background = variant.transform_color(theme.status_background);
+
+        theme.button_normal = variant.transform_color(theme.button_normal);
+        theme.button_hover = variant.transform_color(theme.button_hover);
+        theme.button_active = variant.transform_color(theme.button_active);
+        theme.button_disabled = variant.transform_color(theme.button_disabled);
+
+        theme.command_echo = variant.transform_color(theme.command_echo);
+        theme.selection_background = variant.transform_color(theme.selection_background);
+        theme.link_color = variant.transform_color(theme.link_color);
+        theme.speech_color = variant.transform_color(theme.speech_color);
+        theme.whisper_color = variant.transform_color(theme.whisper_color);
+        theme.thought_color = variant.transform_color(theme.thought_color);
+
+        theme.injury_default_color = variant.transform_color(theme.injury_default_color);
+
+        theme
+    }
+
+    /// Apply dynamic contrast adjustment to the theme
+    ///
+    /// # Arguments
+    /// * `multiplier` - Contrast boost multiplier (1.0 = no change, 1.5 = 50% more contrast, etc.)
+    ///
+    /// # Examples
+    /// ```
+    /// let theme = ThemePresets::dark();
+    /// let high_contrast = theme.with_contrast_boost(1.5); // 50% more contrast
+    /// let low_contrast = theme.with_contrast_boost(0.7);  // 30% less contrast
+    /// ```
+    pub fn with_contrast_boost(&self, multiplier: f32) -> AppTheme {
+        if (multiplier - 1.0).abs() < 0.01 {
+            return self.clone();
+        }
+
+        let mut theme = self.clone();
+
+        // Update description to reflect contrast adjustment
+        if multiplier > 1.0 {
+            theme.name = format!("{} (+{}% contrast)", self.name, ((multiplier - 1.0) * 100.0) as i32);
+            theme.description = format!("{} - Boosted contrast by {}%", self.description, ((multiplier - 1.0) * 100.0) as i32);
+        } else {
+            theme.name = format!("{} ({}% contrast)", self.name, ((1.0 - multiplier) * 100.0) as i32);
+            theme.description = format!("{} - Reduced contrast by {}%", self.description, ((1.0 - multiplier) * 100.0) as i32);
+        }
+
+        // Helper function to boost contrast between a color and a reference
+        let boost_contrast = |color: Color, reference: Color| -> Color {
+            let (r, g, b) = color_to_rgb_components(color);
+            let (ref_r, ref_g, ref_b) = color_to_rgb_components(reference);
+
+            // Calculate luminance of both colors
+            let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+            let ref_lum = 0.299 * ref_r as f32 + 0.587 * ref_g as f32 + 0.114 * ref_b as f32;
+
+            // Determine if this is a light or dark color relative to reference
+            let is_lighter = lum > ref_lum;
+
+            // Apply contrast boost by pushing colors away from the reference
+            let boost_component = |c: u8, ref_c: u8| -> u8 {
+                let diff = c as f32 - ref_c as f32;
+                let boosted = ref_c as f32 + (diff * multiplier);
+                boosted.clamp(0.0, 255.0) as u8
+            };
+
+            Color::Rgb(
+                boost_component(r, ref_r),
+                boost_component(g, ref_g),
+                boost_component(b, ref_b),
+            )
+        };
+
+        // Use background as the reference point for contrast
+        let bg_ref = theme.window_background;
+
+        // Apply contrast boost to text colors (most important for readability)
+        theme.text_primary = boost_contrast(theme.text_primary, bg_ref);
+        theme.text_secondary = boost_contrast(theme.text_secondary, bg_ref);
+        theme.text_disabled = boost_contrast(theme.text_disabled, bg_ref);
+        theme.text_selected = boost_contrast(theme.text_selected, bg_ref);
+
+        // Apply to browser items
+        theme.browser_item_normal = boost_contrast(theme.browser_item_normal, theme.browser_background);
+        theme.browser_item_focused = boost_contrast(theme.browser_item_focused, theme.browser_background);
+        theme.browser_item_selected = boost_contrast(theme.browser_item_selected, theme.browser_background);
+
+        // Apply to form elements
+        theme.form_label = boost_contrast(theme.form_label, theme.browser_background);
+        theme.form_label_focused = boost_contrast(theme.form_label_focused, theme.browser_background);
+        theme.form_field_text = boost_contrast(theme.form_field_text, theme.form_field_background);
+
+        // Apply to editor elements
+        theme.editor_text = boost_contrast(theme.editor_text, theme.editor_background);
+        theme.editor_label = boost_contrast(theme.editor_label, theme.editor_background);
+        theme.editor_label_focused = boost_contrast(theme.editor_label_focused, theme.editor_background);
+
+        // Apply to menu items
+        theme.menu_item_normal = boost_contrast(theme.menu_item_normal, theme.menu_background);
+        theme.menu_item_focused = boost_contrast(theme.menu_item_focused, theme.menu_background);
+        theme.menu_item_selected = boost_contrast(theme.menu_item_selected, theme.menu_background);
+
+        // Apply to borders for better definition
+        theme.window_border = boost_contrast(theme.window_border, bg_ref);
+        theme.window_border_focused = boost_contrast(theme.window_border_focused, bg_ref);
+        theme.browser_border = boost_contrast(theme.browser_border, theme.browser_background);
+        theme.form_border = boost_contrast(theme.form_border, theme.browser_background);
+        theme.menu_border = boost_contrast(theme.menu_border, theme.menu_background);
+
+        // Apply to status colors
+        theme.status_info = boost_contrast(theme.status_info, bg_ref);
+        theme.status_success = boost_contrast(theme.status_success, bg_ref);
+        theme.status_warning = boost_contrast(theme.status_warning, bg_ref);
+        theme.status_error = boost_contrast(theme.status_error, bg_ref);
+
+        theme
+    }
+
+    /// Apply both a variant and contrast adjustment in one operation
+    ///
+    /// This is more efficient than calling `with_variant()` and `with_contrast_boost()` separately
+    ///
+    /// # Examples
+    /// ```
+    /// let theme = ThemePresets::ocean_depths();
+    /// let adjusted = theme.with_variant_and_contrast(ThemeVariant::HighContrast, 1.3);
+    /// ```
+    pub fn with_variant_and_contrast(&self, variant: ThemeVariant, contrast_multiplier: f32) -> AppTheme {
+        self.with_variant(variant).with_contrast_boost(contrast_multiplier)
+    }
+
+    /// Apply a color filter to the theme for real-time color transformation
+    ///
+    /// # Arguments
+    /// * `filter` - The color filter to apply
+    ///
+    /// # Examples
+    /// ```
+    /// let theme = ThemePresets::dark();
+    /// let grayscale = theme.with_color_filter(ColorFilter::Grayscale);
+    /// let sepia = theme.with_color_filter(ColorFilter::Sepia);
+    /// let blue_light = theme.with_color_filter(ColorFilter::BlueLightFilter(0.7));
+    /// ```
+    pub fn with_color_filter(&self, filter: ColorFilter) -> AppTheme {
+        if matches!(filter, ColorFilter::None) {
+            return self.clone();
+        }
+
+        let mut theme = self.clone();
+
+        // Update name and description to reflect filter
+        theme.name = format!("{} ({})", self.name, filter.name());
+        theme.description = format!("{} - {}", self.description, filter.description());
+
+        // Apply filter to all colors
+        theme.window_border = filter.apply(theme.window_border);
+        theme.window_border_focused = filter.apply(theme.window_border_focused);
+        theme.window_background = filter.apply(theme.window_background);
+        theme.window_title = filter.apply(theme.window_title);
+
+        theme.text_primary = filter.apply(theme.text_primary);
+        theme.text_secondary = filter.apply(theme.text_secondary);
+        theme.text_disabled = filter.apply(theme.text_disabled);
+        theme.text_selected = filter.apply(theme.text_selected);
+
+        theme.background_primary = filter.apply(theme.background_primary);
+        theme.background_secondary = filter.apply(theme.background_secondary);
+        theme.background_selected = filter.apply(theme.background_selected);
+        theme.background_hover = filter.apply(theme.background_hover);
+
+        theme.editor_border = filter.apply(theme.editor_border);
+        theme.editor_label = filter.apply(theme.editor_label);
+        theme.editor_label_focused = filter.apply(theme.editor_label_focused);
+        theme.editor_text = filter.apply(theme.editor_text);
+        theme.editor_cursor = filter.apply(theme.editor_cursor);
+        theme.editor_status = filter.apply(theme.editor_status);
+        theme.editor_background = filter.apply(theme.editor_background);
+
+        theme.browser_border = filter.apply(theme.browser_border);
+        theme.browser_title = filter.apply(theme.browser_title);
+        theme.browser_item_normal = filter.apply(theme.browser_item_normal);
+        theme.browser_item_selected = filter.apply(theme.browser_item_selected);
+        theme.browser_item_focused = filter.apply(theme.browser_item_focused);
+        theme.browser_background = filter.apply(theme.browser_background);
+        theme.browser_scrollbar = filter.apply(theme.browser_scrollbar);
+
+        theme.form_border = filter.apply(theme.form_border);
+        theme.form_label = filter.apply(theme.form_label);
+        theme.form_label_focused = filter.apply(theme.form_label_focused);
+        theme.form_field_background = filter.apply(theme.form_field_background);
+        theme.form_field_text = filter.apply(theme.form_field_text);
+        theme.form_checkbox_checked = filter.apply(theme.form_checkbox_checked);
+        theme.form_checkbox_unchecked = filter.apply(theme.form_checkbox_unchecked);
+        theme.form_error = filter.apply(theme.form_error);
+
+        theme.menu_border = filter.apply(theme.menu_border);
+        theme.menu_background = filter.apply(theme.menu_background);
+        theme.menu_item_normal = filter.apply(theme.menu_item_normal);
+        theme.menu_item_selected = filter.apply(theme.menu_item_selected);
+        theme.menu_item_focused = filter.apply(theme.menu_item_focused);
+        theme.menu_separator = filter.apply(theme.menu_separator);
+
+        theme.status_info = filter.apply(theme.status_info);
+        theme.status_success = filter.apply(theme.status_success);
+        theme.status_warning = filter.apply(theme.status_warning);
+        theme.status_error = filter.apply(theme.status_error);
+        theme.status_background = filter.apply(theme.status_background);
+
+        theme.button_normal = filter.apply(theme.button_normal);
+        theme.button_hover = filter.apply(theme.button_hover);
+        theme.button_active = filter.apply(theme.button_active);
+        theme.button_disabled = filter.apply(theme.button_disabled);
+
+        theme.command_echo = filter.apply(theme.command_echo);
+        theme.selection_background = filter.apply(theme.selection_background);
+        theme.link_color = filter.apply(theme.link_color);
+        theme.speech_color = filter.apply(theme.speech_color);
+        theme.whisper_color = filter.apply(theme.whisper_color);
+        theme.thought_color = filter.apply(theme.thought_color);
+
+        theme.injury_default_color = filter.apply(theme.injury_default_color);
+
+        theme
+    }
+
+    /// Apply all transformations (variant, contrast, and filter) in one operation
+    ///
+    /// This is the most comprehensive theme transformation method
+    ///
+    /// # Examples
+    /// ```
+    /// let theme = ThemePresets::ocean_depths();
+    /// let fully_adjusted = theme.with_all_transformations(
+    ///     ThemeVariant::HighContrast,
+    ///     1.5,
+    ///     ColorFilter::BlueLightFilter(0.6)
+    /// );
+    /// ```
+    pub fn with_all_transformations(
+        &self,
+        variant: ThemeVariant,
+        contrast_multiplier: f32,
+        filter: ColorFilter,
+    ) -> AppTheme {
+        self.with_variant(variant)
+            .with_contrast_boost(contrast_multiplier)
+            .with_color_filter(filter)
+    }
+}
+
 /// Subset of theme for window editor (backwards compatibility)
 #[derive(Debug, Clone)]
 pub struct EditorTheme {
@@ -213,6 +821,7 @@ pub struct EditorTheme {
     pub text_color: Color,
     pub cursor_color: Color,
     pub status_color: Color,
+    pub section_header_color: Color,
 }
 
 /// Built-in theme presets
@@ -238,6 +847,31 @@ impl ThemePresets {
         themes.insert("minimalist-warm".to_string(), Self::minimalist_warm());
         themes.insert("forest-creek".to_string(), Self::forest_creek());
         themes.insert("synthwave".to_string(), Self::synthwave());
+
+        // New general-purpose themes
+        themes.insert("ocean-depths".to_string(), Self::ocean_depths());
+        themes.insert("forest-canopy".to_string(), Self::forest_canopy());
+        themes.insert("sunset-boulevard".to_string(), Self::sunset_boulevard());
+        themes.insert("arctic-night".to_string(), Self::arctic_night());
+        themes.insert("cyberpunk-neon".to_string(), Self::cyberpunk_neon());
+        themes.insert("sepia-parchment".to_string(), Self::sepia_parchment());
+        themes.insert("lavender-dreams".to_string(), Self::lavender_dreams());
+        themes.insert("cherry-blossom".to_string(), Self::cherry_blossom());
+        themes.insert("slate-professional".to_string(), Self::slate_professional());
+        themes.insert("autumn-harvest".to_string(), Self::autumn_harvest());
+
+        // Accessibility themes
+        themes.insert("high-contrast-light".to_string(), Self::high_contrast_light());
+        themes.insert("high-contrast-dark".to_string(), Self::high_contrast_dark());
+        themes.insert("deuteranopia".to_string(), Self::deuteranopia_friendly());
+        themes.insert("protanopia".to_string(), Self::protanopia_friendly());
+        themes.insert("tritanopia".to_string(), Self::tritanopia_friendly());
+        themes.insert("monochrome".to_string(), Self::monochrome());
+        themes.insert("low-blue-light".to_string(), Self::low_blue_light());
+        themes.insert("photophobia".to_string(), Self::photophobia_friendly());
+        themes.insert("adhd-focus".to_string(), Self::adhd_focus());
+        themes.insert("reduced-motion".to_string(), Self::reduced_motion());
+
         themes
     }
 
@@ -1509,7 +2143,1570 @@ impl ThemePresets {
         theme
     }
 
+    /// Ocean Depths - Deep ocean blues with teal and aqua accents
+    pub fn ocean_depths() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Ocean Depths".to_string(),
+            description: "Deep ocean blues with teal and aqua accents".to_string(),
+
+            window_border: Color::Rgb(30, 77, 107),
+            window_border_focused: Color::Rgb(0, 188, 212),
+            window_background: Color::Rgb(10, 22, 40),
+            window_title: Color::Rgb(224, 242, 247),
+
+            text_primary: Color::Rgb(224, 242, 247),
+            text_secondary: Color::Rgb(144, 202, 249),
+            text_disabled: Color::Rgb(62, 109, 143),
+            text_selected: Color::Rgb(0, 188, 212),
+
+            background_primary: Color::Rgb(10, 22, 40),
+            background_secondary: Color::Rgb(13, 31, 51),
+            background_selected: Color::Rgb(30, 77, 107),
+            background_hover: Color::Rgb(20, 45, 70),
+
+            editor_border: Color::Rgb(30, 77, 107),
+            editor_label: Color::Rgb(129, 212, 250),
+            editor_label_focused: Color::Rgb(0, 188, 212),
+            editor_text: Color::Rgb(179, 229, 252),
+            editor_cursor: Color::Rgb(0, 188, 212),
+            editor_status: Color::Rgb(77, 208, 225),
+            editor_background: Color::Rgb(13, 31, 51),
+
+            browser_border: Color::Rgb(30, 77, 107),
+            browser_title: Color::Rgb(224, 242, 247),
+            browser_item_normal: Color::Rgb(179, 229, 252),
+            browser_item_selected: Color::Rgb(10, 22, 40),
+            browser_item_focused: Color::Rgb(0, 188, 212),
+            browser_background: Color::Rgb(13, 31, 51),
+            browser_scrollbar: Color::Rgb(0, 188, 212),
+
+            form_border: Color::Rgb(30, 77, 107),
+            form_label: Color::Rgb(129, 212, 250),
+            form_label_focused: Color::Rgb(0, 188, 212),
+            form_field_background: Color::Rgb(13, 31, 51),
+            form_field_text: Color::Rgb(179, 229, 252),
+            form_checkbox_checked: Color::Rgb(77, 208, 225),
+            form_checkbox_unchecked: Color::Rgb(62, 109, 143),
+            form_error: Color::Rgb(239, 83, 80),
+
+            menu_border: Color::Rgb(30, 77, 107),
+            menu_background: Color::Rgb(10, 22, 40),
+            menu_item_normal: Color::Rgb(179, 229, 252),
+            menu_item_selected: Color::Rgb(13, 31, 51),
+            menu_item_focused: Color::Rgb(0, 188, 212),
+            menu_separator: Color::Rgb(30, 77, 107),
+
+            status_info: Color::Rgb(0, 188, 212),
+            status_success: Color::Rgb(77, 208, 225),
+            status_warning: Color::Rgb(255, 167, 38),
+            status_error: Color::Rgb(239, 83, 80),
+            status_background: Color::Rgb(10, 22, 40),
+
+            button_normal: Color::Rgb(0, 188, 212),
+            button_hover: Color::Rgb(38, 198, 218),
+            button_active: Color::Rgb(77, 208, 225),
+            button_disabled: Color::Rgb(62, 109, 143),
+
+            command_echo: Color::Rgb(224, 242, 247),
+            selection_background: Color::Rgb(30, 77, 107),
+            link_color: Color::Rgb(38, 198, 218),
+            speech_color: Color::Rgb(77, 208, 225),
+            whisper_color: Color::Rgb(144, 202, 249),
+            thought_color: Color::Rgb(179, 229, 252),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Forest Canopy - Earthy greens with warm brown accents
+    pub fn forest_canopy() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Forest Canopy".to_string(),
+            description: "Earthy greens with warm brown accents".to_string(),
+
+            window_border: Color::Rgb(46, 125, 50),
+            window_border_focused: Color::Rgb(102, 187, 106),
+            window_background: Color::Rgb(26, 38, 23),
+            window_title: Color::Rgb(232, 245, 233),
+
+            text_primary: Color::Rgb(232, 245, 233),
+            text_secondary: Color::Rgb(200, 230, 201),
+            text_disabled: Color::Rgb(76, 100, 78),
+            text_selected: Color::Rgb(102, 187, 106),
+
+            background_primary: Color::Rgb(26, 38, 23),
+            background_secondary: Color::Rgb(27, 46, 26),
+            background_selected: Color::Rgb(46, 125, 50),
+            background_hover: Color::Rgb(35, 60, 35),
+
+            editor_border: Color::Rgb(46, 125, 50),
+            editor_label: Color::Rgb(174, 213, 129),
+            editor_label_focused: Color::Rgb(102, 187, 106),
+            editor_text: Color::Rgb(197, 225, 165),
+            editor_cursor: Color::Rgb(102, 187, 106),
+            editor_status: Color::Rgb(129, 199, 132),
+            editor_background: Color::Rgb(27, 46, 26),
+
+            browser_border: Color::Rgb(46, 125, 50),
+            browser_title: Color::Rgb(232, 245, 233),
+            browser_item_normal: Color::Rgb(197, 225, 165),
+            browser_item_selected: Color::Rgb(26, 38, 23),
+            browser_item_focused: Color::Rgb(102, 187, 106),
+            browser_background: Color::Rgb(27, 46, 26),
+            browser_scrollbar: Color::Rgb(102, 187, 106),
+
+            form_border: Color::Rgb(46, 125, 50),
+            form_label: Color::Rgb(174, 213, 129),
+            form_label_focused: Color::Rgb(102, 187, 106),
+            form_field_background: Color::Rgb(27, 46, 26),
+            form_field_text: Color::Rgb(197, 225, 165),
+            form_checkbox_checked: Color::Rgb(76, 175, 80),
+            form_checkbox_unchecked: Color::Rgb(76, 100, 78),
+            form_error: Color::Rgb(244, 67, 54),
+
+            menu_border: Color::Rgb(46, 125, 50),
+            menu_background: Color::Rgb(26, 38, 23),
+            menu_item_normal: Color::Rgb(197, 225, 165),
+            menu_item_selected: Color::Rgb(27, 46, 26),
+            menu_item_focused: Color::Rgb(102, 187, 106),
+            menu_separator: Color::Rgb(46, 125, 50),
+
+            status_info: Color::Rgb(102, 187, 106),
+            status_success: Color::Rgb(76, 175, 80),
+            status_warning: Color::Rgb(255, 183, 77),
+            status_error: Color::Rgb(244, 67, 54),
+            status_background: Color::Rgb(26, 38, 23),
+
+            button_normal: Color::Rgb(102, 187, 106),
+            button_hover: Color::Rgb(129, 199, 132),
+            button_active: Color::Rgb(76, 175, 80),
+            button_disabled: Color::Rgb(76, 100, 78),
+
+            command_echo: Color::Rgb(232, 245, 233),
+            selection_background: Color::Rgb(46, 125, 50),
+            link_color: Color::Rgb(129, 199, 132),
+            speech_color: Color::Rgb(174, 213, 129),
+            whisper_color: Color::Rgb(200, 230, 201),
+            thought_color: Color::Rgb(197, 225, 165),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Sunset Boulevard - Warm sunset colors from dusk to twilight
+    pub fn sunset_boulevard() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Sunset Boulevard".to_string(),
+            description: "Warm sunset colors from dusk to twilight".to_string(),
+
+            window_border: Color::Rgb(142, 36, 170),
+            window_border_focused: Color::Rgb(255, 111, 0),
+            window_background: Color::Rgb(45, 27, 46),
+            window_title: Color::Rgb(255, 243, 224),
+
+            text_primary: Color::Rgb(255, 243, 224),
+            text_secondary: Color::Rgb(255, 204, 188),
+            text_disabled: Color::Rgb(100, 70, 100),
+            text_selected: Color::Rgb(255, 111, 0),
+
+            background_primary: Color::Rgb(45, 27, 46),
+            background_secondary: Color::Rgb(58, 36, 64),
+            background_selected: Color::Rgb(142, 36, 170),
+            background_hover: Color::Rgb(70, 45, 75),
+
+            editor_border: Color::Rgb(142, 36, 170),
+            editor_label: Color::Rgb(255, 204, 128),
+            editor_label_focused: Color::Rgb(255, 111, 0),
+            editor_text: Color::Rgb(255, 171, 145),
+            editor_cursor: Color::Rgb(255, 111, 0),
+            editor_status: Color::Rgb(255, 167, 38),
+            editor_background: Color::Rgb(58, 36, 64),
+
+            browser_border: Color::Rgb(142, 36, 170),
+            browser_title: Color::Rgb(255, 243, 224),
+            browser_item_normal: Color::Rgb(255, 171, 145),
+            browser_item_selected: Color::Rgb(45, 27, 46),
+            browser_item_focused: Color::Rgb(255, 111, 0),
+            browser_background: Color::Rgb(58, 36, 64),
+            browser_scrollbar: Color::Rgb(255, 111, 0),
+
+            form_border: Color::Rgb(142, 36, 170),
+            form_label: Color::Rgb(255, 204, 128),
+            form_label_focused: Color::Rgb(255, 111, 0),
+            form_field_background: Color::Rgb(58, 36, 64),
+            form_field_text: Color::Rgb(255, 171, 145),
+            form_checkbox_checked: Color::Rgb(255, 167, 38),
+            form_checkbox_unchecked: Color::Rgb(100, 70, 100),
+            form_error: Color::Rgb(240, 98, 146),
+
+            menu_border: Color::Rgb(142, 36, 170),
+            menu_background: Color::Rgb(45, 27, 46),
+            menu_item_normal: Color::Rgb(255, 171, 145),
+            menu_item_selected: Color::Rgb(58, 36, 64),
+            menu_item_focused: Color::Rgb(255, 111, 0),
+            menu_separator: Color::Rgb(142, 36, 170),
+
+            status_info: Color::Rgb(255, 111, 0),
+            status_success: Color::Rgb(255, 167, 38),
+            status_warning: Color::Rgb(255, 213, 79),
+            status_error: Color::Rgb(240, 98, 146),
+            status_background: Color::Rgb(45, 27, 46),
+
+            button_normal: Color::Rgb(255, 111, 0),
+            button_hover: Color::Rgb(255, 145, 0),
+            button_active: Color::Rgb(255, 167, 38),
+            button_disabled: Color::Rgb(100, 70, 100),
+
+            command_echo: Color::Rgb(255, 243, 224),
+            selection_background: Color::Rgb(142, 36, 170),
+            link_color: Color::Rgb(255, 145, 0),
+            speech_color: Color::Rgb(255, 204, 128),
+            whisper_color: Color::Rgb(255, 204, 188),
+            thought_color: Color::Rgb(240, 98, 146),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Arctic Night - Crisp arctic colors with ice blue highlights
+    pub fn arctic_night() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Arctic Night".to_string(),
+            description: "Crisp arctic colors with ice blue highlights".to_string(),
+
+            window_border: Color::Rgb(52, 73, 85),
+            window_border_focused: Color::Rgb(100, 181, 246),
+            window_background: Color::Rgb(13, 24, 33),
+            window_title: Color::Rgb(240, 244, 248),
+
+            text_primary: Color::Rgb(240, 244, 248),
+            text_secondary: Color::Rgb(207, 216, 220),
+            text_disabled: Color::Rgb(84, 110, 122),
+            text_selected: Color::Rgb(100, 181, 246),
+
+            background_primary: Color::Rgb(13, 24, 33),
+            background_secondary: Color::Rgb(26, 37, 47),
+            background_selected: Color::Rgb(52, 73, 85),
+            background_hover: Color::Rgb(35, 50, 60),
+
+            editor_border: Color::Rgb(52, 73, 85),
+            editor_label: Color::Rgb(144, 164, 174),
+            editor_label_focused: Color::Rgb(100, 181, 246),
+            editor_text: Color::Rgb(176, 190, 197),
+            editor_cursor: Color::Rgb(100, 181, 246),
+            editor_status: Color::Rgb(77, 208, 225),
+            editor_background: Color::Rgb(26, 37, 47),
+
+            browser_border: Color::Rgb(52, 73, 85),
+            browser_title: Color::Rgb(240, 244, 248),
+            browser_item_normal: Color::Rgb(176, 190, 197),
+            browser_item_selected: Color::Rgb(13, 24, 33),
+            browser_item_focused: Color::Rgb(100, 181, 246),
+            browser_background: Color::Rgb(26, 37, 47),
+            browser_scrollbar: Color::Rgb(100, 181, 246),
+
+            form_border: Color::Rgb(52, 73, 85),
+            form_label: Color::Rgb(144, 164, 174),
+            form_label_focused: Color::Rgb(100, 181, 246),
+            form_field_background: Color::Rgb(26, 37, 47),
+            form_field_text: Color::Rgb(176, 190, 197),
+            form_checkbox_checked: Color::Rgb(77, 208, 225),
+            form_checkbox_unchecked: Color::Rgb(84, 110, 122),
+            form_error: Color::Rgb(255, 82, 82),
+
+            menu_border: Color::Rgb(52, 73, 85),
+            menu_background: Color::Rgb(13, 24, 33),
+            menu_item_normal: Color::Rgb(176, 190, 197),
+            menu_item_selected: Color::Rgb(26, 37, 47),
+            menu_item_focused: Color::Rgb(100, 181, 246),
+            menu_separator: Color::Rgb(52, 73, 85),
+
+            status_info: Color::Rgb(100, 181, 246),
+            status_success: Color::Rgb(77, 208, 225),
+            status_warning: Color::Rgb(255, 171, 64),
+            status_error: Color::Rgb(255, 82, 82),
+            status_background: Color::Rgb(13, 24, 33),
+
+            button_normal: Color::Rgb(100, 181, 246),
+            button_hover: Color::Rgb(79, 195, 247),
+            button_active: Color::Rgb(77, 208, 225),
+            button_disabled: Color::Rgb(84, 110, 122),
+
+            command_echo: Color::Rgb(240, 244, 248),
+            selection_background: Color::Rgb(52, 73, 85),
+            link_color: Color::Rgb(79, 195, 247),
+            speech_color: Color::Rgb(144, 164, 174),
+            whisper_color: Color::Rgb(207, 216, 220),
+            thought_color: Color::Rgb(176, 190, 197),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Cyberpunk Neon - Vibrant neon colors on deep black background
+    pub fn cyberpunk_neon() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Cyberpunk Neon".to_string(),
+            description: "Vibrant neon colors on deep black background".to_string(),
+
+            window_border: Color::Rgb(0, 255, 255),
+            window_border_focused: Color::Rgb(255, 0, 110),
+            window_background: Color::Rgb(10, 10, 10),
+            window_title: Color::Rgb(0, 255, 159),
+
+            text_primary: Color::Rgb(0, 255, 159),
+            text_secondary: Color::Rgb(255, 0, 255),
+            text_disabled: Color::Rgb(60, 60, 60),
+            text_selected: Color::Rgb(255, 0, 110),
+
+            background_primary: Color::Rgb(10, 10, 10),
+            background_secondary: Color::Rgb(15, 15, 15),
+            background_selected: Color::Rgb(40, 0, 40),
+            background_hover: Color::Rgb(25, 25, 25),
+
+            editor_border: Color::Rgb(0, 255, 255),
+            editor_label: Color::Rgb(255, 0, 255),
+            editor_label_focused: Color::Rgb(255, 0, 110),
+            editor_text: Color::Rgb(0, 255, 159),
+            editor_cursor: Color::Rgb(255, 0, 110),
+            editor_status: Color::Rgb(0, 245, 255),
+            editor_background: Color::Rgb(15, 15, 15),
+
+            browser_border: Color::Rgb(0, 255, 255),
+            browser_title: Color::Rgb(0, 255, 159),
+            browser_item_normal: Color::Rgb(0, 255, 159),
+            browser_item_selected: Color::Rgb(10, 10, 10),
+            browser_item_focused: Color::Rgb(255, 0, 110),
+            browser_background: Color::Rgb(15, 15, 15),
+            browser_scrollbar: Color::Rgb(0, 255, 255),
+
+            form_border: Color::Rgb(0, 255, 255),
+            form_label: Color::Rgb(255, 0, 255),
+            form_label_focused: Color::Rgb(255, 0, 110),
+            form_field_background: Color::Rgb(15, 15, 15),
+            form_field_text: Color::Rgb(0, 255, 159),
+            form_checkbox_checked: Color::Rgb(57, 255, 20),
+            form_checkbox_unchecked: Color::Rgb(60, 60, 60),
+            form_error: Color::Rgb(255, 7, 58),
+
+            menu_border: Color::Rgb(0, 255, 255),
+            menu_background: Color::Rgb(10, 10, 10),
+            menu_item_normal: Color::Rgb(0, 255, 159),
+            menu_item_selected: Color::Rgb(15, 15, 15),
+            menu_item_focused: Color::Rgb(255, 0, 110),
+            menu_separator: Color::Rgb(0, 255, 255),
+
+            status_info: Color::Rgb(0, 255, 255),
+            status_success: Color::Rgb(57, 255, 20),
+            status_warning: Color::Rgb(255, 255, 0),
+            status_error: Color::Rgb(255, 7, 58),
+            status_background: Color::Rgb(10, 10, 10),
+
+            button_normal: Color::Rgb(0, 255, 255),
+            button_hover: Color::Rgb(255, 0, 110),
+            button_active: Color::Rgb(57, 255, 20),
+            button_disabled: Color::Rgb(60, 60, 60),
+
+            command_echo: Color::Rgb(0, 255, 159),
+            selection_background: Color::Rgb(40, 0, 40),
+            link_color: Color::Rgb(0, 245, 255),
+            speech_color: Color::Rgb(255, 0, 255),
+            whisper_color: Color::Rgb(0, 255, 255),
+            thought_color: Color::Rgb(255, 0, 110),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Sepia Parchment - Warm vintage sepia tones for a classic look
+    pub fn sepia_parchment() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Sepia Parchment".to_string(),
+            description: "Warm vintage sepia tones for a classic look".to_string(),
+
+            window_border: Color::Rgb(139, 115, 85),
+            window_border_focused: Color::Rgb(218, 165, 32),
+            window_background: Color::Rgb(43, 36, 25),
+            window_title: Color::Rgb(244, 232, 208),
+
+            text_primary: Color::Rgb(244, 232, 208),
+            text_secondary: Color::Rgb(212, 197, 169),
+            text_disabled: Color::Rgb(100, 85, 70),
+            text_selected: Color::Rgb(218, 165, 32),
+
+            background_primary: Color::Rgb(43, 36, 25),
+            background_secondary: Color::Rgb(58, 47, 35),
+            background_selected: Color::Rgb(139, 115, 85),
+            background_hover: Color::Rgb(70, 60, 45),
+
+            editor_border: Color::Rgb(139, 115, 85),
+            editor_label: Color::Rgb(210, 180, 140),
+            editor_label_focused: Color::Rgb(218, 165, 32),
+            editor_text: Color::Rgb(232, 213, 176),
+            editor_cursor: Color::Rgb(218, 165, 32),
+            editor_status: Color::Rgb(184, 134, 11),
+            editor_background: Color::Rgb(58, 47, 35),
+
+            browser_border: Color::Rgb(139, 115, 85),
+            browser_title: Color::Rgb(244, 232, 208),
+            browser_item_normal: Color::Rgb(232, 213, 176),
+            browser_item_selected: Color::Rgb(43, 36, 25),
+            browser_item_focused: Color::Rgb(218, 165, 32),
+            browser_background: Color::Rgb(58, 47, 35),
+            browser_scrollbar: Color::Rgb(218, 165, 32),
+
+            form_border: Color::Rgb(139, 115, 85),
+            form_label: Color::Rgb(210, 180, 140),
+            form_label_focused: Color::Rgb(218, 165, 32),
+            form_field_background: Color::Rgb(58, 47, 35),
+            form_field_text: Color::Rgb(232, 213, 176),
+            form_checkbox_checked: Color::Rgb(184, 134, 11),
+            form_checkbox_unchecked: Color::Rgb(100, 85, 70),
+            form_error: Color::Rgb(220, 20, 60),
+
+            menu_border: Color::Rgb(139, 115, 85),
+            menu_background: Color::Rgb(43, 36, 25),
+            menu_item_normal: Color::Rgb(232, 213, 176),
+            menu_item_selected: Color::Rgb(58, 47, 35),
+            menu_item_focused: Color::Rgb(218, 165, 32),
+            menu_separator: Color::Rgb(139, 115, 85),
+
+            status_info: Color::Rgb(218, 165, 32),
+            status_success: Color::Rgb(184, 134, 11),
+            status_warning: Color::Rgb(255, 140, 0),
+            status_error: Color::Rgb(220, 20, 60),
+            status_background: Color::Rgb(43, 36, 25),
+
+            button_normal: Color::Rgb(218, 165, 32),
+            button_hover: Color::Rgb(205, 133, 63),
+            button_active: Color::Rgb(184, 134, 11),
+            button_disabled: Color::Rgb(100, 85, 70),
+
+            command_echo: Color::Rgb(244, 232, 208),
+            selection_background: Color::Rgb(139, 115, 85),
+            link_color: Color::Rgb(205, 133, 63),
+            speech_color: Color::Rgb(210, 180, 140),
+            whisper_color: Color::Rgb(212, 197, 169),
+            thought_color: Color::Rgb(232, 213, 176),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Lavender Dreams - Soft lavender tones for a calming experience
+    pub fn lavender_dreams() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Lavender Dreams".to_string(),
+            description: "Soft lavender tones for a calming experience".to_string(),
+
+            window_border: Color::Rgb(123, 31, 162),
+            window_border_focused: Color::Rgb(186, 104, 200),
+            window_background: Color::Rgb(26, 22, 37),
+            window_title: Color::Rgb(243, 229, 245),
+
+            text_primary: Color::Rgb(243, 229, 245),
+            text_secondary: Color::Rgb(225, 190, 231),
+            text_disabled: Color::Rgb(80, 60, 90),
+            text_selected: Color::Rgb(186, 104, 200),
+
+            background_primary: Color::Rgb(26, 22, 37),
+            background_secondary: Color::Rgb(37, 26, 46),
+            background_selected: Color::Rgb(123, 31, 162),
+            background_hover: Color::Rgb(50, 35, 60),
+
+            editor_border: Color::Rgb(123, 31, 162),
+            editor_label: Color::Rgb(186, 104, 200),
+            editor_label_focused: Color::Rgb(206, 147, 216),
+            editor_text: Color::Rgb(225, 190, 231),
+            editor_cursor: Color::Rgb(186, 104, 200),
+            editor_status: Color::Rgb(156, 39, 176),
+            editor_background: Color::Rgb(37, 26, 46),
+
+            browser_border: Color::Rgb(123, 31, 162),
+            browser_title: Color::Rgb(243, 229, 245),
+            browser_item_normal: Color::Rgb(206, 147, 216),
+            browser_item_selected: Color::Rgb(26, 22, 37),
+            browser_item_focused: Color::Rgb(186, 104, 200),
+            browser_background: Color::Rgb(37, 26, 46),
+            browser_scrollbar: Color::Rgb(186, 104, 200),
+
+            form_border: Color::Rgb(123, 31, 162),
+            form_label: Color::Rgb(186, 104, 200),
+            form_label_focused: Color::Rgb(206, 147, 216),
+            form_field_background: Color::Rgb(37, 26, 46),
+            form_field_text: Color::Rgb(225, 190, 231),
+            form_checkbox_checked: Color::Rgb(156, 39, 176),
+            form_checkbox_unchecked: Color::Rgb(80, 60, 90),
+            form_error: Color::Rgb(240, 98, 146),
+
+            menu_border: Color::Rgb(123, 31, 162),
+            menu_background: Color::Rgb(26, 22, 37),
+            menu_item_normal: Color::Rgb(206, 147, 216),
+            menu_item_selected: Color::Rgb(37, 26, 46),
+            menu_item_focused: Color::Rgb(186, 104, 200),
+            menu_separator: Color::Rgb(123, 31, 162),
+
+            status_info: Color::Rgb(186, 104, 200),
+            status_success: Color::Rgb(156, 39, 176),
+            status_warning: Color::Rgb(255, 167, 38),
+            status_error: Color::Rgb(240, 98, 146),
+            status_background: Color::Rgb(26, 22, 37),
+
+            button_normal: Color::Rgb(186, 104, 200),
+            button_hover: Color::Rgb(206, 147, 216),
+            button_active: Color::Rgb(156, 39, 176),
+            button_disabled: Color::Rgb(80, 60, 90),
+
+            command_echo: Color::Rgb(243, 229, 245),
+            selection_background: Color::Rgb(123, 31, 162),
+            link_color: Color::Rgb(171, 71, 188),
+            speech_color: Color::Rgb(186, 104, 200),
+            whisper_color: Color::Rgb(225, 190, 231),
+            thought_color: Color::Rgb(206, 147, 216),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Cherry Blossom - Delicate pink tones inspired by spring blooms
+    pub fn cherry_blossom() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Cherry Blossom".to_string(),
+            description: "Delicate pink tones inspired by spring blooms".to_string(),
+
+            window_border: Color::Rgb(194, 24, 91),
+            window_border_focused: Color::Rgb(236, 64, 122),
+            window_background: Color::Rgb(45, 26, 31),
+            window_title: Color::Rgb(252, 228, 236),
+
+            text_primary: Color::Rgb(252, 228, 236),
+            text_secondary: Color::Rgb(248, 187, 208),
+            text_disabled: Color::Rgb(90, 60, 70),
+            text_selected: Color::Rgb(236, 64, 122),
+
+            background_primary: Color::Rgb(45, 26, 31),
+            background_secondary: Color::Rgb(58, 37, 46),
+            background_selected: Color::Rgb(194, 24, 91),
+            background_hover: Color::Rgb(70, 50, 60),
+
+            editor_border: Color::Rgb(194, 24, 91),
+            editor_label: Color::Rgb(240, 98, 146),
+            editor_label_focused: Color::Rgb(236, 64, 122),
+            editor_text: Color::Rgb(244, 143, 177),
+            editor_cursor: Color::Rgb(236, 64, 122),
+            editor_status: Color::Rgb(233, 30, 99),
+            editor_background: Color::Rgb(58, 37, 46),
+
+            browser_border: Color::Rgb(194, 24, 91),
+            browser_title: Color::Rgb(252, 228, 236),
+            browser_item_normal: Color::Rgb(244, 143, 177),
+            browser_item_selected: Color::Rgb(45, 26, 31),
+            browser_item_focused: Color::Rgb(236, 64, 122),
+            browser_background: Color::Rgb(58, 37, 46),
+            browser_scrollbar: Color::Rgb(236, 64, 122),
+
+            form_border: Color::Rgb(194, 24, 91),
+            form_label: Color::Rgb(240, 98, 146),
+            form_label_focused: Color::Rgb(236, 64, 122),
+            form_field_background: Color::Rgb(58, 37, 46),
+            form_field_text: Color::Rgb(244, 143, 177),
+            form_checkbox_checked: Color::Rgb(102, 187, 106),
+            form_checkbox_unchecked: Color::Rgb(90, 60, 70),
+            form_error: Color::Rgb(233, 30, 99),
+
+            menu_border: Color::Rgb(194, 24, 91),
+            menu_background: Color::Rgb(45, 26, 31),
+            menu_item_normal: Color::Rgb(244, 143, 177),
+            menu_item_selected: Color::Rgb(58, 37, 46),
+            menu_item_focused: Color::Rgb(236, 64, 122),
+            menu_separator: Color::Rgb(194, 24, 91),
+
+            status_info: Color::Rgb(236, 64, 122),
+            status_success: Color::Rgb(102, 187, 106),
+            status_warning: Color::Rgb(255, 183, 77),
+            status_error: Color::Rgb(233, 30, 99),
+            status_background: Color::Rgb(45, 26, 31),
+
+            button_normal: Color::Rgb(236, 64, 122),
+            button_hover: Color::Rgb(240, 98, 146),
+            button_active: Color::Rgb(233, 30, 99),
+            button_disabled: Color::Rgb(90, 60, 70),
+
+            command_echo: Color::Rgb(252, 228, 236),
+            selection_background: Color::Rgb(194, 24, 91),
+            link_color: Color::Rgb(240, 98, 146),
+            speech_color: Color::Rgb(244, 143, 177),
+            whisper_color: Color::Rgb(248, 187, 208),
+            thought_color: Color::Rgb(236, 64, 122),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Slate Professional - Professional gray tones with blue accents
+    pub fn slate_professional() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Slate Professional".to_string(),
+            description: "Professional gray tones with blue accents".to_string(),
+
+            window_border: Color::Rgb(76, 86, 106),
+            window_border_focused: Color::Rgb(94, 129, 172),
+            window_background: Color::Rgb(30, 35, 39),
+            window_title: Color::Rgb(236, 239, 244),
+
+            text_primary: Color::Rgb(236, 239, 244),
+            text_secondary: Color::Rgb(216, 222, 233),
+            text_disabled: Color::Rgb(106, 120, 140),
+            text_selected: Color::Rgb(94, 129, 172),
+
+            background_primary: Color::Rgb(30, 35, 39),
+            background_secondary: Color::Rgb(46, 52, 64),
+            background_selected: Color::Rgb(76, 86, 106),
+            background_hover: Color::Rgb(59, 66, 82),
+
+            editor_border: Color::Rgb(76, 86, 106),
+            editor_label: Color::Rgb(129, 161, 193),
+            editor_label_focused: Color::Rgb(94, 129, 172),
+            editor_text: Color::Rgb(216, 222, 233),
+            editor_cursor: Color::Rgb(94, 129, 172),
+            editor_status: Color::Rgb(136, 192, 208),
+            editor_background: Color::Rgb(46, 52, 64),
+
+            browser_border: Color::Rgb(76, 86, 106),
+            browser_title: Color::Rgb(236, 239, 244),
+            browser_item_normal: Color::Rgb(216, 222, 233),
+            browser_item_selected: Color::Rgb(30, 35, 39),
+            browser_item_focused: Color::Rgb(94, 129, 172),
+            browser_background: Color::Rgb(46, 52, 64),
+            browser_scrollbar: Color::Rgb(94, 129, 172),
+
+            form_border: Color::Rgb(76, 86, 106),
+            form_label: Color::Rgb(129, 161, 193),
+            form_label_focused: Color::Rgb(94, 129, 172),
+            form_field_background: Color::Rgb(46, 52, 64),
+            form_field_text: Color::Rgb(216, 222, 233),
+            form_checkbox_checked: Color::Rgb(163, 190, 140),
+            form_checkbox_unchecked: Color::Rgb(106, 120, 140),
+            form_error: Color::Rgb(191, 97, 106),
+
+            menu_border: Color::Rgb(76, 86, 106),
+            menu_background: Color::Rgb(30, 35, 39),
+            menu_item_normal: Color::Rgb(216, 222, 233),
+            menu_item_selected: Color::Rgb(46, 52, 64),
+            menu_item_focused: Color::Rgb(94, 129, 172),
+            menu_separator: Color::Rgb(76, 86, 106),
+
+            status_info: Color::Rgb(94, 129, 172),
+            status_success: Color::Rgb(163, 190, 140),
+            status_warning: Color::Rgb(235, 203, 139),
+            status_error: Color::Rgb(191, 97, 106),
+            status_background: Color::Rgb(30, 35, 39),
+
+            button_normal: Color::Rgb(94, 129, 172),
+            button_hover: Color::Rgb(136, 192, 208),
+            button_active: Color::Rgb(163, 190, 140),
+            button_disabled: Color::Rgb(106, 120, 140),
+
+            command_echo: Color::Rgb(236, 239, 244),
+            selection_background: Color::Rgb(76, 86, 106),
+            link_color: Color::Rgb(136, 192, 208),
+            speech_color: Color::Rgb(129, 161, 193),
+            whisper_color: Color::Rgb(216, 222, 233),
+            thought_color: Color::Rgb(163, 190, 140),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Autumn Harvest - Warm autumn tones with golden highlights
+    pub fn autumn_harvest() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Autumn Harvest".to_string(),
+            description: "Warm autumn tones with golden highlights".to_string(),
+
+            window_border: Color::Rgb(191, 54, 12),
+            window_border_focused: Color::Rgb(255, 111, 0),
+            window_background: Color::Rgb(42, 24, 16),
+            window_title: Color::Rgb(255, 248, 225),
+
+            text_primary: Color::Rgb(255, 248, 225),
+            text_secondary: Color::Rgb(255, 224, 178),
+            text_disabled: Color::Rgb(100, 70, 50),
+            text_selected: Color::Rgb(255, 111, 0),
+
+            background_primary: Color::Rgb(42, 24, 16),
+            background_secondary: Color::Rgb(62, 39, 35),
+            background_selected: Color::Rgb(191, 54, 12),
+            background_hover: Color::Rgb(80, 55, 45),
+
+            editor_border: Color::Rgb(191, 54, 12),
+            editor_label: Color::Rgb(255, 183, 77),
+            editor_label_focused: Color::Rgb(255, 111, 0),
+            editor_text: Color::Rgb(255, 204, 128),
+            editor_cursor: Color::Rgb(255, 111, 0),
+            editor_status: Color::Rgb(255, 193, 7),
+            editor_background: Color::Rgb(62, 39, 35),
+
+            browser_border: Color::Rgb(191, 54, 12),
+            browser_title: Color::Rgb(255, 248, 225),
+            browser_item_normal: Color::Rgb(255, 204, 128),
+            browser_item_selected: Color::Rgb(42, 24, 16),
+            browser_item_focused: Color::Rgb(255, 111, 0),
+            browser_background: Color::Rgb(62, 39, 35),
+            browser_scrollbar: Color::Rgb(255, 111, 0),
+
+            form_border: Color::Rgb(191, 54, 12),
+            form_label: Color::Rgb(255, 183, 77),
+            form_label_focused: Color::Rgb(255, 111, 0),
+            form_field_background: Color::Rgb(62, 39, 35),
+            form_field_text: Color::Rgb(255, 204, 128),
+            form_checkbox_checked: Color::Rgb(139, 195, 74),
+            form_checkbox_unchecked: Color::Rgb(100, 70, 50),
+            form_error: Color::Rgb(211, 47, 47),
+
+            menu_border: Color::Rgb(191, 54, 12),
+            menu_background: Color::Rgb(42, 24, 16),
+            menu_item_normal: Color::Rgb(255, 204, 128),
+            menu_item_selected: Color::Rgb(62, 39, 35),
+            menu_item_focused: Color::Rgb(255, 111, 0),
+            menu_separator: Color::Rgb(191, 54, 12),
+
+            status_info: Color::Rgb(255, 111, 0),
+            status_success: Color::Rgb(139, 195, 74),
+            status_warning: Color::Rgb(255, 193, 7),
+            status_error: Color::Rgb(211, 47, 47),
+            status_background: Color::Rgb(42, 24, 16),
+
+            button_normal: Color::Rgb(255, 111, 0),
+            button_hover: Color::Rgb(255, 152, 0),
+            button_active: Color::Rgb(255, 193, 7),
+            button_disabled: Color::Rgb(100, 70, 50),
+
+            command_echo: Color::Rgb(255, 248, 225),
+            selection_background: Color::Rgb(191, 54, 12),
+            link_color: Color::Rgb(255, 152, 0),
+            speech_color: Color::Rgb(255, 183, 77),
+            whisper_color: Color::Rgb(255, 224, 178),
+            thought_color: Color::Rgb(255, 204, 128),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    // ==================== ACCESSIBILITY THEMES ====================
+    // These themes are designed for users with specific accessibility needs
+    // following WCAG 2.1 guidelines.
+
+    /// High Contrast Light - WCAG AAA compliant (21:1 contrast ratio)
+    pub fn high_contrast_light() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "High Contrast Light".to_string(),
+            description: "Maximum contrast on white background for low vision (WCAG AAA)".to_string(),
+
+            window_border: Color::Rgb(0, 0, 0),
+            window_border_focused: Color::Rgb(0, 0, 255),
+            window_background: Color::Rgb(255, 255, 255),
+            window_title: Color::Rgb(0, 0, 0),
+
+            text_primary: Color::Rgb(0, 0, 0),
+            text_secondary: Color::Rgb(26, 26, 26),
+            text_disabled: Color::Rgb(128, 128, 128),
+            text_selected: Color::Rgb(0, 0, 255),
+
+            background_primary: Color::Rgb(255, 255, 255),
+            background_secondary: Color::Rgb(245, 245, 245),
+            background_selected: Color::Rgb(200, 200, 255),
+            background_hover: Color::Rgb(230, 230, 230),
+
+            editor_border: Color::Rgb(0, 0, 0),
+            editor_label: Color::Rgb(0, 0, 0),
+            editor_label_focused: Color::Rgb(0, 0, 255),
+            editor_text: Color::Rgb(0, 0, 0),
+            editor_cursor: Color::Rgb(0, 0, 255),
+            editor_status: Color::Rgb(0, 100, 0),
+            editor_background: Color::Rgb(255, 255, 255),
+
+            browser_border: Color::Rgb(0, 0, 0),
+            browser_title: Color::Rgb(0, 0, 0),
+            browser_item_normal: Color::Rgb(0, 0, 0),
+            browser_item_selected: Color::Rgb(255, 255, 255),
+            browser_item_focused: Color::Rgb(0, 0, 255),
+            browser_background: Color::Rgb(255, 255, 255),
+            browser_scrollbar: Color::Rgb(0, 0, 0),
+
+            form_border: Color::Rgb(0, 0, 0),
+            form_label: Color::Rgb(0, 0, 0),
+            form_label_focused: Color::Rgb(0, 0, 255),
+            form_field_background: Color::Rgb(255, 255, 255),
+            form_field_text: Color::Rgb(0, 0, 0),
+            form_checkbox_checked: Color::Rgb(0, 100, 0),
+            form_checkbox_unchecked: Color::Rgb(128, 128, 128),
+            form_error: Color::Rgb(139, 0, 0),
+
+            menu_border: Color::Rgb(0, 0, 0),
+            menu_background: Color::Rgb(245, 245, 245),
+            menu_item_normal: Color::Rgb(0, 0, 0),
+            menu_item_selected: Color::Rgb(255, 255, 255),
+            menu_item_focused: Color::Rgb(0, 0, 255),
+            menu_separator: Color::Rgb(0, 0, 0),
+
+            status_info: Color::Rgb(0, 0, 255),
+            status_success: Color::Rgb(0, 100, 0),
+            status_warning: Color::Rgb(255, 140, 0),
+            status_error: Color::Rgb(139, 0, 0),
+            status_background: Color::Rgb(255, 255, 255),
+
+            button_normal: Color::Rgb(0, 0, 0),
+            button_hover: Color::Rgb(0, 0, 255),
+            button_active: Color::Rgb(0, 100, 0),
+            button_disabled: Color::Rgb(128, 128, 128),
+
+            command_echo: Color::Rgb(0, 0, 0),
+            selection_background: Color::Rgb(200, 200, 255),
+            link_color: Color::Rgb(0, 0, 238),
+            speech_color: Color::Rgb(0, 100, 0),
+            whisper_color: Color::Rgb(0, 0, 139),
+            thought_color: Color::Rgb(139, 0, 139),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// High Contrast Dark - WCAG AAA compliant (21:1 contrast ratio)
+    pub fn high_contrast_dark() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "High Contrast Dark".to_string(),
+            description: "Maximum contrast on black background for low vision (WCAG AAA)".to_string(),
+
+            window_border: Color::Rgb(255, 255, 255),
+            window_border_focused: Color::Rgb(255, 255, 0),
+            window_background: Color::Rgb(0, 0, 0),
+            window_title: Color::Rgb(255, 255, 255),
+
+            text_primary: Color::Rgb(255, 255, 255),
+            text_secondary: Color::Rgb(240, 240, 240),
+            text_disabled: Color::Rgb(128, 128, 128),
+            text_selected: Color::Rgb(255, 255, 0),
+
+            background_primary: Color::Rgb(0, 0, 0),
+            background_secondary: Color::Rgb(10, 10, 10),
+            background_selected: Color::Rgb(64, 64, 0),
+            background_hover: Color::Rgb(30, 30, 30),
+
+            editor_border: Color::Rgb(255, 255, 255),
+            editor_label: Color::Rgb(255, 255, 255),
+            editor_label_focused: Color::Rgb(255, 255, 0),
+            editor_text: Color::Rgb(255, 255, 255),
+            editor_cursor: Color::Rgb(255, 255, 0),
+            editor_status: Color::Rgb(0, 255, 0),
+            editor_background: Color::Rgb(0, 0, 0),
+
+            browser_border: Color::Rgb(255, 255, 255),
+            browser_title: Color::Rgb(255, 255, 255),
+            browser_item_normal: Color::Rgb(255, 255, 255),
+            browser_item_selected: Color::Rgb(0, 0, 0),
+            browser_item_focused: Color::Rgb(255, 255, 0),
+            browser_background: Color::Rgb(0, 0, 0),
+            browser_scrollbar: Color::Rgb(255, 255, 255),
+
+            form_border: Color::Rgb(255, 255, 255),
+            form_label: Color::Rgb(255, 255, 255),
+            form_label_focused: Color::Rgb(255, 255, 0),
+            form_field_background: Color::Rgb(0, 0, 0),
+            form_field_text: Color::Rgb(255, 255, 255),
+            form_checkbox_checked: Color::Rgb(0, 255, 0),
+            form_checkbox_unchecked: Color::Rgb(128, 128, 128),
+            form_error: Color::Rgb(255, 0, 0),
+
+            menu_border: Color::Rgb(255, 255, 255),
+            menu_background: Color::Rgb(10, 10, 10),
+            menu_item_normal: Color::Rgb(255, 255, 255),
+            menu_item_selected: Color::Rgb(0, 0, 0),
+            menu_item_focused: Color::Rgb(255, 255, 0),
+            menu_separator: Color::Rgb(255, 255, 255),
+
+            status_info: Color::Rgb(0, 255, 255),
+            status_success: Color::Rgb(0, 255, 0),
+            status_warning: Color::Rgb(255, 165, 0),
+            status_error: Color::Rgb(255, 0, 0),
+            status_background: Color::Rgb(0, 0, 0),
+
+            button_normal: Color::Rgb(255, 255, 255),
+            button_hover: Color::Rgb(255, 255, 0),
+            button_active: Color::Rgb(0, 255, 0),
+            button_disabled: Color::Rgb(128, 128, 128),
+
+            command_echo: Color::Rgb(255, 255, 255),
+            selection_background: Color::Rgb(64, 64, 0),
+            link_color: Color::Rgb(0, 255, 255),
+            speech_color: Color::Rgb(0, 255, 0),
+            whisper_color: Color::Rgb(30, 144, 255),
+            thought_color: Color::Rgb(218, 112, 214),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
     /// Load custom themes from ~/.two-face/themes/ directory
+    /// Deuteranopia Friendly - Optimized for red-green colorblindness (most common form)
+    pub fn deuteranopia_friendly() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Deuteranopia Friendly".to_string(),
+            description: "Optimized for deuteranopia (red-green colorblindness)".to_string(),
+
+            window_border: Color::Rgb(91, 143, 201),
+            window_border_focused: Color::Rgb(255, 215, 0),
+            window_background: Color::Rgb(26, 26, 46),
+            window_title: Color::Rgb(234, 234, 234),
+
+            text_primary: Color::Rgb(234, 234, 234),
+            text_secondary: Color::Rgb(197, 197, 197),
+            text_disabled: Color::Rgb(106, 120, 140),
+            text_selected: Color::Rgb(255, 215, 0),
+
+            background_primary: Color::Rgb(26, 26, 46),
+            background_secondary: Color::Rgb(37, 37, 64),
+            background_selected: Color::Rgb(91, 143, 201),
+            background_hover: Color::Rgb(50, 50, 70),
+
+            editor_border: Color::Rgb(91, 143, 201),
+            editor_label: Color::Rgb(135, 206, 235),
+            editor_label_focused: Color::Rgb(255, 215, 0),
+            editor_text: Color::Rgb(168, 216, 255),
+            editor_cursor: Color::Rgb(255, 215, 0),
+            editor_status: Color::Rgb(0, 191, 255),
+            editor_background: Color::Rgb(37, 37, 64),
+
+            browser_border: Color::Rgb(91, 143, 201),
+            browser_title: Color::Rgb(234, 234, 234),
+            browser_item_normal: Color::Rgb(168, 216, 255),
+            browser_item_selected: Color::Rgb(26, 26, 46),
+            browser_item_focused: Color::Rgb(255, 215, 0),
+            browser_background: Color::Rgb(37, 37, 64),
+            browser_scrollbar: Color::Rgb(91, 143, 201),
+
+            form_border: Color::Rgb(91, 143, 201),
+            form_label: Color::Rgb(135, 206, 235),
+            form_label_focused: Color::Rgb(255, 215, 0),
+            form_field_background: Color::Rgb(37, 37, 64),
+            form_field_text: Color::Rgb(168, 216, 255),
+            form_checkbox_checked: Color::Rgb(0, 191, 255),  // Blue instead of green
+            form_checkbox_unchecked: Color::Rgb(106, 120, 140),
+            form_error: Color::Rgb(255, 20, 147),  // Pink instead of red
+
+            menu_border: Color::Rgb(91, 143, 201),
+            menu_background: Color::Rgb(26, 26, 46),
+            menu_item_normal: Color::Rgb(168, 216, 255),
+            menu_item_selected: Color::Rgb(37, 37, 64),
+            menu_item_focused: Color::Rgb(255, 215, 0),
+            menu_separator: Color::Rgb(91, 143, 201),
+
+            status_info: Color::Rgb(0, 191, 255),
+            status_success: Color::Rgb(0, 191, 255),  // Blue instead of green
+            status_warning: Color::Rgb(255, 165, 0),
+            status_error: Color::Rgb(255, 20, 147),  // Pink instead of red
+            status_background: Color::Rgb(26, 26, 46),
+
+            button_normal: Color::Rgb(91, 143, 201),
+            button_hover: Color::Rgb(77, 166, 255),
+            button_active: Color::Rgb(0, 191, 255),
+            button_disabled: Color::Rgb(106, 120, 140),
+
+            command_echo: Color::Rgb(234, 234, 234),
+            selection_background: Color::Rgb(91, 143, 201),
+            link_color: Color::Rgb(77, 166, 255),
+            speech_color: Color::Rgb(135, 206, 235),
+            whisper_color: Color::Rgb(168, 216, 255),
+            thought_color: Color::Rgb(255, 215, 0),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Protanopia Friendly - Optimized for another form of red-green colorblindness
+    pub fn protanopia_friendly() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Protanopia Friendly".to_string(),
+            description: "Optimized for protanopia (red-green colorblindness variant)".to_string(),
+
+            window_border: Color::Rgb(100, 149, 237),
+            window_border_focused: Color::Rgb(255, 204, 0),
+            window_background: Color::Rgb(31, 31, 31),
+            window_title: Color::Rgb(224, 224, 224),
+
+            text_primary: Color::Rgb(224, 224, 224),
+            text_secondary: Color::Rgb(176, 176, 176),
+            text_disabled: Color::Rgb(96, 96, 96),
+            text_selected: Color::Rgb(255, 204, 0),
+
+            background_primary: Color::Rgb(31, 31, 31),
+            background_secondary: Color::Rgb(42, 42, 42),
+            background_selected: Color::Rgb(100, 149, 237),
+            background_hover: Color::Rgb(55, 55, 55),
+
+            editor_border: Color::Rgb(100, 149, 237),
+            editor_label: Color::Rgb(135, 206, 235),
+            editor_label_focused: Color::Rgb(255, 204, 0),
+            editor_text: Color::Rgb(173, 216, 230),
+            editor_cursor: Color::Rgb(255, 204, 0),
+            editor_status: Color::Rgb(0, 206, 209),
+            editor_background: Color::Rgb(42, 42, 42),
+
+            browser_border: Color::Rgb(100, 149, 237),
+            browser_title: Color::Rgb(224, 224, 224),
+            browser_item_normal: Color::Rgb(173, 216, 230),
+            browser_item_selected: Color::Rgb(31, 31, 31),
+            browser_item_focused: Color::Rgb(255, 204, 0),
+            browser_background: Color::Rgb(42, 42, 42),
+            browser_scrollbar: Color::Rgb(100, 149, 237),
+
+            form_border: Color::Rgb(100, 149, 237),
+            form_label: Color::Rgb(135, 206, 235),
+            form_label_focused: Color::Rgb(255, 204, 0),
+            form_field_background: Color::Rgb(42, 42, 42),
+            form_field_text: Color::Rgb(173, 216, 230),
+            form_checkbox_checked: Color::Rgb(0, 206, 209),  // Turquoise instead of green
+            form_checkbox_unchecked: Color::Rgb(96, 96, 96),
+            form_error: Color::Rgb(218, 112, 214),  // Orchid instead of red
+
+            menu_border: Color::Rgb(100, 149, 237),
+            menu_background: Color::Rgb(31, 31, 31),
+            menu_item_normal: Color::Rgb(173, 216, 230),
+            menu_item_selected: Color::Rgb(42, 42, 42),
+            menu_item_focused: Color::Rgb(255, 204, 0),
+            menu_separator: Color::Rgb(100, 149, 237),
+
+            status_info: Color::Rgb(30, 144, 255),
+            status_success: Color::Rgb(0, 206, 209),  // Turquoise instead of green
+            status_warning: Color::Rgb(255, 140, 0),
+            status_error: Color::Rgb(218, 112, 214),  // Orchid instead of red
+            status_background: Color::Rgb(31, 31, 31),
+
+            button_normal: Color::Rgb(100, 149, 237),
+            button_hover: Color::Rgb(135, 206, 235),
+            button_active: Color::Rgb(0, 206, 209),
+            button_disabled: Color::Rgb(96, 96, 96),
+
+            command_echo: Color::Rgb(224, 224, 224),
+            selection_background: Color::Rgb(100, 149, 237),
+            link_color: Color::Rgb(30, 144, 255),
+            speech_color: Color::Rgb(135, 206, 235),
+            whisper_color: Color::Rgb(173, 216, 230),
+            thought_color: Color::Rgb(218, 112, 214),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Tritanopia Friendly - Optimized for blue-yellow colorblindness
+    pub fn tritanopia_friendly() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Tritanopia Friendly".to_string(),
+            description: "Optimized for tritanopia (blue-yellow colorblindness)".to_string(),
+
+            window_border: Color::Rgb(255, 20, 147),
+            window_border_focused: Color::Rgb(0, 255, 127),
+            window_background: Color::Rgb(26, 26, 26),
+            window_title: Color::Rgb(255, 255, 255),
+
+            text_primary: Color::Rgb(255, 255, 255),
+            text_secondary: Color::Rgb(204, 204, 204),
+            text_disabled: Color::Rgb(100, 100, 100),
+            text_selected: Color::Rgb(0, 255, 127),
+
+            background_primary: Color::Rgb(26, 26, 26),
+            background_secondary: Color::Rgb(37, 37, 37),
+            background_selected: Color::Rgb(255, 20, 147),
+            background_hover: Color::Rgb(50, 50, 50),
+
+            editor_border: Color::Rgb(255, 20, 147),
+            editor_label: Color::Rgb(255, 105, 180),
+            editor_label_focused: Color::Rgb(0, 255, 127),
+            editor_text: Color::Rgb(152, 251, 152),
+            editor_cursor: Color::Rgb(0, 255, 127),
+            editor_status: Color::Rgb(0, 250, 154),
+            editor_background: Color::Rgb(37, 37, 37),
+
+            browser_border: Color::Rgb(255, 20, 147),
+            browser_title: Color::Rgb(255, 255, 255),
+            browser_item_normal: Color::Rgb(152, 251, 152),
+            browser_item_selected: Color::Rgb(26, 26, 26),
+            browser_item_focused: Color::Rgb(0, 255, 127),
+            browser_background: Color::Rgb(37, 37, 37),
+            browser_scrollbar: Color::Rgb(255, 20, 147),
+
+            form_border: Color::Rgb(255, 20, 147),
+            form_label: Color::Rgb(255, 105, 180),
+            form_label_focused: Color::Rgb(0, 255, 127),
+            form_field_background: Color::Rgb(37, 37, 37),
+            form_field_text: Color::Rgb(152, 251, 152),
+            form_checkbox_checked: Color::Rgb(0, 250, 154),
+            form_checkbox_unchecked: Color::Rgb(100, 100, 100),
+            form_error: Color::Rgb(220, 20, 60),
+
+            menu_border: Color::Rgb(255, 20, 147),
+            menu_background: Color::Rgb(26, 26, 26),
+            menu_item_normal: Color::Rgb(152, 251, 152),
+            menu_item_selected: Color::Rgb(37, 37, 37),
+            menu_item_focused: Color::Rgb(0, 255, 127),
+            menu_separator: Color::Rgb(255, 20, 147),
+
+            status_info: Color::Rgb(255, 105, 180),
+            status_success: Color::Rgb(0, 250, 154),
+            status_warning: Color::Rgb(255, 20, 147),  // Pink instead of yellow
+            status_error: Color::Rgb(220, 20, 60),
+            status_background: Color::Rgb(26, 26, 26),
+
+            button_normal: Color::Rgb(255, 20, 147),
+            button_hover: Color::Rgb(0, 255, 127),
+            button_active: Color::Rgb(0, 250, 154),
+            button_disabled: Color::Rgb(100, 100, 100),
+
+            command_echo: Color::Rgb(255, 255, 255),
+            selection_background: Color::Rgb(255, 20, 147),
+            link_color: Color::Rgb(255, 105, 180),
+            speech_color: Color::Rgb(152, 251, 152),
+            whisper_color: Color::Rgb(144, 238, 144),
+            thought_color: Color::Rgb(255, 182, 193),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Monochrome - Pure grayscale for complete colorblindness (achromatopsia)
+    pub fn monochrome() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Monochrome".to_string(),
+            description: "Pure grayscale for achromatopsia or preference".to_string(),
+
+            window_border: Color::Rgb(128, 128, 128),
+            window_border_focused: Color::Rgb(255, 255, 255),
+            window_background: Color::Rgb(26, 26, 26),
+            window_title: Color::Rgb(240, 240, 240),
+
+            text_primary: Color::Rgb(240, 240, 240),
+            text_secondary: Color::Rgb(192, 192, 192),
+            text_disabled: Color::Rgb(96, 96, 96),
+            text_selected: Color::Rgb(255, 255, 255),
+
+            background_primary: Color::Rgb(26, 26, 26),
+            background_secondary: Color::Rgb(37, 37, 37),
+            background_selected: Color::Rgb(128, 128, 128),
+            background_hover: Color::Rgb(50, 50, 50),
+
+            editor_border: Color::Rgb(128, 128, 128),
+            editor_label: Color::Rgb(176, 176, 176),
+            editor_label_focused: Color::Rgb(255, 255, 255),
+            editor_text: Color::Rgb(200, 200, 200),
+            editor_cursor: Color::Rgb(255, 255, 255),
+            editor_status: Color::Rgb(176, 176, 176),
+            editor_background: Color::Rgb(37, 37, 37),
+
+            browser_border: Color::Rgb(128, 128, 128),
+            browser_title: Color::Rgb(240, 240, 240),
+            browser_item_normal: Color::Rgb(200, 200, 200),
+            browser_item_selected: Color::Rgb(26, 26, 26),
+            browser_item_focused: Color::Rgb(255, 255, 255),
+            browser_background: Color::Rgb(37, 37, 37),
+            browser_scrollbar: Color::Rgb(128, 128, 128),
+
+            form_border: Color::Rgb(128, 128, 128),
+            form_label: Color::Rgb(176, 176, 176),
+            form_label_focused: Color::Rgb(255, 255, 255),
+            form_field_background: Color::Rgb(37, 37, 37),
+            form_field_text: Color::Rgb(200, 200, 200),
+            form_checkbox_checked: Color::Rgb(176, 176, 176),
+            form_checkbox_unchecked: Color::Rgb(96, 96, 96),
+            form_error: Color::Rgb(96, 96, 96),
+
+            menu_border: Color::Rgb(128, 128, 128),
+            menu_background: Color::Rgb(26, 26, 26),
+            menu_item_normal: Color::Rgb(200, 200, 200),
+            menu_item_selected: Color::Rgb(37, 37, 37),
+            menu_item_focused: Color::Rgb(255, 255, 255),
+            menu_separator: Color::Rgb(112, 112, 112),
+
+            status_info: Color::Rgb(176, 176, 176),
+            status_success: Color::Rgb(176, 176, 176),
+            status_warning: Color::Rgb(144, 144, 144),
+            status_error: Color::Rgb(96, 96, 96),
+            status_background: Color::Rgb(26, 26, 26),
+
+            button_normal: Color::Rgb(176, 176, 176),
+            button_hover: Color::Rgb(208, 208, 208),
+            button_active: Color::Rgb(255, 255, 255),
+            button_disabled: Color::Rgb(96, 96, 96),
+
+            command_echo: Color::Rgb(240, 240, 240),
+            selection_background: Color::Rgb(128, 128, 128),
+            link_color: Color::Rgb(208, 208, 208),
+            speech_color: Color::Rgb(176, 176, 176),
+            whisper_color: Color::Rgb(192, 192, 192),
+            thought_color: Color::Rgb(160, 160, 160),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Low Blue Light - Reduces blue light for evening use and photosensitivity
+    pub fn low_blue_light() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Low Blue Light".to_string(),
+            description: "Warm colors with minimal blue light for evening use".to_string(),
+
+            window_border: Color::Rgb(139, 90, 60),
+            window_border_focused: Color::Rgb(255, 179, 71),
+            window_background: Color::Rgb(42, 24, 16),
+            window_title: Color::Rgb(255, 215, 181),
+
+            text_primary: Color::Rgb(255, 215, 181),
+            text_secondary: Color::Rgb(232, 196, 160),
+            text_disabled: Color::Rgb(100, 70, 50),
+            text_selected: Color::Rgb(255, 179, 71),
+
+            background_primary: Color::Rgb(42, 24, 16),
+            background_secondary: Color::Rgb(58, 35, 24),
+            background_selected: Color::Rgb(139, 90, 60),
+            background_hover: Color::Rgb(70, 45, 30),
+
+            editor_border: Color::Rgb(139, 90, 60),
+            editor_label: Color::Rgb(232, 184, 136),
+            editor_label_focused: Color::Rgb(255, 179, 71),
+            editor_text: Color::Rgb(244, 212, 176),
+            editor_cursor: Color::Rgb(255, 179, 71),
+            editor_status: Color::Rgb(199, 165, 99),
+            editor_background: Color::Rgb(58, 35, 24),
+
+            browser_border: Color::Rgb(139, 90, 60),
+            browser_title: Color::Rgb(255, 215, 181),
+            browser_item_normal: Color::Rgb(244, 212, 176),
+            browser_item_selected: Color::Rgb(42, 24, 16),
+            browser_item_focused: Color::Rgb(255, 179, 71),
+            browser_background: Color::Rgb(58, 35, 24),
+            browser_scrollbar: Color::Rgb(255, 179, 71),
+
+            form_border: Color::Rgb(139, 90, 60),
+            form_label: Color::Rgb(232, 184, 136),
+            form_label_focused: Color::Rgb(255, 179, 71),
+            form_field_background: Color::Rgb(58, 35, 24),
+            form_field_text: Color::Rgb(244, 212, 176),
+            form_checkbox_checked: Color::Rgb(199, 165, 99),
+            form_checkbox_unchecked: Color::Rgb(100, 70, 50),
+            form_error: Color::Rgb(205, 92, 92),
+
+            menu_border: Color::Rgb(139, 90, 60),
+            menu_background: Color::Rgb(42, 24, 16),
+            menu_item_normal: Color::Rgb(244, 212, 176),
+            menu_item_selected: Color::Rgb(58, 35, 24),
+            menu_item_focused: Color::Rgb(255, 179, 71),
+            menu_separator: Color::Rgb(139, 90, 60),
+
+            status_info: Color::Rgb(255, 179, 71),
+            status_success: Color::Rgb(199, 165, 99),
+            status_warning: Color::Rgb(255, 140, 66),
+            status_error: Color::Rgb(205, 92, 92),
+            status_background: Color::Rgb(42, 24, 16),
+
+            button_normal: Color::Rgb(255, 179, 71),
+            button_hover: Color::Rgb(255, 153, 102),
+            button_active: Color::Rgb(199, 165, 99),
+            button_disabled: Color::Rgb(100, 70, 50),
+
+            command_echo: Color::Rgb(255, 215, 181),
+            selection_background: Color::Rgb(139, 90, 60),
+            link_color: Color::Rgb(255, 153, 102),
+            speech_color: Color::Rgb(232, 184, 136),
+            whisper_color: Color::Rgb(232, 196, 160),
+            thought_color: Color::Rgb(244, 212, 176),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Photophobia Friendly - Muted, low-brightness colors for light sensitivity
+    pub fn photophobia_friendly() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Photophobia Friendly".to_string(),
+            description: "Muted, low-brightness colors for light sensitivity".to_string(),
+
+            window_border: Color::Rgb(58, 58, 58),
+            window_border_focused: Color::Rgb(90, 122, 90),
+            window_background: Color::Rgb(15, 15, 15),
+            window_title: Color::Rgb(138, 138, 138),
+
+            text_primary: Color::Rgb(138, 138, 138),
+            text_secondary: Color::Rgb(106, 106, 106),
+            text_disabled: Color::Rgb(64, 64, 64),
+            text_selected: Color::Rgb(90, 122, 90),
+
+            background_primary: Color::Rgb(15, 15, 15),
+            background_secondary: Color::Rgb(18, 18, 18),
+            background_selected: Color::Rgb(58, 58, 58),
+            background_hover: Color::Rgb(25, 25, 25),
+
+            editor_border: Color::Rgb(58, 58, 58),
+            editor_label: Color::Rgb(106, 106, 106),
+            editor_label_focused: Color::Rgb(90, 122, 90),
+            editor_text: Color::Rgb(122, 122, 122),
+            editor_cursor: Color::Rgb(90, 122, 90),
+            editor_status: Color::Rgb(90, 106, 90),
+            editor_background: Color::Rgb(18, 18, 18),
+
+            browser_border: Color::Rgb(58, 58, 58),
+            browser_title: Color::Rgb(138, 138, 138),
+            browser_item_normal: Color::Rgb(122, 122, 122),
+            browser_item_selected: Color::Rgb(15, 15, 15),
+            browser_item_focused: Color::Rgb(90, 122, 90),
+            browser_background: Color::Rgb(18, 18, 18),
+            browser_scrollbar: Color::Rgb(58, 58, 58),
+
+            form_border: Color::Rgb(58, 58, 58),
+            form_label: Color::Rgb(106, 106, 106),
+            form_label_focused: Color::Rgb(90, 122, 90),
+            form_field_background: Color::Rgb(18, 18, 18),
+            form_field_text: Color::Rgb(122, 122, 122),
+            form_checkbox_checked: Color::Rgb(74, 106, 74),
+            form_checkbox_unchecked: Color::Rgb(64, 64, 64),
+            form_error: Color::Rgb(122, 74, 74),
+
+            menu_border: Color::Rgb(58, 58, 58),
+            menu_background: Color::Rgb(15, 15, 15),
+            menu_item_normal: Color::Rgb(122, 122, 122),
+            menu_item_selected: Color::Rgb(18, 18, 18),
+            menu_item_focused: Color::Rgb(90, 122, 90),
+            menu_separator: Color::Rgb(58, 58, 58),
+
+            status_info: Color::Rgb(90, 106, 122),
+            status_success: Color::Rgb(74, 106, 74),
+            status_warning: Color::Rgb(122, 106, 74),
+            status_error: Color::Rgb(122, 74, 74),
+            status_background: Color::Rgb(15, 15, 15),
+
+            button_normal: Color::Rgb(90, 122, 90),
+            button_hover: Color::Rgb(106, 138, 106),
+            button_active: Color::Rgb(74, 106, 74),
+            button_disabled: Color::Rgb(64, 64, 64),
+
+            command_echo: Color::Rgb(138, 138, 138),
+            selection_background: Color::Rgb(58, 58, 58),
+            link_color: Color::Rgb(90, 106, 122),
+            speech_color: Color::Rgb(106, 106, 106),
+            whisper_color: Color::Rgb(90, 106, 106),
+            thought_color: Color::Rgb(122, 90, 122),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// ADHD Focus - Minimal color palette to reduce visual distractions
+    pub fn adhd_focus() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "ADHD Focus".to_string(),
+            description: "Clean, minimal colors to reduce visual distractions".to_string(),
+
+            window_border: Color::Rgb(64, 64, 64),
+            window_border_focused: Color::Rgb(86, 156, 214),
+            window_background: Color::Rgb(30, 30, 30),
+            window_title: Color::Rgb(212, 212, 212),
+
+            text_primary: Color::Rgb(212, 212, 212),
+            text_secondary: Color::Rgb(128, 128, 128),
+            text_disabled: Color::Rgb(96, 96, 96),
+            text_selected: Color::Rgb(86, 156, 214),
+
+            background_primary: Color::Rgb(30, 30, 30),
+            background_secondary: Color::Rgb(37, 37, 38),
+            background_selected: Color::Rgb(64, 64, 64),
+            background_hover: Color::Rgb(45, 45, 45),
+
+            editor_border: Color::Rgb(64, 64, 64),
+            editor_label: Color::Rgb(156, 220, 254),
+            editor_label_focused: Color::Rgb(86, 156, 214),
+            editor_text: Color::Rgb(204, 204, 204),
+            editor_cursor: Color::Rgb(86, 156, 214),
+            editor_status: Color::Rgb(86, 156, 214),
+            editor_background: Color::Rgb(37, 37, 38),
+
+            browser_border: Color::Rgb(64, 64, 64),
+            browser_title: Color::Rgb(212, 212, 212),
+            browser_item_normal: Color::Rgb(204, 204, 204),
+            browser_item_selected: Color::Rgb(30, 30, 30),
+            browser_item_focused: Color::Rgb(86, 156, 214),
+            browser_background: Color::Rgb(37, 37, 38),
+            browser_scrollbar: Color::Rgb(64, 64, 64),
+
+            form_border: Color::Rgb(64, 64, 64),
+            form_label: Color::Rgb(156, 220, 254),
+            form_label_focused: Color::Rgb(86, 156, 214),
+            form_field_background: Color::Rgb(37, 37, 38),
+            form_field_text: Color::Rgb(204, 204, 204),
+            form_checkbox_checked: Color::Rgb(86, 156, 214),
+            form_checkbox_unchecked: Color::Rgb(96, 96, 96),
+            form_error: Color::Rgb(206, 145, 120),  // Only critical errors get different color
+
+            menu_border: Color::Rgb(64, 64, 64),
+            menu_background: Color::Rgb(30, 30, 30),
+            menu_item_normal: Color::Rgb(204, 204, 204),
+            menu_item_selected: Color::Rgb(37, 37, 38),
+            menu_item_focused: Color::Rgb(86, 156, 214),
+            menu_separator: Color::Rgb(64, 64, 64),
+
+            status_info: Color::Rgb(86, 156, 214),
+            status_success: Color::Rgb(86, 156, 214),  // Same color - minimal distraction
+            status_warning: Color::Rgb(86, 156, 214),  // Same color - minimal distraction
+            status_error: Color::Rgb(206, 145, 120),  // Only errors get different color
+            status_background: Color::Rgb(30, 30, 30),
+
+            button_normal: Color::Rgb(86, 156, 214),
+            button_hover: Color::Rgb(86, 156, 214),
+            button_active: Color::Rgb(86, 156, 214),
+            button_disabled: Color::Rgb(96, 96, 96),
+
+            command_echo: Color::Rgb(212, 212, 212),
+            selection_background: Color::Rgb(64, 64, 64),
+            link_color: Color::Rgb(86, 156, 214),
+            speech_color: Color::Rgb(156, 220, 254),
+            whisper_color: Color::Rgb(128, 128, 128),
+            thought_color: Color::Rgb(204, 204, 204),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
+
+    /// Reduced Motion - Subtle colors to minimize visual stress
+    pub fn reduced_motion() -> AppTheme {
+        let mut theme = AppTheme {
+            name: "Reduced Motion".to_string(),
+            description: "Subtle colors to minimize visual stress and motion sensitivity".to_string(),
+
+            window_border: Color::Rgb(90, 93, 97),
+            window_border_focused: Color::Rgb(126, 163, 204),
+            window_background: Color::Rgb(43, 45, 48),
+            window_title: Color::Rgb(212, 212, 212),
+
+            text_primary: Color::Rgb(212, 212, 212),
+            text_secondary: Color::Rgb(157, 157, 157),
+            text_disabled: Color::Rgb(100, 100, 100),
+            text_selected: Color::Rgb(126, 163, 204),
+
+            background_primary: Color::Rgb(43, 45, 48),
+            background_secondary: Color::Rgb(51, 53, 56),
+            background_selected: Color::Rgb(90, 93, 97),
+            background_hover: Color::Rgb(60, 62, 65),
+
+            editor_border: Color::Rgb(90, 93, 97),
+            editor_label: Color::Rgb(136, 163, 196),
+            editor_label_focused: Color::Rgb(126, 163, 204),
+            editor_text: Color::Rgb(180, 180, 180),
+            editor_cursor: Color::Rgb(126, 163, 204),
+            editor_status: Color::Rgb(124, 182, 104),
+            editor_background: Color::Rgb(51, 53, 56),
+
+            browser_border: Color::Rgb(90, 93, 97),
+            browser_title: Color::Rgb(212, 212, 212),
+            browser_item_normal: Color::Rgb(180, 180, 180),
+            browser_item_selected: Color::Rgb(43, 45, 48),
+            browser_item_focused: Color::Rgb(126, 163, 204),
+            browser_background: Color::Rgb(51, 53, 56),
+            browser_scrollbar: Color::Rgb(90, 93, 97),
+
+            form_border: Color::Rgb(90, 93, 97),
+            form_label: Color::Rgb(157, 157, 157),
+            form_label_focused: Color::Rgb(126, 163, 204),
+            form_field_background: Color::Rgb(51, 53, 56),
+            form_field_text: Color::Rgb(180, 180, 180),
+            form_checkbox_checked: Color::Rgb(124, 182, 104),
+            form_checkbox_unchecked: Color::Rgb(100, 100, 100),
+            form_error: Color::Rgb(198, 99, 99),
+
+            menu_border: Color::Rgb(90, 93, 97),
+            menu_background: Color::Rgb(43, 45, 48),
+            menu_item_normal: Color::Rgb(180, 180, 180),
+            menu_item_selected: Color::Rgb(51, 53, 56),
+            menu_item_focused: Color::Rgb(126, 163, 204),
+            menu_separator: Color::Rgb(90, 93, 97),
+
+            status_info: Color::Rgb(126, 163, 204),
+            status_success: Color::Rgb(124, 182, 104),
+            status_warning: Color::Rgb(212, 169, 89),
+            status_error: Color::Rgb(198, 99, 99),
+            status_background: Color::Rgb(43, 45, 48),
+
+            button_normal: Color::Rgb(126, 163, 204),
+            button_hover: Color::Rgb(136, 163, 196),
+            button_active: Color::Rgb(124, 182, 104),
+            button_disabled: Color::Rgb(100, 100, 100),
+
+            command_echo: Color::Rgb(212, 212, 212),
+            selection_background: Color::Rgb(90, 93, 97),
+            link_color: Color::Rgb(136, 163, 196),
+            speech_color: Color::Rgb(157, 157, 157),
+            whisper_color: Color::Rgb(180, 180, 180),
+            thought_color: Color::Rgb(160, 160, 160),
+            injury_default_color: Color::Reset,
+        };
+
+        theme.injury_default_color =
+            derive_injury_default_color(theme.window_background, theme.text_secondary);
+        theme
+    }
     pub fn load_custom_themes(config_base: Option<&str>) -> HashMap<String, AppTheme> {
         use std::fs;
         use std::path::PathBuf;

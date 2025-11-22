@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(do sed -i 's/Color::Rgb(255, 215, 0)/theme.browser_item_focused/g; s/\\.set_bg(Color::Black)/.set_bg(theme.browser_background)/g; s/\\.bg(Color::Black)/.bg(theme.browser_background)/g; s/\\.set_fg(Color::Cyan)/.set_fg(theme.browser_item_normal)/g; s/\\.fg(Color::Cyan)/.fg(theme.browser_border)/g; s/Color::Cyan/theme.browser_border/g; s/\\.set_fg(Color::White)/.set_fg(theme.text_primary)/g; s/\\.fg(Color::White)/.fg(theme.text_primary)/g; s/\\.set_fg(Color::Gray)/.set_fg(theme.menu_separator)/g; s/Color::Gray/theme.menu_separator/g; s/Color::DarkGray/theme.text_disabled/g; s/Color::Yellow/theme.browser_item_focused/g' src/frontend/tui/$file.rs)",
+      "Bash(grep -A2 \"cannot find value \\`theme\\`\")",
+      "Bash(for file in highlight_form keybind_form color_form spell_color_form)",
+      "Bash(do grep -c \"Color::\" src/frontend/tui/$file.rs)",
+      "Bash(cargo check --quiet)",
+      "Bash(cat src/config.rs)",
+      "Bash(./target/release/two-face.exe:*)",
+      "Bash(cargo update:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo tree:*)",
+      "Bash(export VCPKG_ROOT=\"C:/Gemstone/vcpkg\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -52,9 +52,16 @@ fn get_action_context(mode: &InputMode) -> ActionContext {
     }
 }
 
-/// Check if the current InputMode should use menu keybinds
-pub fn should_use_menu_keybinds(mode: &InputMode) -> bool {
+/// Check if a priority window (editor/browser/form) is currently open
+/// Priority windows intercept input before normal keybinds
+pub fn has_priority_window(mode: &InputMode) -> bool {
     !matches!(mode, InputMode::Normal | InputMode::Navigation)
+}
+
+/// Alias for backwards compatibility
+#[deprecated(note = "Use has_priority_window() instead")]
+pub fn should_use_menu_keybinds(mode: &InputMode) -> bool {
+    has_priority_window(mode)
 }
 
 #[cfg(test)]
@@ -81,10 +88,16 @@ mod tests {
     }
 
     #[test]
-    fn test_menu_keybind_filtering() {
-        assert!(!should_use_menu_keybinds(&InputMode::Normal));
-        assert!(!should_use_menu_keybinds(&InputMode::Navigation));
-        assert!(should_use_menu_keybinds(&InputMode::HighlightBrowser));
-        assert!(should_use_menu_keybinds(&InputMode::WindowEditor));
+    fn test_priority_window_detection() {
+        // Normal modes - no priority window
+        assert!(!has_priority_window(&InputMode::Normal));
+        assert!(!has_priority_window(&InputMode::Navigation));
+
+        // Priority windows - intercept input
+        assert!(has_priority_window(&InputMode::HighlightBrowser));
+        assert!(has_priority_window(&InputMode::WindowEditor));
+        assert!(has_priority_window(&InputMode::SettingsEditor));
+        assert!(has_priority_window(&InputMode::Search));
+        assert!(has_priority_window(&InputMode::Menu));
     }
 }

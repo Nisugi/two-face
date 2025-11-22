@@ -2,6 +2,13 @@
 //!
 //! Presents a VellumFE-inspired popup that lets the user tweak geometry,
 //! borders, and stream assignments for a given window definition.
+//!
+//! Uses a section-based navigation system inspired by the theme editor:
+//! - Section 1: Identity (name, title, show title, locked)
+//! - Section 2: Position/Size (row, col, rows, cols)
+//! - Section 3: Constraints (min/max rows/cols)
+//! - Section 4: Border (show, color, style, sides)
+//! - Section 5: Special (widget-specific: streams, cursor colors)
 
 use crate::config::WindowDef;
 use crate::theme::EditorTheme;
@@ -13,33 +20,125 @@ use ratatui::{
 };
 use tui_textarea::TextArea;
 
-/// Window editor widget - 70x20 popup following VellumFE style guide
+/// Field reference for section-based navigation
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FieldRef {
+    // Text inputs
+    Name,
+    Title,
+    Row,
+    Col,
+    Rows,
+    Cols,
+    MinRows,
+    MinCols,
+    MaxRows,
+    MaxCols,
+    BgColor,
+    BorderColor,
+    BorderStyle,
+    Streams,
+    TextColor,
+    CursorColor,
+    CursorBg,
+
+    // Checkboxes
+    ShowTitle,
+    Locked,
+    TransparentBg,
+    ShowBorder,
+    BorderTop,
+    BorderBottom,
+    BorderLeft,
+    BorderRight,
+}
+
+impl FieldRef {
+    /// Get the legacy field ID for this field (for compatibility with existing toggle/input logic)
+    fn legacy_field_id(&self) -> usize {
+        match self {
+            FieldRef::Name => 0,
+            FieldRef::Title => 1,
+            FieldRef::Row => 2,
+            FieldRef::Col => 3,
+            FieldRef::Rows => 4,
+            FieldRef::Cols => 5,
+            FieldRef::MinRows => 6,
+            FieldRef::MinCols => 7,
+            FieldRef::MaxRows => 8,
+            FieldRef::MaxCols => 9,
+            FieldRef::BorderStyle => 11,
+            FieldRef::ShowTitle => 12,
+            FieldRef::Locked => 13,
+            FieldRef::TransparentBg => 14,
+            FieldRef::ShowBorder => 15,
+            FieldRef::BorderTop => 16,
+            FieldRef::BorderBottom => 17,
+            FieldRef::BorderLeft => 18,
+            FieldRef::BorderRight => 19,
+            FieldRef::BgColor => 20,
+            FieldRef::BorderColor => 21,
+            FieldRef::Streams => 22,
+            FieldRef::TextColor => 23,
+            FieldRef::CursorColor => 24,
+            FieldRef::CursorBg => 25,
+        }
+    }
+}
+
+/// A section of related fields in the window editor
+struct WindowSection {
+    name: &'static str,
+    fields: Vec<FieldRef>,
+}
+
+/// Global field reference - includes meta fields and all section fields
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GlobalFieldRef {
+    field: FieldRef,
+    section: usize, // 0 = meta section, 1-5 = numbered sections
+}
+
+/// Window editor widget - 50x25 popup with section-based navigation
 pub struct WindowEditor {
     popup_x: u16,
     popup_y: u16,
+    popup_width: u16,
+    popup_height: u16,
     dragging: bool,
     drag_offset_x: u16,
     drag_offset_y: u16,
+    resizing: bool,
+    resize_start_width: u16,
+    resize_start_height: u16,
+    resize_start_mouse_x: u16,
+    resize_start_mouse_y: u16,
 
-    pub focused_field: usize, // 0-based field index
+    // Section-based navigation (0 = meta section with Name/Title, 1-5 = numbered sections)
+    sections: Vec<WindowSection>,
+    current_section: usize,         // 0 = meta, 1-5 = sections
+    global_fields: Vec<GlobalFieldRef>, // Flattened list of all fields for Tab navigation
+    current_field_global: usize,    // Index in global_fields list
 
-    // Text inputs (field indices 0-12)
-    name_input: TextArea<'static>,         // 0
-    title_input: TextArea<'static>,        // 1
-    row_input: TextArea<'static>,          // 2
-    col_input: TextArea<'static>,          // 3
-    rows_input: TextArea<'static>,         // 4
-    cols_input: TextArea<'static>,         // 5
-    min_rows_input: TextArea<'static>,     // 6
-    min_cols_input: TextArea<'static>,     // 7
-    max_rows_input: TextArea<'static>,     // 8
-    max_cols_input: TextArea<'static>,     // 9
-    bg_color_input: TextArea<'static>,     // 20
-    border_color_input: TextArea<'static>, // 21
-    streams_input: TextArea<'static>,      // 22
-    text_color_input: TextArea<'static>,   // 23
-    cursor_color_input: TextArea<'static>, // 24
-    cursor_bg_input: TextArea<'static>,    // 25
+    pub focused_field: usize, // Legacy field index (for compatibility)
+
+    // Text inputs
+    name_input: TextArea<'static>,
+    title_input: TextArea<'static>,
+    row_input: TextArea<'static>,
+    col_input: TextArea<'static>,
+    rows_input: TextArea<'static>,
+    cols_input: TextArea<'static>,
+    min_rows_input: TextArea<'static>,
+    min_cols_input: TextArea<'static>,
+    max_rows_input: TextArea<'static>,
+    max_cols_input: TextArea<'static>,
+    bg_color_input: TextArea<'static>,
+    border_color_input: TextArea<'static>,
+    streams_input: TextArea<'static>,
+    text_color_input: TextArea<'static>,
+    cursor_color_input: TextArea<'static>,
+    cursor_bg_input: TextArea<'static>,
 
     window_def: WindowDef,
     original_window_def: WindowDef,
@@ -59,6 +158,92 @@ impl WindowEditor {
         let mut ta = Self::create_textarea();
         ta.insert_str(&value.to_string());
         ta
+    }
+
+    /// Build the 5 sections based on widget type
+    fn build_sections(is_command_input: bool) -> Vec<WindowSection> {
+        vec![
+            // Section 1: Identity
+            WindowSection {
+                name: "Identity",
+                fields: vec![
+                    FieldRef::ShowTitle,
+                    FieldRef::Locked,
+                    FieldRef::TransparentBg,
+                    FieldRef::BgColor,
+                ],
+            },
+            // Section 2: Position & Size
+            WindowSection {
+                name: "Position & Size",
+                fields: vec![FieldRef::Row, FieldRef::Col, FieldRef::Rows, FieldRef::Cols],
+            },
+            // Section 3: Constraints
+            WindowSection {
+                name: "Constraints",
+                fields: vec![
+                    FieldRef::MinRows,
+                    FieldRef::MinCols,
+                    FieldRef::MaxRows,
+                    FieldRef::MaxCols,
+                ],
+            },
+            // Section 4: Border
+            WindowSection {
+                name: "Border",
+                fields: vec![
+                    FieldRef::ShowBorder,
+                    FieldRef::BorderStyle,
+                    FieldRef::BorderColor,
+                    FieldRef::BorderTop,
+                    FieldRef::BorderBottom,
+                    FieldRef::BorderLeft,
+                    FieldRef::BorderRight,
+                ],
+            },
+            // Section 5: Special (widget-specific)
+            WindowSection {
+                name: "Special",
+                fields: if is_command_input {
+                    vec![
+                        FieldRef::TextColor,
+                        FieldRef::CursorColor,
+                        FieldRef::CursorBg,
+                    ]
+                } else {
+                    vec![FieldRef::Streams]
+                },
+            },
+        ]
+    }
+
+    /// Build the global fields list for Tab navigation
+    /// Section 0 (meta): Name, Title
+    /// Sections 1-5: All fields in each section
+    fn build_global_fields(sections: &[WindowSection]) -> Vec<GlobalFieldRef> {
+        let mut global_fields = Vec::new();
+
+        // Meta section (section 0) - Name and Title only
+        global_fields.push(GlobalFieldRef {
+            field: FieldRef::Name,
+            section: 0,
+        });
+        global_fields.push(GlobalFieldRef {
+            field: FieldRef::Title,
+            section: 0,
+        });
+
+        // Add all fields from numbered sections (1-5)
+        for (section_idx, section) in sections.iter().enumerate() {
+            for field_ref in &section.fields {
+                global_fields.push(GlobalFieldRef {
+                    field: *field_ref,
+                    section: section_idx + 1, // Section 1-5 (0 is meta)
+                });
+            }
+        }
+
+        global_fields
     }
 
     fn refresh_size_inputs(&mut self) {
@@ -135,12 +320,27 @@ impl WindowEditor {
             }
         }
 
+        let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
+        let sections = Self::build_sections(is_command_input);
+        let global_fields = Self::build_global_fields(&sections);
+
         Self {
             popup_x: 0,
             popup_y: 0,
+            popup_width: 50,
+            popup_height: 25,
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
+            resizing: false,
+            resize_start_width: 0,
+            resize_start_height: 0,
+            resize_start_mouse_x: 0,
+            resize_start_mouse_y: 0,
+            sections,
+            current_section: 0, // Start on meta section
+            global_fields,
+            current_field_global: 0, // Start on Name field
             focused_field: 0,
             name_input,
             title_input,
@@ -161,7 +361,7 @@ impl WindowEditor {
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: false,
-            status_message: "Tab: Next | Shift+Tab: Prev | Space: Toggle | Ctrl+S: Save | Ctrl+D: Delete | Esc: Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+S: Save | Esc: Back/Cancel".to_string(),
         }
     }
 
@@ -261,12 +461,27 @@ impl WindowEditor {
         let cursor_color_input = Self::create_textarea();
         let cursor_bg_input = Self::create_textarea();
 
+        let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
+        let sections = Self::build_sections(is_command_input);
+        let global_fields = Self::build_global_fields(&sections);
+
         Self {
             popup_x: 0,
             popup_y: 0,
+            popup_width: 50,
+            popup_height: 25,
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
+            resizing: false,
+            resize_start_width: 0,
+            resize_start_height: 0,
+            resize_start_mouse_x: 0,
+            resize_start_mouse_y: 0,
+            sections,
+            current_section: 0, // Start on meta section
+            global_fields,
+            current_field_global: 0, // Start on Name field
             focused_field: 0,
             name_input,
             title_input,
@@ -287,7 +502,7 @@ impl WindowEditor {
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: true,
-            status_message: "Tab: Next | Shift+Tab: Prev | Space: Toggle | Ctrl+S: Save | Ctrl+D: Delete | Esc: Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+S: Save | Esc: Back/Cancel".to_string(),
         }
     }
 
@@ -303,23 +518,111 @@ impl WindowEditor {
         }
     }
 
-    pub fn next(&mut self) {
-        let total = self.total_fields();
-        self.focused_field = (self.focused_field + 1) % total;
+    /// Jump to a specific section (Ctrl+1..5)
+    /// Jumps to the first field of the target section
+    pub fn jump_to_section(&mut self, section_idx: usize) {
+        // section_idx is 1-5, we need to find the first field of that section
+        if section_idx == 0 || section_idx > self.sections.len() {
+            return;
+        }
+
+        // Find the first field in the target section
+        for (global_idx, global_field) in self.global_fields.iter().enumerate() {
+            if global_field.section == section_idx {
+                self.current_field_global = global_idx;
+                self.current_section = section_idx;
+                self.sync_focused_field();
+                return;
+            }
+        }
     }
 
-    pub fn previous(&mut self) {
-        let total = self.total_fields();
-        self.focused_field = if self.focused_field == 0 {
-            total - 1
+    /// Return to meta section (Esc from within a numbered section)
+    pub fn return_to_meta(&mut self) {
+        self.current_section = 0;
+        self.current_field_global = 0; // First field (Name)
+        self.sync_focused_field();
+    }
+
+    /// Check if we're viewing the meta section
+    pub fn is_on_meta(&self) -> bool {
+        self.current_section == 0
+    }
+
+    /// Move to next field (Tab)
+    pub fn next_field(&mut self) {
+        if self.global_fields.is_empty() {
+            return;
+        }
+
+        self.current_field_global = (self.current_field_global + 1) % self.global_fields.len();
+
+        // Update current_section based on the new field
+        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
+            self.current_section = global_field.section;
+        }
+
+        self.sync_focused_field();
+    }
+
+    /// Move to previous field (Shift+Tab)
+    pub fn previous_field(&mut self) {
+        if self.global_fields.is_empty() {
+            return;
+        }
+
+        self.current_field_global = if self.current_field_global == 0 {
+            self.global_fields.len() - 1
         } else {
-            self.focused_field - 1
+            self.current_field_global - 1
         };
+
+        // Update current_section based on the new field
+        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
+            self.current_section = global_field.section;
+        }
+
+        self.sync_focused_field();
+    }
+
+    /// Sync the legacy focused_field index with current global field
+    fn sync_focused_field(&mut self) {
+        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
+            self.focused_field = global_field.field.legacy_field_id();
+        }
+    }
+
+    /// Tab navigation (calls next_field for compatibility)
+    pub fn next(&mut self) {
+        self.next_field();
+    }
+
+    /// Shift+Tab navigation (calls previous_field for compatibility)
+    pub fn previous(&mut self) {
+        self.previous_field();
     }
 
     /// Check if the currently focused field is a checkbox (fields 12-19)
     pub fn is_on_checkbox(&self) -> bool {
         matches!(self.focused_field, 12..=19)
+    }
+
+    /// Check if the currently focused field is the border style dropdown
+    pub fn is_on_border_style(&self) -> bool {
+        self.focused_field == 11
+    }
+
+    /// Cycle to the next border style
+    pub fn cycle_border_style(&mut self) {
+        let current = &self.window_def.base().border_style;
+        let next = match current.as_str() {
+            "single" => "double",
+            "double" => "rounded",
+            "rounded" => "thick",
+            "thick" => "single",
+            _ => "single", // Default fallback
+        };
+        self.window_def.base_mut().border_style = next.to_string();
     }
 
     pub fn input(&mut self, input: ratatui::crossterm::event::KeyEvent) {
@@ -501,57 +804,93 @@ impl WindowEditor {
         self.window_def = self.original_window_def.clone();
     }
 
-    pub fn handle_mouse(&mut self, mouse_col: u16, mouse_row: u16, mouse_down: bool, area: Rect) {
-        const POPUP_WIDTH: u16 = 70;
-        const POPUP_HEIGHT: u16 = 20;
+    /// Get the current editor window position and size for persistence
+    pub fn get_editor_geometry(&self) -> (u16, u16, u16, u16) {
+        (self.popup_x, self.popup_y, self.popup_width, self.popup_height)
+    }
 
+    pub fn handle_mouse(&mut self, mouse_col: u16, mouse_row: u16, mouse_down: bool, area: Rect) {
         if !mouse_down {
             self.dragging = false;
+            self.resizing = false;
             return;
         }
 
         let popup_area = Rect {
             x: self.popup_x,
             y: self.popup_y,
-            width: POPUP_WIDTH,
-            height: POPUP_HEIGHT,
+            width: self.popup_width,
+            height: self.popup_height,
         };
 
+        // Check if mouse is on the resize handle (bottom-right corner, 3x3 area)
+        let resize_handle_x = self.popup_x + self.popup_width.saturating_sub(3);
+        let resize_handle_y = self.popup_y + self.popup_height.saturating_sub(3);
+        let on_resize_handle = mouse_col >= resize_handle_x
+            && mouse_col < self.popup_x + self.popup_width
+            && mouse_row >= resize_handle_y
+            && mouse_row < self.popup_y + self.popup_height;
+
+        // Check if mouse is on the title bar (for dragging)
         let on_title_bar = mouse_row == self.popup_y
             && mouse_col > popup_area.x
             && mouse_col < popup_area.x + popup_area.width.saturating_sub(1);
 
-        if on_title_bar && !self.dragging {
+        // Start resize if on resize handle
+        if on_resize_handle && !self.resizing && !self.dragging {
+            self.resizing = true;
+            self.resize_start_width = self.popup_width;
+            self.resize_start_height = self.popup_height;
+            self.resize_start_mouse_x = mouse_col;
+            self.resize_start_mouse_y = mouse_row;
+        }
+
+        // Start drag if on title bar and not resizing
+        if on_title_bar && !self.dragging && !self.resizing {
             self.dragging = true;
             self.drag_offset_x = mouse_col.saturating_sub(self.popup_x);
             self.drag_offset_y = mouse_row.saturating_sub(self.popup_y);
         }
 
+        // Handle dragging
         if self.dragging {
             self.popup_x = mouse_col.saturating_sub(self.drag_offset_x);
             self.popup_y = mouse_row.saturating_sub(self.drag_offset_y);
-            self.popup_x = self.popup_x.min(area.width.saturating_sub(POPUP_WIDTH));
-            self.popup_y = self.popup_y.min(area.height.saturating_sub(POPUP_HEIGHT));
+            self.popup_x = self.popup_x.min(area.width.saturating_sub(self.popup_width));
+            self.popup_y = self.popup_y.min(area.height.saturating_sub(self.popup_height));
+        }
+
+        // Handle resizing
+        if self.resizing {
+            let delta_x = (mouse_col as i32) - (self.resize_start_mouse_x as i32);
+            let delta_y = (mouse_row as i32) - (self.resize_start_mouse_y as i32);
+
+            // Calculate new dimensions with minimum constraints
+            let new_width = ((self.resize_start_width as i32) + delta_x).max(40) as u16;
+            let new_height = ((self.resize_start_height as i32) + delta_y).max(20) as u16;
+
+            // Apply maximum constraints based on available screen space
+            self.popup_width = new_width.min(area.width.saturating_sub(self.popup_x));
+            self.popup_height = new_height.min(area.height.saturating_sub(self.popup_y));
         }
     }
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer, theme: &EditorTheme) {
-        let popup_width = 70;
-        let popup_height = 20;
-
+        // Center the popup on first render
         if self.popup_x == 0 && self.popup_y == 0 {
-            self.popup_x = (area.width.saturating_sub(popup_width)) / 2;
-            self.popup_y = (area.height.saturating_sub(popup_height)) / 2;
+            self.popup_x = (area.width.saturating_sub(self.popup_width)) / 2;
+            self.popup_y = (area.height.saturating_sub(self.popup_height)) / 2;
         }
 
-        self.popup_x = self.popup_x.min(area.width.saturating_sub(popup_width));
-        self.popup_y = self.popup_y.min(area.height.saturating_sub(popup_height));
+        // Constrain position to screen bounds
+        self.popup_x = self.popup_x.min(area.width.saturating_sub(self.popup_width));
+        self.popup_y = self.popup_y.min(area.height.saturating_sub(self.popup_height));
 
         let popup_area = Rect {
             x: self.popup_x,
             y: self.popup_y,
-            width: popup_width,
-            height: popup_height,
+            width: self.popup_width,
+            height: self.popup_height,
         };
 
         Clear.render(popup_area, buf);
@@ -566,9 +905,9 @@ impl WindowEditor {
         }
 
         let title = if self.is_new {
-            " Add Window (drag title to move) "
+            " Add Window "
         } else {
-            " Edit Window (drag title to move) "
+            " Edit Window "
         };
 
         let block = Block::default()
@@ -586,231 +925,295 @@ impl WindowEditor {
 
         self.render_fields(content, buf, theme);
 
-        let status_y = popup_area.y + popup_area.height - 2;
-        let status = Paragraph::new(&self.status_message as &str)
-            .style(Style::default().fg(theme.status_color));
-        status.render(
-            Rect {
-                x: content.x,
-                y: status_y,
-                width: content.width,
-                height: 1,
-            },
-            buf,
-        );
+        // Render resize handle indicator at bottom-right corner
+        let resize_x = self.popup_x + self.popup_width.saturating_sub(2);
+        let resize_y = self.popup_y + self.popup_height.saturating_sub(1);
+        if resize_x < area.width && resize_y < area.height {
+            buf.set_string(
+                resize_x,
+                resize_y,
+                "╬",
+                Style::default().fg(theme.border_color),
+            );
+        }
     }
 
     fn render_fields(&mut self, area: Rect, buf: &mut Buffer, theme: &EditorTheme) {
-        let left_x = area.x;
-        let right_x = area.x + 36;
-        let mut y = area.y;
+        let x = area.x;
+        let mut y = area.y + 1; // Start with spacing from top border
 
-        // Row 0: Name + Show Title checkbox
-        self.render_textarea(0, "Name:", &self.name_input, left_x, y, 23, 2, buf, theme);
-        self.render_checkbox(
-            12,
-            "Show Title",
-            self.window_def.base().show_title,
-            right_x,
-            y,
-            buf,
-            theme,
-        );
-        y += 1;
+        if self.current_section == 0 {
+            // Meta section - show Name, Title, and Available Sections list
+            let current_global_field = self.global_fields.get(self.current_field_global);
 
-        // Row 1: Lock Window checkbox
-        self.render_checkbox(
-            13,
-            "Lock Window",
-            self.window_def.base().locked,
-            right_x,
-            y,
-            buf,
-            theme,
-        );
-        y += 1;
-
-        // Row 2: Title + Transparent BG checkbox
-        self.render_textarea(1, "Title:", &self.title_input, left_x, y, 23, 1, buf, theme);
-        self.render_checkbox(
-            14,
-            "Transparent BG",
-            self.window_def.base().transparent_background,
-            right_x,
-            y,
-            buf,
-            theme,
-        );
-        y += 1;
-
-        // Row 3: BG Color + preview
-        self.render_textarea_with_preview(
-            20,
-            "BG Color:",
-            &self.bg_color_input,
-            right_x,
-            y,
-            10,
-            5,
-            buf,
-            theme,
-        );
-        y += 1;
-
-        if self.is_command_input() {
-            self.render_textarea_with_preview(
-                23,
-                "Text Color:",
-                &self.text_color_input,
-                right_x,
+            // Render Name field
+            let is_name_focused = current_global_field
+                .map(|gf| gf.field == FieldRef::Name)
+                .unwrap_or(false);
+            self.render_textarea_compact(
+                0,
+                "Name:",
+                &self.name_input,
+                x,
                 y,
-                10,
-                3,
+                20,
                 buf,
                 theme,
+                is_name_focused,
             );
-            y += 1;
+            y += 2; // Skip one empty row between Name and Title
 
-            self.render_textarea_with_preview(
-                24,
-                "Cursor FG:",
-                &self.cursor_color_input,
-                right_x,
-                y,
-                10,
-                3,
-                buf,
-                theme,
-            );
-            y += 1;
-
-            self.render_textarea_with_preview(
-                25,
-                "Cursor BG:",
-                &self.cursor_bg_input,
-                right_x,
-                y,
-                10,
-                3,
-                buf,
-                theme,
-            );
-            y += 1;
-        }
-
-        // Row 4: Row + Col
-        self.render_textarea(2, "Row:", &self.row_input, left_x, y, 8, 2, buf, theme);
-        self.render_textarea(3, "Col:", &self.col_input, left_x + 16, y, 8, 2, buf, theme);
-        y += 1;
-
-        // Row 5: Rows + Cols + Show Border
-        self.render_textarea(4, "Rows:", &self.rows_input, left_x, y, 8, 1, buf, theme);
-        self.render_textarea(
-            5,
-            "Cols:",
-            &self.cols_input,
-            left_x + 16,
-            y,
-            8,
-            1,
-            buf,
-            theme,
-        );
-        self.render_checkbox(
-            15,
-            "Show Border",
-            self.window_def.base().show_border,
-            right_x,
-            y,
-            buf,
-            theme,
-        );
-        y += 1;
-
-        // Row 6: Min + Min + Top Border
-        self.render_textarea(6, "Min:", &self.min_rows_input, left_x, y, 8, 2, buf, theme);
-        self.render_textarea(
-            7,
-            "Min:",
-            &self.min_cols_input,
-            left_x + 16,
-            y,
-            8,
-            2,
-            buf,
-            theme,
-        );
-        let has_top = self.window_def.base().border_sides.top;
-        self.render_checkbox(16, "Top Border", has_top, right_x, y, buf, theme);
-        y += 1;
-
-        // Row 7: Max + Max + Bottom Border
-        self.render_textarea(8, "Max:", &self.max_rows_input, left_x, y, 8, 2, buf, theme);
-        self.render_textarea(
-            9,
-            "Max:",
-            &self.max_cols_input,
-            left_x + 16,
-            y,
-            8,
-            2,
-            buf,
-            theme,
-        );
-        let has_bottom = self.window_def.base().border_sides.bottom;
-        self.render_checkbox(17, "Bottom Border", has_bottom, right_x, y, buf, theme);
-        y += 1;
-
-        // Row 8: Left Border
-        let has_left = self.window_def.base().border_sides.left;
-        self.render_checkbox(18, "Left Border", has_left, right_x, y, buf, theme);
-        y += 1;
-
-        // Row 9: Right Border (removed Content Align as it doesn't exist)
-        let has_right = self.window_def.base().border_sides.right;
-        self.render_checkbox(19, "Right Border", has_right, right_x, y, buf, theme);
-        y += 1;
-
-        // Row 10: Border Style + Border Color + preview
-        self.render_dropdown(
-            11,
-            "Border Style:",
-            &self.window_def.base().border_style,
-            left_x,
-            y,
-            buf,
-            theme,
-        );
-        self.render_textarea_with_preview(
-            21,
-            "Border Color:",
-            &self.border_color_input,
-            right_x,
-            y,
-            10,
-            1,
-            buf,
-            theme,
-        );
-        y += 1;
-
-        // Row 11: Blank
-        y += 1;
-
-        // Row 12+: Widget-specific
-        if self.window_def.widget_type() == "text" {
-            self.render_textarea(
-                22,
-                "Streams:",
-                &self.streams_input,
-                right_x,
-                y,
-                21,
+            // Render Title field
+            let is_title_focused = current_global_field
+                .map(|gf| gf.field == FieldRef::Title)
+                .unwrap_or(false);
+            self.render_textarea_compact(
                 1,
+                "Title:",
+                &self.title_input,
+                x,
+                y,
+                20,
                 buf,
                 theme,
+                is_title_focused,
             );
+            y += 3; // Skip two empty rows before "Available Sections:"
+
+            // Available Sections header
+            buf.set_string(
+                x,
+                y,
+                "Available Sections:",
+                Style::default().fg(theme.label_color),
+            );
+            y += 1; // Normal increment to section list
+
+            // List sections 1-5 with Ctrl+# shortcuts
+            for (idx, section) in self.sections.iter().enumerate() {
+                if y >= area.y + area.height {
+                    break;
+                }
+
+                let shortcut = format!("  Ctrl+{}  {}", idx + 1, section.name);
+                buf.set_string(x, y, &shortcut, Style::default().fg(theme.text_color));
+                y += 1;
+            }
+        } else if let Some(section) = self.sections.get(self.current_section - 1) {
+            // Viewing a numbered section (1-5) - render its fields
+            // Section header
+            let header = format!("--- {} ---", section.name);
+            buf.set_string(x, y, &header, Style::default().fg(theme.section_header_color));
+            y += 1;
+
+            // Render only fields in the current section
+            for field_ref in &section.fields {
+                if y >= area.y + area.height {
+                    break;
+                }
+
+                // Check if this field is the currently focused field
+                let is_current = self
+                    .global_fields
+                    .get(self.current_field_global)
+                    .map(|gf| gf.field == *field_ref)
+                    .unwrap_or(false);
+                let field_id = field_ref.legacy_field_id();
+
+                // Render based on field type
+                match field_ref {
+                    FieldRef::Name => {
+                        self.render_textarea_compact(field_id, "Name:", &self.name_input, x, y, 20, buf, theme, is_current);
+                    }
+                    FieldRef::Title => {
+                        self.render_textarea_compact(field_id, "Title:", &self.title_input, x, y, 20, buf, theme, is_current);
+                    }
+                    FieldRef::Row => {
+                        self.render_textarea_compact(field_id, "Row:", &self.row_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::Col => {
+                        self.render_textarea_compact(field_id, "Col:", &self.col_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::Rows => {
+                        self.render_textarea_compact(field_id, "Rows:", &self.rows_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::Cols => {
+                        self.render_textarea_compact(field_id, "Cols:", &self.cols_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::MinRows => {
+                        self.render_textarea_compact(field_id, "Min Rows:", &self.min_rows_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::MinCols => {
+                        self.render_textarea_compact(field_id, "Min Cols:", &self.min_cols_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::MaxRows => {
+                        self.render_textarea_compact(field_id, "Max Rows:", &self.max_rows_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::MaxCols => {
+                        self.render_textarea_compact(field_id, "Max Cols:", &self.max_cols_input, x, y, 8, buf, theme, is_current);
+                    }
+                    FieldRef::BgColor => {
+                        self.render_color_field(field_id, "BG Color:", &self.bg_color_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderColor => {
+                        self.render_color_field(field_id, "Border Color:", &self.border_color_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderStyle => {
+                        self.render_dropdown_compact(field_id, "Style:", &self.window_def.base().border_style, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::Streams => {
+                        self.render_textarea_compact(field_id, "Streams:", &self.streams_input, x, y, 20, buf, theme, is_current);
+                    }
+                    FieldRef::TextColor => {
+                        self.render_color_field(field_id, "Text Color:", &self.text_color_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::CursorColor => {
+                        self.render_color_field(field_id, "Cursor FG:", &self.cursor_color_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::CursorBg => {
+                        self.render_color_field(field_id, "Cursor BG:", &self.cursor_bg_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::ShowTitle => {
+                        self.render_checkbox_compact(field_id, "Show Title", self.window_def.base().show_title, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::Locked => {
+                        self.render_checkbox_compact(field_id, "Locked", self.window_def.base().locked, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::TransparentBg => {
+                        self.render_checkbox_compact(field_id, "Transparent BG", self.window_def.base().transparent_background, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::ShowBorder => {
+                        self.render_checkbox_compact(field_id, "Show Border", self.window_def.base().show_border, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderTop => {
+                        self.render_checkbox_compact(field_id, "Top Border", self.window_def.base().border_sides.top, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderBottom => {
+                        self.render_checkbox_compact(field_id, "Bottom Border", self.window_def.base().border_sides.bottom, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderLeft => {
+                        self.render_checkbox_compact(field_id, "Left Border", self.window_def.base().border_sides.left, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::BorderRight => {
+                        self.render_checkbox_compact(field_id, "Right Border", self.window_def.base().border_sides.right, x, y, buf, theme, is_current);
+                    }
+                }
+                y += 1;
+            }
         }
+    }
+
+    /// Render a text input field (compact format for section-based layout)
+    fn render_textarea_compact(
+        &self,
+        field_id: usize,
+        label: &str,
+        textarea: &TextArea,
+        x: u16,
+        y: u16,
+        width: usize,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = if is_current {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        };
+
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+        buf.set_string(x + 2, y, label, Style::default().fg(label_color));
+
+        let value = if textarea.lines().is_empty() {
+            ""
+        } else {
+            &textarea.lines()[0]
+        };
+        let text_color = if is_current {
+            theme.cursor_color
+        } else {
+            theme.text_color
+        };
+        let input_x = x + 2 + label.len() as u16 + 1;
+        buf.set_string(input_x, y, value, Style::default().fg(text_color));
+    }
+
+    /// Render a color field with preview
+    fn render_color_field(
+        &self,
+        field_id: usize,
+        label: &str,
+        textarea: &TextArea,
+        x: u16,
+        y: u16,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        self.render_textarea_compact(field_id, label, textarea, x, y, 10, buf, theme, is_current);
+
+        let value = if textarea.lines().is_empty() {
+            ""
+        } else {
+            &textarea.lines()[0]
+        };
+        let preview_x = x + 2 + label.len() as u16 + 1 + 10;
+        self.render_color_preview(value, preview_x, y, buf, theme);
+    }
+
+    /// Render a checkbox field (compact format)
+    fn render_checkbox_compact(
+        &self,
+        field_id: usize,
+        label: &str,
+        checked: bool,
+        x: u16,
+        y: u16,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = if is_current {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        };
+
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+
+        let checkbox = if checked { "[✓]" } else { "[ ]" };
+        buf.set_string(x + 2, y, checkbox, Style::default().fg(label_color));
+        buf.set_string(x + 5, y, label, Style::default().fg(label_color));
+    }
+
+    /// Render a dropdown field (compact format)
+    fn render_dropdown_compact(
+        &self,
+        field_id: usize,
+        label: &str,
+        value: &str,
+        x: u16,
+        y: u16,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = if is_current {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        };
+
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+        buf.set_string(x + 2, y, label, Style::default().fg(label_color));
+
+        let display = format!("{} ▼", value);
+        let input_x = x + 2 + label.len() as u16 + 1;
+        buf.set_string(input_x, y, &display, Style::default().fg(theme.text_color));
     }
 
     fn render_textarea(
