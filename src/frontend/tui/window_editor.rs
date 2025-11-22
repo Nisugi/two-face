@@ -87,6 +87,7 @@ impl FieldRef {
 }
 
 /// A section of related fields in the window editor
+#[derive(Clone)]
 struct WindowSection {
     name: &'static str,
     fields: Vec<FieldRef>,
@@ -160,8 +161,8 @@ impl WindowEditor {
         ta
     }
 
-    /// Build the 5 sections based on widget type
-    fn build_sections(is_command_input: bool) -> Vec<WindowSection> {
+    /// Helper function to build common sections
+    fn build_standard_sections() -> Vec<WindowSection> {
         vec![
             // Section 1: Identity
             WindowSection {
@@ -201,20 +202,60 @@ impl WindowEditor {
                     FieldRef::BorderRight,
                 ],
             },
-            // Section 5: Special (widget-specific)
-            WindowSection {
-                name: "Special",
-                fields: if is_command_input {
-                    vec![
-                        FieldRef::TextColor,
-                        FieldRef::CursorColor,
-                        FieldRef::CursorBg,
-                    ]
-                } else {
-                    vec![FieldRef::Streams]
-                },
-            },
         ]
+    }
+
+    /// Build the 5 sections based on widget type
+    fn build_sections(is_command_input: bool) -> Vec<WindowSection> {
+        let mut sections = Self::build_standard_sections();
+
+        // Section 5: Special (widget-specific)
+        sections.push(WindowSection {
+            name: "Special",
+            fields: if is_command_input {
+                vec![
+                    FieldRef::TextColor,
+                    FieldRef::CursorColor,
+                    FieldRef::CursorBg,
+                ]
+            } else {
+                vec![FieldRef::Streams]
+            },
+        });
+
+        sections
+    }
+
+    /// Build sections based on widget type string
+    /// For spacer widgets, excludes the Border section
+    /// For other widgets, includes all 5 sections
+    fn build_sections_for_widget(widget_type: String) -> Vec<WindowSection> {
+        let is_spacer = widget_type.to_lowercase() == "spacer";
+        let is_command_input = widget_type.to_lowercase() == "command_input";
+
+        let mut sections = if is_spacer {
+            // Spacers: skip Border section, keep first 3
+            Self::build_standard_sections()[..3].to_vec()
+        } else {
+            // Other widgets: include Border section (all 4)
+            Self::build_standard_sections()
+        };
+
+        // Section 5: Special (widget-specific)
+        sections.push(WindowSection {
+            name: "Special",
+            fields: if is_command_input {
+                vec![
+                    FieldRef::TextColor,
+                    FieldRef::CursorColor,
+                    FieldRef::CursorBg,
+                ]
+            } else {
+                vec![FieldRef::Streams]
+            },
+        });
+
+        sections
     }
 
     /// Build the global fields list for Tab navigation
@@ -504,6 +545,21 @@ impl WindowEditor {
             is_new: true,
             status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+S: Save | Esc: Back/Cancel".to_string(),
         }
+    }
+
+    /// Create a new window editor with auto-naming for spacer widgets
+    /// Uses AppCore::generate_spacer_name() to auto-populate the name field for spacers
+    pub fn new_window_with_layout(widget_type: String, layout: &crate::config::Layout) -> Self {
+        let mut editor = Self::new_window(widget_type.clone());
+
+        // If this is a spacer widget, auto-generate the name
+        if widget_type.to_lowercase() == "spacer" {
+            let auto_name = crate::core::app_core::AppCore::generate_spacer_name(layout);
+            // Clear the name input (which starts empty) and insert the auto-generated name
+            editor.name_input.insert_str(&auto_name);
+        }
+
+        editor
     }
 
     fn is_command_input(&self) -> bool {
@@ -1353,5 +1409,97 @@ impl WindowEditor {
         let input_x = x + label.len() as u16 + 1;
         let display = format!("{} ▼", value);
         buf.set_string(input_x, y, &display, Style::default().fg(theme.text_color));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Layout, SpacerWidgetData};
+
+    #[test]
+    fn test_new_window_spacer_auto_naming_empty_layout() {
+        // RED: Test that new_window_with_layout generates auto-name for spacer in empty layout
+        let layout = Layout {
+            windows: vec![],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let editor = WindowEditor::new_window_with_layout("spacer".to_string(), &layout);
+        let lines = editor.name_input.lines();
+        let name = if !lines.is_empty() { &lines[0] } else { "" };
+        assert_eq!(name, "spacer_1");
+    }
+
+    #[test]
+    fn test_new_window_spacer_auto_naming_existing_spacers() {
+        // RED: Test that new_window_with_layout generates next sequential name
+        let spacer1 = WindowDef::Spacer {
+            base: crate::config::WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 0,
+                rows: 2,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: crate::config::BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let layout = Layout {
+            windows: vec![spacer1],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let editor = WindowEditor::new_window_with_layout("spacer".to_string(), &layout);
+        let lines = editor.name_input.lines();
+        let name = if !lines.is_empty() { &lines[0] } else { "" };
+        assert_eq!(name, "spacer_2");
+    }
+
+    #[test]
+    fn test_build_sections_excludes_border_for_spacer() {
+        // RED: Test that build_sections_for_widget returns sections without Border for spacer
+        let sections = WindowEditor::build_sections_for_widget("spacer".to_string());
+
+        // Should have 4 sections (Identity, Position&Size, Constraints, Special) - NO Border
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].name, "Identity");
+        assert_eq!(sections[1].name, "Position & Size");
+        assert_eq!(sections[2].name, "Constraints");
+        assert_eq!(sections[3].name, "Special");
+
+        // Verify Border section is not present
+        assert!(!sections.iter().any(|s| s.name == "Border"));
+    }
+
+    #[test]
+    fn test_build_sections_includes_border_for_text_widget() {
+        // RED: Test that build_sections_for_widget includes Border for non-spacer widgets
+        let sections = WindowEditor::build_sections_for_widget("text".to_string());
+
+        // Should have 5 sections including Border
+        assert_eq!(sections.len(), 5);
+        assert!(sections.iter().any(|s| s.name == "Border"));
     }
 }

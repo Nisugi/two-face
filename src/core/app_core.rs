@@ -1318,6 +1318,33 @@ impl AppCore {
             .collect()
     }
 
+    /// Generate a unique spacer widget name based on existing spacers in layout
+    /// Uses max number + 1 algorithm, checking ALL widgets including hidden ones
+    /// Pattern: spacer_1, spacer_2, spacer_3, etc.
+    pub fn generate_spacer_name(layout: &Layout) -> String {
+        let max_number = layout
+            .windows
+            .iter()
+            .filter_map(|w| {
+                // Only consider spacer widgets
+                match w {
+                    crate::config::WindowDef::Spacer { base, .. } => {
+                        // Extract number from name like "spacer_5"
+                        if let Some(num_str) = base.name.strip_prefix("spacer_") {
+                            num_str.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        format!("spacer_{}", max_number + 1)
+    }
+
     /// List all loaded highlights
     fn list_highlights(&mut self) {
         let count = self.config.highlights.len();
@@ -3760,5 +3787,218 @@ impl AppCore {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Layout, WindowBase, WindowDef, SpacerWidgetData, BorderSides};
+
+    // Test helper to create a minimal WindowBase
+    fn test_window_base(name: &str) -> WindowBase {
+        WindowBase {
+            name: name.to_string(),
+            row: 0,
+            col: 0,
+            rows: 2,
+            cols: 5,
+            show_border: false,
+            border_style: "single".to_string(),
+            border_sides: BorderSides::default(),
+            border_color: None,
+            show_title: false,
+            title: None,
+            background_color: None,
+            text_color: None,
+            transparent_background: true,
+            locked: false,
+            min_rows: None,
+            max_rows: None,
+            min_cols: None,
+            max_cols: None,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn test_generate_spacer_name_empty_layout() {
+        // RED: With no spacers, should return spacer_1
+        let layout = Layout {
+            windows: vec![],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_1");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_single_spacer() {
+        // RED: With one spacer_1, should return spacer_2
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_2");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_multiple_spacers() {
+        // RED: With spacer_1, spacer_2, spacer_3, should return spacer_4
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let spacer2 = WindowDef::Spacer {
+            base: test_window_base("spacer_2"),
+            data: SpacerWidgetData {},
+        };
+        let spacer3 = WindowDef::Spacer {
+            base: test_window_base("spacer_3"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1, spacer2, spacer3],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_4");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_with_gaps() {
+        // RED: With spacer_1 and spacer_3 (gap at 2), should return spacer_4 (max + 1)
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let spacer3 = WindowDef::Spacer {
+            base: test_window_base("spacer_3"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1, spacer3],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_4");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_ignores_non_spacers() {
+        // RED: Non-spacer widgets should be ignored
+        let text_widget = WindowDef::Text {
+            base: test_window_base("main"),
+            data: crate::config::TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![text_widget, spacer1],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_2");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_with_hidden_spacers() {
+        // RED: Hidden spacers should be considered (widgets can be hidden, not deleted)
+        let mut visible_base = test_window_base("spacer_1");
+        visible_base.visible = true;
+
+        let mut hidden_base = test_window_base("spacer_2");
+        hidden_base.visible = false;
+
+        let visible_spacer = WindowDef::Spacer {
+            base: visible_base,
+            data: SpacerWidgetData {},
+        };
+        let hidden_spacer = WindowDef::Spacer {
+            base: hidden_base,
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![visible_spacer, hidden_spacer],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_3");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_non_sequential() {
+        // RED: With spacer_2, spacer_5 (max is 5), should return spacer_6
+        let spacer2 = WindowDef::Spacer {
+            base: test_window_base("spacer_2"),
+            data: SpacerWidgetData {},
+        };
+        let spacer5 = WindowDef::Spacer {
+            base: test_window_base("spacer_5"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer2, spacer5],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_6");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_large_numbers() {
+        // RED: Should handle large numbers correctly
+        let spacer99 = WindowDef::Spacer {
+            base: test_window_base("spacer_99"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer99],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_100");
     }
 }
