@@ -1821,294 +1821,231 @@ impl AppCore {
         static_both: &std::collections::HashSet<String>,
         static_height: &std::collections::HashSet<String>,
     ) {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
+
         if height_delta == 0 {
             return;
         }
 
-        tracing::debug!("--- HEIGHT SCALING ---");
+        tracing::debug!("--- HEIGHT SCALING (VellumFE COLUMN-BY-COLUMN) ---");
+        tracing::debug!("height_delta={}", height_delta);
 
-        let mut height_applied = HashSet::new();
+        // PHASE 1: Calculate height deltas column-by-column
+        let mut height_deltas: HashMap<String, i32> = HashMap::new();
 
-        // Build list of ALL widgets that participate in column stacks
-        // Include static_both + static_height + scalable for natural cascading
-        // Everything flows together - no special cases, no gap preservation
-        let mut scalable_widgets: Vec<(String, u16, u16, u16, u16)> = Vec::new();
-        for window_def in &self.layout.windows {
-            let base = window_def.base();
-            scalable_widgets.push((base.name.clone(), base.row, base.rows, base.col, base.cols));
-        }
+        // Find max column
+        let max_col = self.layout.windows.iter()
+            .map(|w| {
+                let base = w.base();
+                base.col + base.cols
+            })
+            .max()
+            .unwrap_or(0);
 
-        while !scalable_widgets.is_empty() {
-            let anchor = scalable_widgets.remove(0);
-            let (anchor_name, anchor_row, anchor_rows, anchor_col, anchor_cols) = anchor;
-            if height_applied.contains(&anchor_name) {
+        tracing::debug!("Processing columns 0..{}", max_col);
+
+        // Column-by-column: Calculate height deltas
+        for current_col in 0..max_col {
+            // Find UNPROCESSED windows that occupy this column
+            let mut windows_at_col: Vec<String> = Vec::new();
+            for window_def in &self.layout.windows {
+                let base = window_def.base();
+                // Skip if already has delta (VellumFE-compatible: only process each window once)
+                if height_deltas.contains_key(&base.name) {
+                    continue;
+                }
+                if base.col <= current_col && base.col + base.cols > current_col {
+                    windows_at_col.push(base.name.clone());
+                }
+            }
+
+            if windows_at_col.is_empty() {
                 continue;
             }
 
-            let anchor_col_end = anchor_col + anchor_cols;
-            tracing::debug!(
-                "Processing column stack anchored by '{}' (col {}-{})",
-                anchor_name,
-                anchor_col,
-                anchor_col_end
-            );
+            tracing::debug!("Column {}: {} windows present", current_col, windows_at_col.len());
 
-            let mut widgets_in_col =
-                vec![(anchor_name.clone(), anchor_row, anchor_rows, anchor_cols)];
-            scalable_widgets.retain(|(name, row, rows, col, cols)| {
-                let col_end = *col + *cols;
-                let overlaps = *col < anchor_col_end && col_end > anchor_col;
-                if overlaps {
-                    // Include ALL overlapping windows (even if already processed)
-                    // This ensures correct proportional calculations
-                    widgets_in_col.push((name.clone(), *row, *rows, *cols));
-                    false
-                } else {
-                    true
+            // Calculate total scalable height (only UNPROCESSED non-static windows)
+            let mut total_scalable_height = 0u16;
+            for window_name in &windows_at_col {
+                // Skip if static
+                if static_both.contains(window_name.as_str()) || static_height.contains(window_name.as_str()) {
+                    continue;
                 }
-            });
 
-            // Sort by row and distribute proportionally
-            widgets_in_col.sort_by_key(|(_, row, _, _)| *row);
-
-            // Calculate total height of ONLY truly scalable windows
-            // Exclude static_both and static_height since they don't resize
-            let total_scalable_height: u16 = widgets_in_col
-                .iter()
-                .filter(|(name, _, _, _)| {
-                    !static_height.contains(name.as_str()) && !static_both.contains(name.as_str())
-                })
-                .map(|(_, _, rows, _)| *rows)
-                .sum();
+                // Get window height (include ALL non-static windows)
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == window_name)
+                    .unwrap();
+                let base = window_def.base();
+                total_scalable_height += base.rows;
+            }
 
             if total_scalable_height == 0 {
                 continue;
             }
 
-            let mut adjustments: Vec<(String, i32)> = Vec::new();
-            let mut redistribution_pool = 0i32;
-            let mut leftover = height_delta;
+            tracing::debug!("  Total scalable height at column {}: {}", current_col, total_scalable_height);
 
-            tracing::debug!(
-                "HEIGHT DISTRIBUTION (col {}-{}): height_delta={}, total_scalable_height={}",
-                anchor_col,
-                anchor_col_end,
-                height_delta,
-                total_scalable_height
-            );
-
-            // Calculate proportions for ALL scalable windows (including already-processed ones)
-            // This ensures consistent proportions across all column stacks
-            // static_both and static_height get adjustment of 0 but cascade
-            for (name, _row, rows, _cols) in &widgets_in_col {
-                // Skip static windows - they don't resize, but cascade in position
-                if static_height.contains(name.as_str()) || static_both.contains(name.as_str()) {
-                    let widget_type = if static_both.contains(name.as_str()) {
-                        "static_both"
-                    } else {
-                        "static_height"
-                    };
-                    tracing::debug!(
-                        "  {} (rows={}): {}, no adjustment (will cascade)",
-                        name,
-                        rows,
-                        widget_type
-                    );
+            // Distribute height_delta proportionally
+            for window_name in &windows_at_col {
+                // Handle static windows
+                if static_both.contains(window_name.as_str()) || static_height.contains(window_name.as_str()) {
+                    if !height_deltas.contains_key(window_name) {
+                        tracing::debug!("    {} is static, recording 0 delta", window_name);
+                        height_deltas.insert(window_name.clone(), 0);
+                    }
                     continue;
                 }
 
-                let proportion = *rows as f64 / total_scalable_height as f64;
-                let share = (proportion * height_delta as f64).floor() as i32;
-
-                // Only add to adjustments if NOT already processed
-                // (we calculate for all, but only apply to unprocessed)
-                if !height_applied.contains(name) {
-                    leftover -= share;
-                    adjustments.push((name.clone(), share));
-                    tracing::debug!(
-                        "  {} (rows={}): proportion={:.4}, share={} (will apply)",
-                        name,
-                        rows,
-                        proportion,
-                        share
-                    );
-                } else {
-                    tracing::debug!(
-                        "  {} (rows={}): proportion={:.4}, share={} (already applied, skipping)",
-                        name,
-                        rows,
-                        proportion,
-                        share
-                    );
-                }
-            }
-
-            tracing::debug!("  Leftover after proportional distribution: {}", leftover);
-
-            // Distribute leftover (one row at a time to first windows)
-            let mut idx = 0;
-            while leftover > 0 && idx < adjustments.len() {
-                adjustments[idx].1 += 1;
-                tracing::debug!("  Distributing +1 leftover row to {}", adjustments[idx].0);
-                leftover -= 1;
-                idx += 1;
-            }
-            while leftover < 0 && idx < adjustments.len() {
-                adjustments[idx].1 -= 1;
-                tracing::debug!("  Distributing -1 leftover row to {}", adjustments[idx].0);
-                leftover += 1;
-                idx += 1;
-            }
-
-            // Check for max_rows constraints and redistribute unused adjustments
-            let mut capped_widgets = HashSet::new();
-            for (name, adjustment) in &adjustments {
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
+                // Calculate proportional delta for this window at this column
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == window_name)
                     .unwrap();
                 let base = window_def.base();
-                if let Some(max_rows) = base.max_rows {
-                    let current_rows = base.rows;
-                    let target_rows = (current_rows as i32 + adjustment).max(0) as u16;
-                    if target_rows > max_rows {
-                        let actual_adjustment = (max_rows as i32 - current_rows as i32).max(0);
-                        let unused = adjustment - actual_adjustment;
-                        redistribution_pool += unused;
-                        capped_widgets.insert(name.clone());
-                        tracing::debug!(
-                            "  {} capped at max_rows={}, unused adjustment={} added to pool",
-                            name,
-                            max_rows,
-                            unused
-                        );
-                    }
-                }
-            }
+                let proportion = base.rows as f64 / total_scalable_height as f64;
+                let delta = (proportion * height_delta as f64).floor() as i32;
 
-            // Redistribute unused adjustments to non-capped windows
-            if redistribution_pool != 0 {
-                let recipients: Vec<_> = adjustments
-                    .iter()
-                    .map(|(n, _)| n.clone())
-                    .filter(|n| !capped_widgets.contains(n))
-                    .collect();
-                let recip_count = recipients.len() as i32;
-                if recip_count > 0 {
-                    let each = redistribution_pool / recip_count;
-                    let mut remainder = redistribution_pool % recip_count;
-                    tracing::debug!(
-                        "  Redistributing {} rows to {} recipients (each={}, remainder={})",
-                        redistribution_pool,
-                        recip_count,
-                        each,
-                        remainder
-                    );
-                    for (name, adj) in &mut adjustments {
-                        if !capped_widgets.contains(name) {
-                            let before = *adj;
-                            *adj += each;
-                            if remainder != 0 {
-                                *adj += remainder.signum();
-                                remainder -= remainder.signum();
-                            }
-                            tracing::debug!(
-                                "    {} receives redistribution: {} -> {}",
-                                name,
-                                before,
-                                *adj
-                            );
-                        }
-                    }
-                    redistribution_pool = 0;
-                }
-            }
-
-            tracing::debug!("  Final adjustments:");
-            for (name, delta) in &adjustments {
-                let orig_rows = widgets_in_col
-                    .iter()
-                    .find(|(n, _, _, _)| n == name)
-                    .map(|(_, _, r, _)| *r)
-                    .unwrap_or(0);
+                // Record delta (all windows in list are unprocessed)
+                height_deltas.insert(window_name.clone(), delta);
                 tracing::debug!(
-                    "    {}: {} rows -> +{} delta -> {} rows",
-                    name,
-                    orig_rows,
-                    delta,
-                    orig_rows as i32 + delta
+                    "    {} (rows={}): proportion={:.4}, delta={}",
+                    window_name,
+                    base.rows,
+                    proportion,
+                    delta
                 );
             }
+        }
 
-            let mut current_row = 0u16;
-            for (idx, (name, orig_row, orig_rows, _cols)) in widgets_in_col.iter().enumerate() {
-                if height_applied.contains(name) {
-                    continue;
-                }
-                let adjustment = adjustments
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, a)| *a)
-                    .unwrap_or(0);
+        tracing::debug!("Height deltas calculated for {} windows", height_deltas.len());
 
-                // Find window and get widget type
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
+        // Distribute leftover rows (VellumFE-compatible)
+        // Calculate how much was actually distributed
+        let total_distributed: i32 = height_deltas.values().sum();
+        let mut leftover = height_delta - total_distributed;
+
+        if leftover != 0 {
+            tracing::debug!("Height leftover after proportional distribution: {} rows", leftover);
+
+            // Sort windows by row for consistent leftover distribution (top to bottom)
+            let mut window_names: Vec<String> = height_deltas.keys()
+                .filter(|name| {
+                    // Only distribute to non-static windows
+                    !static_both.contains(name.as_str()) && !static_height.contains(name.as_str())
+                })
+                .cloned()
+                .collect();
+
+            window_names.sort_by_key(|name| {
+                self.layout.windows.iter()
                     .find(|w| w.name() == name)
+                    .map(|w| w.base().row)
+                    .unwrap_or(0)
+            });
+
+            // Distribute leftover one row at a time to first windows
+            let mut idx = 0;
+            while leftover > 0 && idx < window_names.len() {
+                let name = &window_names[idx];
+                if let Some(delta) = height_deltas.get_mut(name) {
+                    *delta += 1;
+                    tracing::debug!("  Distributing +1 leftover row to {}", name);
+                    leftover -= 1;
+                }
+                idx += 1;
+            }
+            while leftover < 0 && idx < window_names.len() {
+                let name = &window_names[idx];
+                if let Some(delta) = height_deltas.get_mut(name) {
+                    *delta -= 1;
+                    tracing::debug!("  Distributing -1 leftover row to {}", name);
+                    leftover += 1;
+                }
+                idx += 1;
+            }
+        }
+
+        // PHASE 2: Apply deltas with column-by-column cascading
+        tracing::debug!("Applying height deltas with column-by-column cascading...");
+
+        let mut height_applied = HashSet::new();
+        let max_col = self.layout.windows.iter()
+            .map(|w| {
+                let base = w.base();
+                base.col + base.cols
+            })
+            .max()
+            .unwrap_or(0);
+
+        // Process each column independently
+        for current_col in 0..max_col {
+            // Find windows that occupy this column and haven't been applied yet
+            let mut windows_at_col: Vec<(String, u16, u16)> = self.layout.windows.iter()
+                .filter(|w| {
+                    let base = w.base();
+                    let col_start = base.col;
+                    let col_end = base.col + base.cols;
+                    current_col >= col_start && current_col < col_end && !height_applied.contains(&base.name)
+                })
+                .map(|w| {
+                    let base = w.base();
+                    (base.name.clone(), base.row, base.rows)
+                })
+                .collect();
+
+            if windows_at_col.is_empty() {
+                continue;
+            }
+
+            // Sort by row (top to bottom)
+            windows_at_col.sort_by_key(|(_, row, _)| *row);
+
+            if current_col == 0 || current_col == 20 {  // Only log for interesting columns
+                tracing::debug!("Column {}: {} unapplied windows, cascading top-to-bottom", current_col, windows_at_col.len());
+            }
+
+            // Cascade within this column
+            let mut current_row = windows_at_col[0].1;  // Start at first window's row
+
+            for (window_name, original_row, original_rows) in windows_at_col {
+                let delta = height_deltas.get(&window_name).copied().unwrap_or(0);
+
+                // Get window for constraints
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == &window_name)
                     .unwrap();
-                let widget_type = window_def.widget_type();
                 let base = window_def.base();
+                let widget_type = window_def.widget_type();
                 let (_, min_rows) = self.widget_min_size(&widget_type);
                 let min_constraint = base.min_rows.unwrap_or(min_rows);
                 let max_constraint = base.max_rows;
 
-                let mut new_rows =
-                    (*orig_rows as i32 + adjustment).max(min_constraint as i32) as u16;
+                // Calculate new rows with constraints
+                let mut new_rows = (original_rows as i32 + delta).max(min_constraint as i32) as u16;
                 if let Some(max) = max_constraint {
                     new_rows = new_rows.min(max);
                 }
 
-                // Cascade from previous widget (VellumFE behavior)
-                let new_row = if idx == 0 {
-                    *orig_row  // First widget keeps original row
-                } else {
-                    current_row  // Cascade from previous widget
-                };
-
                 // Apply changes
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
                     let base = w.base_mut();
-                    base.row = new_row;
+                    base.row = current_row;
                     base.rows = new_rows;
-                    height_applied.insert(name.clone());
+                    height_applied.insert(window_name.clone());
+
+                    tracing::debug!(
+                        "  Col {}: {} row {} -> {}, rows {} -> {} (delta={})",
+                        current_col, window_name, original_row, current_row, original_rows, new_rows, delta
+                    );
                 }
 
-                current_row = new_row + new_rows;
+                // Next window starts where this one ends (cascading)
+                current_row += new_rows;
             }
         }
 
-        // Anchor command_input to bottom; build continuous top stack of statics
-        let new_height = if let Some(ref baseline) = self.baseline_layout {
-            if let (Some(_bw), Some(bh)) = (baseline.terminal_width, baseline.terminal_height) {
-                (bh as i32 + height_delta).max(0) as u16
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        // Snapshot baseline rows to avoid mixing updates while computing the stack
-        let baseline_rows: Vec<u16> = self.layout.windows.iter().map(|w| w.base().row).collect();
-
-        // All widgets (static_both, static_height, scalable) are now positioned
-        // as part of column stacks with natural cascading
-        // No additional positioning logic needed!
+        tracing::debug!("Height resize complete");
     }
 
     /// Apply proportional width resize (from VellumFE apply_width_resize)
@@ -2118,227 +2055,239 @@ impl AppCore {
         &mut self,
         width_delta: i32,
         static_both: &std::collections::HashSet<String>,
-        baseline_rows: &[(String, u16, u16)],
+        _baseline_rows: &[(String, u16, u16)],
     ) {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
+
         if width_delta == 0 {
             return;
         }
 
-        tracing::debug!("--- WIDTH SCALING ---");
+        tracing::debug!("--- WIDTH SCALING (VellumFE ROW-BY-ROW) ---");
+        tracing::debug!("width_delta={}", width_delta);
 
-        let mut width_applied = HashSet::new();
-        // Use baseline rows for max_row calculation
-        let max_row = baseline_rows
-            .iter()
-            .map(|(_, row, rows)| *row + *rows)
+        // PHASE 1: Calculate width deltas row-by-row
+        let mut width_deltas: HashMap<String, i32> = HashMap::new();
+
+        // Find max row
+        let max_row = self.layout.windows.iter()
+            .map(|w| {
+                let base = w.base();
+                base.row + base.rows
+            })
             .max()
             .unwrap_or(0);
 
+        tracing::debug!("Processing rows 0..{}", max_row);
+
+        // Row-by-row: Calculate width deltas
         for current_row in 0..max_row {
-            let mut widgets_at_row: Vec<(String, String, u16, u16, u16, u16)> = Vec::new();
+            // Find UNPROCESSED windows that occupy this row
+            let mut windows_at_row: Vec<String> = Vec::new();
             for window_def in &self.layout.windows {
                 let base = window_def.base();
-
-                // Use BASELINE row positions to group windows, not current (height-adjusted) positions
-                // This ensures windows that were on the same row originally are processed together
-                let (baseline_row, baseline_rows) = baseline_rows
-                    .iter()
-                    .find(|(name, _, _)| name == &base.name)
-                    .map(|(_, row, rows)| (*row, *rows))
-                    .unwrap_or((base.row, base.rows));
-
-                // Include ALL windows that touch this baseline row (even if already processed)
-                // This ensures correct proportional calculations across all rows
-                if current_row >= baseline_row && current_row < baseline_row + baseline_rows {
-                    widgets_at_row.push((
-                        base.name.clone(),
-                        window_def.widget_type().to_string(),
-                        baseline_row,  // Use baseline row for grouping
-                        base.col,
-                        baseline_rows,  // Use baseline rows for grouping
-                        base.cols,
-                    ));
-                }
-            }
-            if widgets_at_row.is_empty() {
-                continue;
-            }
-            widgets_at_row.sort_by_key(|(_, _, _, col, _, _)| *col);
-
-            let mut total_scalable_width: u16 = 0;
-            let mut embedded_widgets = HashSet::new();
-            for (i, (_name_i, _, _, col_i, _, cols_i)) in widgets_at_row.iter().enumerate() {
-                let col_i_end = *col_i + *cols_i;
-                for (j, (name_j, _, _, col_j, _, cols_j)) in widgets_at_row.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    let col_j_end = *col_j + *cols_j;
-                    if *col_j >= *col_i && col_j_end <= col_i_end {
-                        embedded_widgets.insert(name_j.clone());
-                    }
-                }
-            }
-            for (name, _, _, _col, _, cols) in widgets_at_row.iter() {
-                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+                // Skip if already has delta (VellumFE-compatible: only process each window once)
+                if width_deltas.contains_key(&base.name) {
                     continue;
                 }
-                // Include ALL windows in total, even if already processed (for correct proportions)
-                total_scalable_width += *cols;
+                if base.row <= current_row && base.row + base.rows > current_row {
+                    windows_at_row.push(base.name.clone());
+                }
             }
+
+            if windows_at_row.is_empty() {
+                continue;
+            }
+
+            tracing::debug!("Row {}: {} windows present", current_row, windows_at_row.len());
+
+            // Calculate total scalable width (only UNPROCESSED non-static windows)
+            let mut total_scalable_width = 0u16;
+            for window_name in &windows_at_row {
+                // Skip if static
+                if static_both.contains(window_name.as_str()) {
+                    continue;
+                }
+
+                // Get window width (include ALL non-static windows)
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == window_name)
+                    .unwrap();
+                let base = window_def.base();
+                total_scalable_width += base.cols;
+            }
+
             if total_scalable_width == 0 {
                 continue;
             }
 
-            let mut adjustments: Vec<(String, i32)> = Vec::new();
-            let mut redistribution_pool = 0i32;
-            let mut leftover = width_delta;
+            tracing::debug!("  Total scalable width at row {}: {}", current_row, total_scalable_width);
 
-            // Calculate proportions for ALL windows (including already-processed ones)
-            // This ensures consistent proportions across all rows
-            for (name, _wt, _row, _col, _rows, cols) in &widgets_at_row {
-                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+            // Distribute width_delta proportionally
+            for window_name in &windows_at_row {
+                // Handle static windows
+                if static_both.contains(window_name.as_str()) {
+                    if !width_deltas.contains_key(window_name) {
+                        tracing::debug!("    {} is static, recording 0 delta", window_name);
+                        width_deltas.insert(window_name.clone(), 0);
+                    }
                     continue;
                 }
-                let proportion = *cols as f64 / total_scalable_width as f64;
-                let share = (proportion * width_delta as f64).floor() as i32;
 
-                // Only add to adjustments if NOT already processed
-                // (we calculate for all, but only apply to unprocessed)
-                if !width_applied.contains(name) {
-                    leftover -= share;
-                    adjustments.push((name.clone(), share));
-                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (will apply)", name, cols, proportion, share);
-                } else {
-                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (already applied, skipping)", name, cols, proportion, share);
-                }
+                // Calculate proportional delta for this window at this row
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == window_name)
+                    .unwrap();
+                let base = window_def.base();
+                let proportion = base.cols as f64 / total_scalable_width as f64;
+                let delta = (proportion * width_delta as f64).floor() as i32;
+
+                // Record delta (all windows in list are unprocessed)
+                width_deltas.insert(window_name.clone(), delta);
+                tracing::debug!(
+                    "    {} (cols={}): proportion={:.4}, delta={}",
+                    window_name,
+                    base.cols,
+                    proportion,
+                    delta
+                );
             }
+        }
 
-            // Distribute leftover (one column at a time to first windows)
+        tracing::debug!("Width deltas calculated for {} windows", width_deltas.len());
+
+        // Distribute leftover columns (VellumFE-compatible)
+        // Calculate how much was actually distributed
+        let total_distributed: i32 = width_deltas.values().sum();
+        let mut leftover = width_delta - total_distributed;
+
+        if leftover != 0 {
+            tracing::debug!("Width leftover after proportional distribution: {} columns", leftover);
+
+            // Sort windows by column for consistent leftover distribution (left to right)
+            let mut window_names: Vec<String> = width_deltas.keys()
+                .filter(|name| {
+                    // Only distribute to non-static windows
+                    !static_both.contains(name.as_str())
+                })
+                .cloned()
+                .collect();
+
+            window_names.sort_by_key(|name| {
+                self.layout.windows.iter()
+                    .find(|w| w.name() == name)
+                    .map(|w| w.base().col)
+                    .unwrap_or(0)
+            });
+
+            // Distribute leftover one column at a time to first windows
             let mut idx = 0;
-            while leftover > 0 && idx < adjustments.len() {
-                adjustments[idx].1 += 1;
-                leftover -= 1;
+            while leftover > 0 && idx < window_names.len() {
+                let name = &window_names[idx];
+                if let Some(delta) = width_deltas.get_mut(name) {
+                    *delta += 1;
+                    tracing::debug!("  Distributing +1 leftover column to {}", name);
+                    leftover -= 1;
+                }
                 idx += 1;
             }
-            while leftover < 0 && idx < adjustments.len() {
-                adjustments[idx].1 -= 1;
-                leftover += 1;
+            while leftover < 0 && idx < window_names.len() {
+                let name = &window_names[idx];
+                if let Some(delta) = width_deltas.get_mut(name) {
+                    *delta -= 1;
+                    tracing::debug!("  Distributing -1 leftover column to {}", name);
+                    leftover += 1;
+                }
                 idx += 1;
             }
+        }
 
-            let mut capped_widgets = HashSet::new();
-            for (name, adjustment) in &adjustments {
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
-                    .unwrap();
-                let base = window_def.base();
-                if let Some(max_cols) = base.max_cols {
-                    let current_cols = base.cols;
-                    let target_cols = (current_cols as i32 + adjustment).max(0) as u16;
-                    if target_cols > max_cols {
-                        let actual_adjustment = (max_cols as i32 - current_cols as i32).max(0);
-                        let unused = adjustment - actual_adjustment;
-                        redistribution_pool += unused;
-                        capped_widgets.insert(name.clone());
-                    }
-                }
-            }
-            if redistribution_pool != 0 {
-                let recipients: Vec<_> = adjustments
-                    .iter()
-                    .map(|(n, _)| n.clone())
-                    .filter(|n| !capped_widgets.contains(n))
-                    .collect();
-                let recip_count = recipients.len() as i32;
-                if recip_count > 0 {
-                    let each = redistribution_pool / recip_count;
-                    let mut remainder = redistribution_pool % recip_count;
-                    for (name, adj) in &mut adjustments {
-                        if !capped_widgets.contains(name) {
-                            *adj += each;
-                            if remainder != 0 {
-                                *adj += remainder.signum();
-                                remainder -= remainder.signum();
-                            }
-                        }
-                    }
-                }
-            }
+        // PHASE 2: Apply deltas with cascading based on BASELINE row positions
+        tracing::debug!("Applying width deltas using baseline row groupings...");
 
-            let mut previous_original_col = 0u16;
-            let mut previous_original_width = 0u16;
-            let mut current_col = 0u16;
-            let mut first_widget_end = 0u16;
-            for (idx, (name, _wt, _row, orig_col, _rows, orig_cols)) in
-                widgets_at_row.iter().enumerate()
-            {
-                if width_applied.contains(name) {
-                    let window_def = self
-                        .layout
-                        .windows
-                        .iter()
+        let mut width_applied = HashSet::new();
+
+        // Group windows by their BASELINE row positions
+        // This ensures windows that were originally in the same row cascade together,
+        // even though height cascading has moved them to different rows
+        let mut baseline_row_groups: std::collections::HashMap<u16, Vec<String>> = std::collections::HashMap::new();
+        for (name, baseline_row, _baseline_rows) in _baseline_rows {
+            baseline_row_groups.entry(*baseline_row)
+                .or_insert_with(Vec::new)
+                .push(name.clone());
+        }
+
+        // Sort baseline rows to process top to bottom
+        let mut sorted_baseline_rows: Vec<u16> = baseline_row_groups.keys().copied().collect();
+        sorted_baseline_rows.sort();
+
+        // Process each baseline row group independently
+        for baseline_row in sorted_baseline_rows {
+            let window_names = baseline_row_groups.get(&baseline_row).unwrap();
+
+            // Find unapplied windows from this baseline row group
+            let mut windows_at_row: Vec<(String, u16, u16)> = window_names.iter()
+                .filter(|name| !width_applied.contains(*name))
+                .filter_map(|name| {
+                    self.layout.windows.iter()
                         .find(|w| w.name() == name)
-                        .unwrap();
-                    let base = window_def.base();
-                    // Update tracking vars for already-processed windows
-                    previous_original_col = *orig_col;
-                    previous_original_width = *orig_cols;
-                    current_col = base.col + base.cols;
-                    continue;
-                }
-                let adjustment = adjustments
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, a)| *a)
-                    .unwrap_or(0);  // static_both gets 0 adjustment
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
+                        .map(|w| {
+                            let base = w.base();
+                            (base.name.clone(), base.col, base.cols)
+                        })
+                })
+                .collect();
+
+            if windows_at_row.is_empty() {
+                continue;
+            }
+
+            // Sort by column (left to right)
+            windows_at_row.sort_by_key(|(_, col, _)| *col);
+
+            tracing::debug!("Baseline row {}: {} unapplied windows, cascading left-to-right", baseline_row, windows_at_row.len());
+
+            // Cascade within this baseline row group
+            let mut current_col = windows_at_row[0].1;  // Start at first window's column
+
+            for (window_name, original_col, original_cols) in windows_at_row {
+                let delta = width_deltas.get(&window_name).copied().unwrap_or(0);
+
+                // Get window for constraints
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == &window_name)
                     .unwrap();
                 let base = window_def.base();
-                let (min_cols, _) = self.widget_min_size(&window_def.widget_type());
+                let widget_type = window_def.widget_type();
+                let (min_cols, _) = self.widget_min_size(&widget_type);
                 let min_constraint = base.min_cols.unwrap_or(min_cols);
                 let max_constraint = base.max_cols;
-                let mut new_cols =
-                    (*orig_cols as i32 + adjustment).max(min_constraint as i32) as u16;
+
+                // Calculate new cols with constraints
+                let mut new_cols = (original_cols as i32 + delta).max(min_constraint as i32) as u16;
                 if let Some(max) = max_constraint {
                     new_cols = new_cols.min(max);
                 }
-                if idx == 0 {
-                    first_widget_end = *orig_col + *orig_cols;
-                }
-                let overlaps_first = idx > 0 && *orig_col < first_widget_end;
-                let overlaps_previous = if idx == 0 {
-                    false
-                } else {
-                    *orig_col < previous_original_col + previous_original_width
-                };
-                let new_col = if idx == 0 || overlaps_previous || overlaps_first {
-                    *orig_col
-                } else {
-                    let original_gap =
-                        orig_col.saturating_sub(previous_original_col + previous_original_width);
-                    current_col + original_gap
-                };
 
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
-                    let base_mut = w.base_mut();
-                    base_mut.col = new_col;
-                    base_mut.cols = new_cols;
-                    width_applied.insert(name.clone());
+                // Apply changes
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
+                    let base = w.base_mut();
+                    base.col = current_col;
+                    base.cols = new_cols;
+                    width_applied.insert(window_name.clone());
+
+                    tracing::debug!(
+                        "  Baseline row {}: {} col {} -> {}, cols {} -> {} (delta={})",
+                        baseline_row, window_name, original_col, current_col, original_cols, new_cols, delta
+                    );
                 }
-                previous_original_col = *orig_col;
-                previous_original_width = *orig_cols;
-                current_col = new_col + new_cols;
+
+                // Next window starts where this one ends (cascading)
+                current_col += new_cols;
             }
         }
+
+        tracing::debug!("Width resize complete");
     }
 
     /// Sync layout WindowDefs to ui_state WindowStates without destroying content

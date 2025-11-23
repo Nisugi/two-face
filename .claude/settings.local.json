@@ -1,10 +1,15 @@
 {
+  "enabledMcpjsonServers": [
+    "context7"
+  ],
   "_meta": {
     "description": "User-specific Claude Code settings (gitignored - never commit)",
     "created_at": "2025-11-21T12:45:16.888233Z",
     "note": "Edit this file to customize your local development environment"
   },
-  "enabledMcpjsonServers": [
-    "context7"
-  ]
+  "permissions": {
+    "allow": [
+      "Bash(cargo test:*)"
+    ]
+  }
 }

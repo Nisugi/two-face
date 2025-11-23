@@ -1537,7 +1537,7 @@ fn default_cancel() -> String {
     "Esc".to_string()
 }
 fn default_save() -> String {
-    "Ctrl+S".to_string()
+    "Ctrl+s".to_string()
 }
 fn default_delete() -> String {
     "Delete".to_string()
@@ -2215,28 +2215,16 @@ impl Layout {
                 {
                     if curr_width != layout_width || curr_height != layout_height {
                         tracing::info!(
-                            "Terminal size changed from {}x{} to {}x{}, scaling from base layout",
+                            "Terminal size changed from {}x{} to {}x{}, scaling current layout (preserving user customizations like spacers)",
                             layout_width,
                             layout_height,
                             curr_width,
                             curr_height
                         );
 
-                        // Try to load base layout for accurate scaling
-                        let base_path = shared_layouts_dir.join(format!("{}.toml", base_name));
-                        if base_path.exists() {
-                            match Self::load_from_file(&base_path) {
-                                Ok(base_layout) => {
-                                    tracing::info!("Scaling from base layout '{}'", base_name);
-                                    layout = base_layout;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to load base layout '{}': {}, using auto layout as base", base_name, e);
-                                }
-                            }
-                        }
-
-                        // Scale to current terminal size
+                        // DO NOT load base layout - it would overwrite user customizations!
+                        // The current layout (with spacers and other customizations) is the correct baseline
+                        // Scale the CURRENT layout to the new terminal size
                         layout.scale_to_terminal_size(curr_width, curr_height);
                     }
                 }
@@ -2419,6 +2407,16 @@ impl Layout {
     /// Saves to: ~/.two-face/default/layouts/{name}.toml
     /// Normalize windows before saving - convert None colors back to "-" to preserve transparency
     fn normalize_windows_for_save(&mut self) {
+        // Sort windows: spacers last, others maintain relative order
+        // This prevents spacers from appearing first in TOML and overlapping during resize
+        self.windows.sort_by_key(|w| {
+            if w.widget_type() == "spacer" {
+                1 // Spacers go last
+            } else {
+                0 // All other windows maintain order
+            }
+        });
+
         for window in &mut self.windows {
             // Convert None to Some("-") for color fields to preserve transparency setting
             let normalize = |field: &mut Option<String>| {
@@ -2534,6 +2532,33 @@ impl Layout {
     }
 
     /// Add a window to the layout (from template or make visible if exists)
+    /// Generate a unique spacer widget name based on existing spacers in layout
+    /// Uses max number + 1 algorithm, checking ALL widgets including hidden ones
+    /// Pattern: spacer_1, spacer_2, spacer_3, etc.
+    pub fn generate_spacer_name(&self) -> String {
+        let max_number = self
+            .windows
+            .iter()
+            .filter_map(|w| {
+                // Only consider spacer widgets
+                match w {
+                    WindowDef::Spacer { base, .. } => {
+                        // Extract number from name like "spacer_5"
+                        if let Some(num_str) = base.name.strip_prefix("spacer_") {
+                            num_str.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        format!("spacer_{}", max_number + 1)
+    }
+
     pub fn add_window(&mut self, name: &str) -> Result<()> {
         // Check if window already exists in layout
         if let Some(existing) = self.windows.iter_mut().find(|w| w.name() == name) {
@@ -2546,6 +2571,13 @@ impl Layout {
         // Get template
         let mut window_def = Config::get_window_template(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown window template: {}", name))?;
+
+        // Special handling for spacer: auto-generate unique name
+        if name == "spacer" {
+            let auto_name = self.generate_spacer_name();
+            window_def.base_mut().name = auto_name.clone();
+            tracing::info!("Auto-generated spacer name: {}", auto_name);
+        }
 
         // Set visible
         window_def.base_mut().visible = true;
@@ -3271,10 +3303,10 @@ impl Config {
                 base: WindowBase {
                     name: String::new(), // Will be set by caller with auto-generated name
                     rows: 2,
-                    cols: 5,
+                    cols: 2,
                     show_border: false, // Spacers never show borders
                     show_title: false, // Spacers never show titles
-                    transparent_background: true,
+                    transparent_background: false, // Respects theme background color
                     ..base_defaults
                 },
                 data: SpacerWidgetData {},
@@ -3968,9 +4000,9 @@ mod tests {
             // Name should be empty (will be set by caller)
             assert_eq!(base.name, "");
 
-            // Dimensions - minimal 2x5 spacer
+            // Dimensions - minimal 2x2 spacer
             assert_eq!(base.rows, 2);
-            assert_eq!(base.cols, 5);
+            assert_eq!(base.cols, 2);
 
             // Spacer should NOT show borders
             assert!(!base.show_border);
@@ -3978,8 +4010,8 @@ mod tests {
             // Spacer should NOT show title
             assert!(!base.show_title);
 
-            // Should be transparent by default
-            assert!(base.transparent_background);
+            // Should NOT be transparent (respects theme background color)
+            assert!(!base.transparent_background);
 
             // Should be visible
             assert!(base.visible);
