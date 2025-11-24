@@ -8,8 +8,8 @@ Two-Face implements the VellumFE resize algorithm for automatic, proportional wi
 
 The VellumFE algorithm is based on three fundamental principles:
 
-1. **Row-by-Row Height Calculation**: Process each terminal row independently to calculate height deltas
-2. **Column-by-Column Width Calculation**: Process each terminal column independently to calculate width deltas
+1. **Column-by-Column Height Calculation**: Process each terminal column independently to calculate height deltas
+2. **Row-by-Row Width Calculation**: Process each terminal row independently to calculate width deltas
 3. **Separate Calculation and Application**: Calculate all deltas first, then apply them with cascading
 
 ## Algorithm Phases

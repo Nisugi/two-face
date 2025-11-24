@@ -3374,9 +3374,12 @@ fn handle_frontend_event(
             }
         }
         FrontendEvent::Resize { width, height } => {
-            // Automatically resize layout when terminal is resized (using VellumFE algorithm)
-            app_core.resize_windows(width, height);
-            app_core.needs_render = true;
+            // DISABLED: Automatic resize on terminal resize (manual .resize command only)
+            // app_core.resize_windows(width, height);
+            // app_core.needs_render = true;
+
+            // Just log the terminal size change for debugging
+            tracing::info!("Terminal resized to {}x{} (auto-resize disabled, use .resize command)", width, height);
         }
         _ => {}
     }
