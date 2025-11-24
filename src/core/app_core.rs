@@ -1830,8 +1830,16 @@ impl AppCore {
         tracing::debug!("--- HEIGHT SCALING (VellumFE COLUMN-BY-COLUMN) ---");
         tracing::debug!("height_delta={}", height_delta);
 
-        // PHASE 1: Calculate height deltas column-by-column
-        let mut height_deltas: HashMap<String, i32> = HashMap::new();
+        // Snapshot baseline rows for calculation (so repeated columns don't amplify deltas)
+        let baseline_rows: HashMap<String, (u16, u16)> = self
+            .layout
+            .windows
+            .iter()
+            .map(|w| {
+                let base = w.base();
+                (base.name.clone(), (base.row, base.rows))
+            })
+            .collect();
 
         // Find max column
         let max_col = self.layout.windows.iter()
@@ -1844,20 +1852,25 @@ impl AppCore {
 
         tracing::debug!("Processing columns 0..{}", max_col);
 
-        // Column-by-column: Calculate height deltas
+        // Track which windows have already had their delta applied
+        let mut height_applied = HashSet::new();
+
+        // Column-by-column: Calculate and immediately apply height deltas
         for current_col in 0..max_col {
-            // Find UNPROCESSED windows that occupy this column
-            let mut windows_at_col: Vec<String> = Vec::new();
-            for window_def in &self.layout.windows {
-                let base = window_def.base();
-                // Skip if already has delta (VellumFE-compatible: only process each window once)
-                if height_deltas.contains_key(&base.name) {
-                    continue;
-                }
-                if base.col <= current_col && base.col + base.cols > current_col {
-                    windows_at_col.push(base.name.clone());
-                }
-            }
+            // Find all windows that occupy this column
+            let mut windows_at_col: Vec<String> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.col <= current_col && base.col + base.cols > current_col {
+                        Some(base.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             if windows_at_col.is_empty() {
                 continue;
@@ -1865,7 +1878,7 @@ impl AppCore {
 
             tracing::debug!("Column {}: {} windows present", current_col, windows_at_col.len());
 
-            // Calculate total scalable height (only UNPROCESSED non-static windows)
+            // Calculate total scalable height (all non-static windows)
             let mut total_scalable_height = 0u16;
             for window_name in &windows_at_col {
                 // Skip if static
@@ -1874,11 +1887,11 @@ impl AppCore {
                 }
 
                 // Get window height (include ALL non-static windows)
-                let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == window_name)
-                    .unwrap();
-                let base = window_def.base();
-                total_scalable_height += base.rows;
+                let (_, base_rows) = baseline_rows
+                    .get(window_name)
+                    .copied()
+                    .unwrap_or((0, 0));
+                total_scalable_height += base_rows;
             }
 
             if total_scalable_height == 0 {
@@ -1888,130 +1901,94 @@ impl AppCore {
             tracing::debug!("  Total scalable height at column {}: {}", current_col, total_scalable_height);
 
             // Distribute height_delta proportionally
+            let mut col_height_deltas: HashMap<String, i32> = HashMap::new();
+            let mut distributed: i32 = 0;
             for window_name in &windows_at_col {
                 // Handle static windows
                 if static_both.contains(window_name.as_str()) || static_height.contains(window_name.as_str()) {
-                    if !height_deltas.contains_key(window_name) {
-                        tracing::debug!("    {} is static, recording 0 delta", window_name);
-                        height_deltas.insert(window_name.clone(), 0);
-                    }
+                    col_height_deltas.insert(window_name.clone(), 0);
                     continue;
                 }
 
                 // Calculate proportional delta for this window at this column
-                let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == window_name)
-                    .unwrap();
-                let base = window_def.base();
-                let proportion = base.rows as f64 / total_scalable_height as f64;
+                let (_, base_rows) = baseline_rows.get(window_name).copied().unwrap_or((0, 0));
+                let proportion = base_rows as f64 / total_scalable_height as f64;
                 let delta = (proportion * height_delta as f64).floor() as i32;
 
-                // Record delta (all windows in list are unprocessed)
-                height_deltas.insert(window_name.clone(), delta);
+                col_height_deltas.insert(window_name.clone(), delta);
+                distributed += delta;
+
                 tracing::debug!(
                     "    {} (rows={}): proportion={:.4}, delta={}",
                     window_name,
-                    base.rows,
+                    base_rows,
                     proportion,
                     delta
                 );
             }
-        }
 
-        tracing::debug!("Height deltas calculated for {} windows", height_deltas.len());
+            // Distribute leftover rows within this column only
+            let mut leftover = height_delta - distributed;
+            if leftover != 0 {
+                // Sort by row (top to bottom)
+                windows_at_col.sort_by_key(|name| {
+                    self.layout.windows.iter()
+                        .find(|w| w.name() == name)
+                        .map(|w| w.base().row)
+                        .unwrap_or(0)
+                });
 
-        // Distribute leftover rows (VellumFE-compatible)
-        // Calculate how much was actually distributed
-        let total_distributed: i32 = height_deltas.values().sum();
-        let mut leftover = height_delta - total_distributed;
+                let mut idx = 0usize;
+                // At least one non-static window exists (total_scalable_height > 0)
+                while leftover != 0 {
+                    let name = &windows_at_col[idx % windows_at_col.len()];
+                    if static_both.contains(name.as_str()) || static_height.contains(name.as_str()) {
+                        idx += 1;
+                        continue;
+                    }
 
-        if leftover != 0 {
-            tracing::debug!("Height leftover after proportional distribution: {} rows", leftover);
-
-            // Sort windows by row for consistent leftover distribution (top to bottom)
-            let mut window_names: Vec<String> = height_deltas.keys()
-                .filter(|name| {
-                    // Only distribute to non-static windows
-                    !static_both.contains(name.as_str()) && !static_height.contains(name.as_str())
-                })
-                .cloned()
-                .collect();
-
-            window_names.sort_by_key(|name| {
-                self.layout.windows.iter()
-                    .find(|w| w.name() == name)
-                    .map(|w| w.base().row)
-                    .unwrap_or(0)
-            });
-
-            // Distribute leftover one row at a time to first windows
-            let mut idx = 0;
-            while leftover > 0 && idx < window_names.len() {
-                let name = &window_names[idx];
-                if let Some(delta) = height_deltas.get_mut(name) {
-                    *delta += 1;
-                    tracing::debug!("  Distributing +1 leftover row to {}", name);
-                    leftover -= 1;
+                    if let Some(delta) = col_height_deltas.get_mut(name) {
+                        if leftover > 0 {
+                            *delta += 1;
+                            leftover -= 1;
+                        } else {
+                            *delta -= 1;
+                            leftover += 1;
+                        }
+                    }
+                    idx += 1;
                 }
-                idx += 1;
             }
-            while leftover < 0 && idx < window_names.len() {
-                let name = &window_names[idx];
-                if let Some(delta) = height_deltas.get_mut(name) {
-                    *delta -= 1;
-                    tracing::debug!("  Distributing -1 leftover row to {}", name);
-                    leftover += 1;
-                }
-                idx += 1;
-            }
-        }
 
-        // PHASE 2: Apply deltas with column-by-column cascading
-        tracing::debug!("Applying height deltas with column-by-column cascading...");
-
-        let mut height_applied = HashSet::new();
-        let max_col = self.layout.windows.iter()
-            .map(|w| {
-                let base = w.base();
-                base.col + base.cols
-            })
-            .max()
-            .unwrap_or(0);
-
-        // Process each column independently
-        for current_col in 0..max_col {
-            // Find windows that occupy this column and haven't been applied yet
-            let mut windows_at_col: Vec<(String, u16, u16)> = self.layout.windows.iter()
-                .filter(|w| {
+            // Cascade and apply (discarding deltas for already-applied windows)
+            let mut windows_at_col_with_meta: Vec<(String, u16, u16)> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
                     let base = w.base();
-                    let col_start = base.col;
-                    let col_end = base.col + base.cols;
-                    current_col >= col_start && current_col < col_end && !height_applied.contains(&base.name)
-                })
-                .map(|w| {
-                    let base = w.base();
-                    (base.name.clone(), base.row, base.rows)
+                    if base.col <= current_col && base.col + base.cols > current_col {
+                        let (orig_row, orig_rows) = baseline_rows
+                            .get(&base.name)
+                            .copied()
+                            .unwrap_or((base.row, base.rows));
+                        Some((base.name.clone(), orig_row, orig_rows))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
-            if windows_at_col.is_empty() {
-                continue;
-            }
+            windows_at_col_with_meta.sort_by_key(|(_, row, _)| *row);
 
-            // Sort by row (top to bottom)
-            windows_at_col.sort_by_key(|(_, row, _)| *row);
+            let mut current_row = windows_at_col_with_meta[0].1;
+            let win_count = windows_at_col_with_meta.len();
 
-            if current_col == 0 || current_col == 20 {  // Only log for interesting columns
-                tracing::debug!("Column {}: {} unapplied windows, cascading top-to-bottom", current_col, windows_at_col.len());
-            }
+            for idx in 0..win_count {
+                let (window_name, original_row, original_rows) =
+                    windows_at_col_with_meta[idx].clone();
+                let assigned_delta = *col_height_deltas.get(&window_name).unwrap_or(&0);
 
-            // Cascade within this column
-            let mut current_row = windows_at_col[0].1;  // Start at first window's row
-
-            for (window_name, original_row, original_rows) in windows_at_col {
-                let delta = height_deltas.get(&window_name).copied().unwrap_or(0);
-
-                // Get window for constraints
                 let window_def = self.layout.windows.iter()
                     .find(|w| w.name() == &window_name)
                     .unwrap();
@@ -2021,13 +1998,21 @@ impl AppCore {
                 let min_constraint = base.min_rows.unwrap_or(min_rows);
                 let max_constraint = base.max_rows;
 
-                // Calculate new rows with constraints
-                let mut new_rows = (original_rows as i32 + delta).max(min_constraint as i32) as u16;
+                if height_applied.contains(&window_name) {
+                    // Already applied: keep existing size/position but advance the cascade
+                    current_row = base.row + base.rows;
+                    continue;
+                }
+
+                let mut new_rows =
+                    (original_rows as i32 + assigned_delta).max(min_constraint as i32) as u16;
                 if let Some(max) = max_constraint {
                     new_rows = new_rows.min(max);
                 }
 
-                // Apply changes
+                let used_delta = new_rows as i32 - original_rows as i32;
+                let mut remainder = assigned_delta - used_delta;
+
                 if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
                     let base = w.base_mut();
                     base.row = current_row;
@@ -2036,12 +2021,35 @@ impl AppCore {
 
                     tracing::debug!(
                         "  Col {}: {} row {} -> {}, rows {} -> {} (delta={})",
-                        current_col, window_name, original_row, current_row, original_rows, new_rows, delta
+                        current_col, window_name, original_row, current_row, original_rows, new_rows, assigned_delta
                     );
                 }
 
-                // Next window starts where this one ends (cascading)
                 current_row += new_rows;
+
+                // If constraints prevented full use of delta, distribute remainder
+                if remainder != 0 {
+                    for (name, _, _) in windows_at_col_with_meta.iter().skip(idx + 1) {
+                        if static_both.contains(name.as_str())
+                            || static_height.contains(name.as_str())
+                            || height_applied.contains(name)
+                        {
+                            continue;
+                        }
+                        if let Some(d) = col_height_deltas.get_mut(name) {
+                            if remainder == 0 {
+                                break;
+                            }
+                            if remainder > 0 {
+                                *d += 1;
+                                remainder -= 1;
+                            } else {
+                                *d -= 1;
+                                remainder += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2066,8 +2074,16 @@ impl AppCore {
         tracing::debug!("--- WIDTH SCALING (VellumFE ROW-BY-ROW) ---");
         tracing::debug!("width_delta={}", width_delta);
 
-        // PHASE 1: Calculate width deltas row-by-row
-        let mut width_deltas: HashMap<String, i32> = HashMap::new();
+        // Snapshot baseline cols for calculation (freeze widths during distribution)
+        let baseline_cols: HashMap<String, (u16, u16)> = self
+            .layout
+            .windows
+            .iter()
+            .map(|w| {
+                let base = w.base();
+                (base.name.clone(), (base.col, base.cols))
+            })
+            .collect();
 
         // Find max row
         let max_row = self.layout.windows.iter()
@@ -2080,20 +2096,25 @@ impl AppCore {
 
         tracing::debug!("Processing rows 0..{}", max_row);
 
-        // Row-by-row: Calculate width deltas
+        // Track which windows have already had their delta applied
+        let mut width_applied = HashSet::new();
+
+        // Row-by-row: Calculate and immediately apply width deltas
         for current_row in 0..max_row {
-            // Find UNPROCESSED windows that occupy this row
-            let mut windows_at_row: Vec<String> = Vec::new();
-            for window_def in &self.layout.windows {
-                let base = window_def.base();
-                // Skip if already has delta (VellumFE-compatible: only process each window once)
-                if width_deltas.contains_key(&base.name) {
-                    continue;
-                }
-                if base.row <= current_row && base.row + base.rows > current_row {
-                    windows_at_row.push(base.name.clone());
-                }
-            }
+            // Find all windows that occupy this row
+            let mut windows_at_row: Vec<String> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.row <= current_row && base.row + base.rows > current_row {
+                        Some(base.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             if windows_at_row.is_empty() {
                 continue;
@@ -2101,7 +2122,7 @@ impl AppCore {
 
             tracing::debug!("Row {}: {} windows present", current_row, windows_at_row.len());
 
-            // Calculate total scalable width (only UNPROCESSED non-static windows)
+            // Calculate total scalable width (all non-static windows)
             let mut total_scalable_width = 0u16;
             for window_name in &windows_at_row {
                 // Skip if static
@@ -2110,11 +2131,11 @@ impl AppCore {
                 }
 
                 // Get window width (include ALL non-static windows)
-                let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == window_name)
-                    .unwrap();
-                let base = window_def.base();
-                total_scalable_width += base.cols;
+                let (_, base_cols) = baseline_cols
+                    .get(window_name)
+                    .copied()
+                    .unwrap_or((0, 0));
+                total_scalable_width += base_cols;
             }
 
             if total_scalable_width == 0 {
@@ -2124,136 +2145,94 @@ impl AppCore {
             tracing::debug!("  Total scalable width at row {}: {}", current_row, total_scalable_width);
 
             // Distribute width_delta proportionally
+            let mut row_width_deltas: HashMap<String, i32> = HashMap::new();
+            let mut distributed: i32 = 0;
             for window_name in &windows_at_row {
                 // Handle static windows
                 if static_both.contains(window_name.as_str()) {
-                    if !width_deltas.contains_key(window_name) {
-                        tracing::debug!("    {} is static, recording 0 delta", window_name);
-                        width_deltas.insert(window_name.clone(), 0);
-                    }
+                    row_width_deltas.insert(window_name.clone(), 0);
                     continue;
                 }
 
                 // Calculate proportional delta for this window at this row
-                let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == window_name)
-                    .unwrap();
-                let base = window_def.base();
-                let proportion = base.cols as f64 / total_scalable_width as f64;
+                let (_, base_cols) = baseline_cols.get(window_name).copied().unwrap_or((0, 0));
+                let proportion = base_cols as f64 / total_scalable_width as f64;
                 let delta = (proportion * width_delta as f64).floor() as i32;
 
-                // Record delta (all windows in list are unprocessed)
-                width_deltas.insert(window_name.clone(), delta);
+                row_width_deltas.insert(window_name.clone(), delta);
+                distributed += delta;
+
                 tracing::debug!(
                     "    {} (cols={}): proportion={:.4}, delta={}",
                     window_name,
-                    base.cols,
+                    base_cols,
                     proportion,
                     delta
                 );
             }
-        }
 
-        tracing::debug!("Width deltas calculated for {} windows", width_deltas.len());
-
-        // Distribute leftover columns (VellumFE-compatible)
-        // Calculate how much was actually distributed
-        let total_distributed: i32 = width_deltas.values().sum();
-        let mut leftover = width_delta - total_distributed;
-
-        if leftover != 0 {
-            tracing::debug!("Width leftover after proportional distribution: {} columns", leftover);
-
-            // Sort windows by column for consistent leftover distribution (left to right)
-            let mut window_names: Vec<String> = width_deltas.keys()
-                .filter(|name| {
-                    // Only distribute to non-static windows
-                    !static_both.contains(name.as_str())
-                })
-                .cloned()
-                .collect();
-
-            window_names.sort_by_key(|name| {
-                self.layout.windows.iter()
-                    .find(|w| w.name() == name)
-                    .map(|w| w.base().col)
-                    .unwrap_or(0)
-            });
-
-            // Distribute leftover one column at a time to first windows
-            let mut idx = 0;
-            while leftover > 0 && idx < window_names.len() {
-                let name = &window_names[idx];
-                if let Some(delta) = width_deltas.get_mut(name) {
-                    *delta += 1;
-                    tracing::debug!("  Distributing +1 leftover column to {}", name);
-                    leftover -= 1;
-                }
-                idx += 1;
-            }
-            while leftover < 0 && idx < window_names.len() {
-                let name = &window_names[idx];
-                if let Some(delta) = width_deltas.get_mut(name) {
-                    *delta -= 1;
-                    tracing::debug!("  Distributing -1 leftover column to {}", name);
-                    leftover += 1;
-                }
-                idx += 1;
-            }
-        }
-
-        // PHASE 2: Apply deltas with cascading based on BASELINE row positions
-        tracing::debug!("Applying width deltas using baseline row groupings...");
-
-        let mut width_applied = HashSet::new();
-
-        // Group windows by their BASELINE row positions
-        // This ensures windows that were originally in the same row cascade together,
-        // even though height cascading has moved them to different rows
-        let mut baseline_row_groups: std::collections::HashMap<u16, Vec<String>> = std::collections::HashMap::new();
-        for (name, baseline_row, _baseline_rows) in _baseline_rows {
-            baseline_row_groups.entry(*baseline_row)
-                .or_insert_with(Vec::new)
-                .push(name.clone());
-        }
-
-        // Sort baseline rows to process top to bottom
-        let mut sorted_baseline_rows: Vec<u16> = baseline_row_groups.keys().copied().collect();
-        sorted_baseline_rows.sort();
-
-        // Process each baseline row group independently
-        for baseline_row in sorted_baseline_rows {
-            let window_names = baseline_row_groups.get(&baseline_row).unwrap();
-
-            // Find unapplied windows from this baseline row group
-            let mut windows_at_row: Vec<(String, u16, u16)> = window_names.iter()
-                .filter(|name| !width_applied.contains(*name))
-                .filter_map(|name| {
+            // Distribute leftover columns within this row only
+            let mut leftover = width_delta - distributed;
+            if leftover != 0 {
+                // Sort by column (left to right)
+                windows_at_row.sort_by_key(|name| {
                     self.layout.windows.iter()
                         .find(|w| w.name() == name)
-                        .map(|w| {
-                            let base = w.base();
-                            (base.name.clone(), base.col, base.cols)
-                        })
+                        .map(|w| w.base().col)
+                        .unwrap_or(0)
+                });
+
+                let mut idx = 0usize;
+                // At least one non-static window exists (total_scalable_width > 0)
+                while leftover != 0 {
+                    let name = &windows_at_row[idx % windows_at_row.len()];
+                    if static_both.contains(name.as_str()) {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if let Some(delta) = row_width_deltas.get_mut(name) {
+                        if leftover > 0 {
+                            *delta += 1;
+                            leftover -= 1;
+                        } else {
+                            *delta -= 1;
+                            leftover += 1;
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            // Cascade and apply (discarding deltas for already-applied windows)
+            let mut windows_at_row_with_meta: Vec<(String, u16, u16)> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.row <= current_row && base.row + base.rows > current_row {
+                        let (orig_col, orig_cols) = baseline_cols
+                            .get(&base.name)
+                            .copied()
+                            .unwrap_or((base.col, base.cols));
+                        Some((base.name.clone(), orig_col, orig_cols))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
-            if windows_at_row.is_empty() {
-                continue;
-            }
+            windows_at_row_with_meta.sort_by_key(|(_, col, _)| *col);
 
-            // Sort by column (left to right)
-            windows_at_row.sort_by_key(|(_, col, _)| *col);
+            let mut current_col_pos = windows_at_row_with_meta[0].1;
+            let win_count = windows_at_row_with_meta.len();
 
-            tracing::debug!("Baseline row {}: {} unapplied windows, cascading left-to-right", baseline_row, windows_at_row.len());
+            for idx in 0..win_count {
+                let (window_name, original_col, original_cols) =
+                    windows_at_row_with_meta[idx].clone();
+                let assigned_delta = *row_width_deltas.get(&window_name).unwrap_or(&0);
 
-            // Cascade within this baseline row group
-            let mut current_col = windows_at_row[0].1;  // Start at first window's column
-
-            for (window_name, original_col, original_cols) in windows_at_row {
-                let delta = width_deltas.get(&window_name).copied().unwrap_or(0);
-
-                // Get window for constraints
                 let window_def = self.layout.windows.iter()
                     .find(|w| w.name() == &window_name)
                     .unwrap();
@@ -2263,27 +2242,55 @@ impl AppCore {
                 let min_constraint = base.min_cols.unwrap_or(min_cols);
                 let max_constraint = base.max_cols;
 
-                // Calculate new cols with constraints
-                let mut new_cols = (original_cols as i32 + delta).max(min_constraint as i32) as u16;
+                if width_applied.contains(&window_name) {
+                    // Already applied: keep existing size/position but advance the cascade
+                    current_col_pos = base.col + base.cols;
+                    continue;
+                }
+
+                let mut new_cols =
+                    (original_cols as i32 + assigned_delta).max(min_constraint as i32) as u16;
                 if let Some(max) = max_constraint {
                     new_cols = new_cols.min(max);
                 }
 
-                // Apply changes
+                let used_delta = new_cols as i32 - original_cols as i32;
+                let mut remainder = assigned_delta - used_delta;
+
                 if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
                     let base = w.base_mut();
-                    base.col = current_col;
+                    base.col = current_col_pos;
                     base.cols = new_cols;
                     width_applied.insert(window_name.clone());
 
                     tracing::debug!(
-                        "  Baseline row {}: {} col {} -> {}, cols {} -> {} (delta={})",
-                        baseline_row, window_name, original_col, current_col, original_cols, new_cols, delta
+                        "  Row {}: {} col {} -> {}, cols {} -> {} (delta={})",
+                        current_row, window_name, original_col, current_col_pos, original_cols, new_cols, assigned_delta
                     );
                 }
 
-                // Next window starts where this one ends (cascading)
-                current_col += new_cols;
+                current_col_pos += new_cols;
+
+                // If constraints prevented full use of delta, distribute remainder
+                if remainder != 0 {
+                    for (name, _, _) in windows_at_row_with_meta.iter().skip(idx + 1) {
+                        if static_both.contains(name.as_str()) || width_applied.contains(name) {
+                            continue;
+                        }
+                        if let Some(d) = row_width_deltas.get_mut(name) {
+                            if remainder == 0 {
+                                break;
+                            }
+                            if remainder > 0 {
+                                *d += 1;
+                                remainder -= 1;
+                            } else {
+                                *d -= 1;
+                                remainder += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
 

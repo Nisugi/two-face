@@ -11,6 +11,9 @@ The VellumFE algorithm is based on three fundamental principles:
 1. **Column-by-Column Height Calculation**: Process each terminal column independently to calculate height deltas
 2. **Row-by-Row Width Calculation**: Process each terminal row independently to calculate width deltas
 3. **Separate Calculation and Application**: Calculate all deltas first, then apply them with cascading
+4. **Baseline Snapshot for Proportions**: Use the original (baseline) rows/cols for proportional math to avoid feedback from earlier steps
+5. **Local Leftovers Only**: Leftovers are distributed within each row/column independently; no global leftover reconciliation
+6. **Already-Applied Windows**: Windows still participate in proportional math on later rows/cols, but if they are already applied their assigned delta is discarded (only the cascade advances)
 
 ## Algorithm Phases
 
@@ -20,30 +23,29 @@ The VellumFE algorithm is based on three fundamental principles:
 
 For each column from 0 to max_col:
 
-1. **Find UNPROCESSED windows occupying this column**
+1. **Find windows occupying this column**
    - A window occupies column `C` if: `window.col <= C < window.col + window.cols`
-   - Skip windows that already have deltas recorded in `height_deltas` map
-   - Only unprocessed windows are considered
+   - Windows already applied still participate in proportional calculation; their deltas are discarded later if already applied
 
 2. **Calculate total scalable height**
-   - Sum the heights of unprocessed non-static windows at this column
+   - Sum the *baseline* heights of all non-static windows at this column (baseline snapshot prevents feedback from earlier columns)
    - Skip `static_both` and `static_height` windows (they don't resize)
 
 3. **Distribute height_delta proportionally**
-   - For each unprocessed non-static window:
-     - `proportion = window.rows / total_scalable_height`
+   - For each non-static window:
+     - `proportion = baseline_rows / total_scalable_height`
      - `delta = floor(proportion * height_delta)`
-     - Record delta in `height_deltas` map
+     - Record delta for this column
    - For static windows: record delta of 0
 
 4. **First encounter wins**
-   - Each window's delta is recorded the FIRST time it's encountered at any column
-   - Subsequent columns skip the window entirely (not in the windows list)
+   - Each window's delta is applied the FIRST time it's encountered at any column
+   - Subsequent columns still see the window in proportional math, but their assigned deltas are discarded if the window is already applied
 
 5. **Leftover distribution** (VellumFE-compatible)
-   - After proportional distribution, calculate leftover: `leftover = height_delta - sum(all_deltas)`
-   - Distribute leftover rows one-by-one to first windows (sorted top to bottom)
-   - This ensures the full delta is distributed and windows fill entire terminal height
+   - After proportional distribution **within the column**, calculate leftover: `leftover = height_delta - sum(all_deltas_for_column)`
+   - Distribute leftover rows one-by-one to first windows (sorted top to bottom) in this column only
+   - Skip static windows for leftovers
 
 #### Step 2: Apply Height Deltas with Column-by-Column Cascading
 
@@ -55,10 +57,8 @@ For each column from 0 to max_col:
 height_applied = {}  // Track which windows have been processed
 
 for current_col in 0..max_col:
-    // Find all windows occupying this column that haven't been applied
-    windows_at_col = filter windows where:
-        - current_col is within their column range
-        - window_name not in height_applied
+    // Find all windows occupying this column (applied or not)
+    windows_at_col = filter windows where current_col is within their column range
 
     if windows_at_col is empty:
         continue
@@ -70,8 +70,12 @@ for current_col in 0..max_col:
     current_row = windows_at_col[0].row  // Start at first window's row
 
     for window in windows_at_col:
+        if window already in height_applied:
+            // discard delta, just advance cascade by existing size
+            current_row = window.row + window.rows
+            continue
         window.row = current_row
-        window.rows = original_rows + delta
+        window.rows = original_rows + delta  // constrained by min/max
         height_applied.add(window_name)
         current_row += window.rows  // Next window cascades
 ```
@@ -100,30 +104,29 @@ for current_col in 0..max_col:
 
 For each row from 0 to max_row:
 
-1. **Find UNPROCESSED windows occupying this row**
+1. **Find windows occupying this row**
    - A window occupies row `R` if: `window.row <= R < window.row + window.rows`
-   - Skip windows that already have deltas recorded in `width_deltas` map
-   - Only unprocessed windows are considered
+   - Windows already applied still participate in proportional calculation; their deltas are discarded later if already applied
 
 2. **Calculate total scalable width**
-   - Sum the widths of unprocessed non-static windows at this row
+   - Sum the *baseline* widths of all non-static windows at this row (baseline snapshot prevents feedback from earlier rows)
    - Skip `static_both` windows (they don't resize horizontally)
 
 3. **Distribute width_delta proportionally**
-   - For each unprocessed non-static window:
-     - `proportion = window.cols / total_scalable_width`
+   - For each non-static window:
+     - `proportion = baseline_cols / total_scalable_width`
      - `delta = floor(proportion * width_delta)`
-     - Record delta in `width_deltas` map
+     - Record delta for this row
    - For static windows: record delta of 0
 
 4. **First encounter wins**
-   - Each window's delta is recorded the FIRST time it's encountered at any row
-   - Subsequent rows skip the window entirely (not in the windows list)
+   - Each window's delta is applied the FIRST time it's encountered at any row
+   - Subsequent rows still see the window in proportional math, but their assigned deltas are discarded if the window is already applied
 
 5. **Leftover distribution** (VellumFE-compatible)
-   - After proportional distribution, calculate leftover: `leftover = width_delta - sum(all_deltas)`
-   - Distribute leftover columns one-by-one to first windows (sorted left to right)
-   - This ensures the full delta is distributed and windows fill entire terminal width
+   - After proportional distribution **within the row**, calculate leftover: `leftover = width_delta - sum(all_deltas_for_row)`
+   - Distribute leftover columns one-by-one to first windows (sorted left to right) in this row only
+   - Skip static windows for leftovers
 
 #### Step 2: Apply Width Deltas with Row-by-Row Cascading
 
@@ -135,10 +138,8 @@ For each row from 0 to max_row:
 width_applied = {}  // Track which windows have been processed
 
 for current_row in 0..max_row:
-    // Find all windows occupying this row that haven't been applied
-    windows_at_row = filter windows where:
-        - current_row is within their row range
-        - window_name not in width_applied
+    // Find all windows occupying this row (applied or not)
+    windows_at_row = filter windows where current_row is within their row range
 
     if windows_at_row is empty:
         continue
@@ -150,8 +151,12 @@ for current_row in 0..max_row:
     current_col = windows_at_row[0].col  // Start at first window's column
 
     for window in windows_at_row:
+        if window already in width_applied:
+            // discard delta, just advance cascade by existing size
+            current_col = window.col + window.cols
+            continue
         window.col = current_col
-        window.cols = original_cols + delta
+        window.cols = original_cols + delta  // constrained by min/max
         width_applied.add(window_name)
         current_col += window.cols  // Next window cascades
 ```
