@@ -573,9 +573,9 @@ fn build_widget_category_picker(app_core: &core::AppCore, category: &str) -> Vec
     let category_windows: Vec<&str> = match category {
         "countdown" => vec!["roundtime", "casttime", "stuntime"],
         "hand" => vec!["left_hand", "right_hand", "spell_hand"],
-        "other" => vec!["compass", "inventory", "room", "spells", "injuries", "spacer"],
+        "other" => vec!["compass", "inventory", "room", "spells", "injuries", "spacer", "quickbar"],
         "progressbar" => vec!["health", "mana", "stamina", "spirit", "encumlevel", "pbarStance", "mindState", "lblBPs"],
-        "text" => vec!["thoughts", "speech", "announcements", "loot", "death", "logons", "familiar", "ambients", "bounty"],
+        "text" => vec!["thoughts", "speech", "announcements", "loot", "death", "logons", "familiar", "ambients", "bounty", "society"],
         _ => vec![],
     };
 
@@ -681,8 +681,13 @@ fn handle_menu_action(
         // Get template for this widget type (use widget type name as template name)
         if let Some(template) = config::Config::get_window_template(widget_type) {
             // Open window editor with template (proper defaults + marked as new)
-            frontend.window_editor =
-                Some(frontend::tui::window_editor::WindowEditor::new_from_template(template));
+            // Use new_window_with_layout for spacers to enable auto-naming
+            frontend.window_editor = Some(
+                frontend::tui::window_editor::WindowEditor::new_window_with_layout(
+                    widget_type.to_string(),
+                    &app_core.layout,
+                ),
+            );
             app_core.ui_state.input_mode = data::ui_state::InputMode::WindowEditor;
         } else {
             tracing::warn!("No template found for widget type: {}", widget_type);
@@ -3141,10 +3146,11 @@ fn handle_frontend_event(
                             // Delete/Hide window
                             if let Some(ref mut editor) = frontend.window_editor {
                                 let window_name = editor.get_window_def().name().to_string();
+                                let is_locked = editor.get_window_def().base().locked;
 
-                                // Don't delete main window or command_input
-                                if window_name == "main" || window_name == "command_input" {
-                                    tracing::warn!("Cannot hide {} window", window_name);
+                                // Don't delete locked windows (main, command_input)
+                                if is_locked {
+                                    tracing::warn!("Cannot hide locked window: {}", window_name);
                                 } else {
                                     // Hide window (keep in layout, remove from UI)
                                     app_core.hide_window(&window_name);

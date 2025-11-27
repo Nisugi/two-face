@@ -71,3 +71,30 @@ show_border = true
 border_style = "single"
 border_color = "#808080"
 visible = false
+
+[[windows]]
+name = "quickbar"
+widget_type = "quickbar"
+streams = []
+row = 0
+col = 0
+rows = 1
+cols = 120
+show_border = true
+border_style = "single"
+border_color = "#808080"
+visible = false
+
+[[windows]]
+name = "society"
+widget_type = "text"
+streams = ["society"]
+row = 0
+col = 80
+rows = 20
+cols = 40
+buffer_size = 1000
+show_border = true
+border_style = "single"
+border_color = "#9370DB"
+visible = false

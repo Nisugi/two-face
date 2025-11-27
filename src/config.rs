@@ -751,6 +751,30 @@ pub struct SpellsWidgetData {
     // No extra fields currently - uses "spells" stream
 }
 
+/// QuickBar widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickBarWidgetData {
+    /// Currently active bar ("quick", "quick-combat", "quick-simu", or custom name)
+    #[serde(default = "default_quick_bar")]
+    pub active_bar: String,
+
+    /// Stored bar variations (bar_id -> raw content)
+    #[serde(default)]
+    pub bars: std::collections::HashMap<String, String>,
+
+    /// Default bar to use when active_bar is empty or invalid
+    #[serde(default = "default_quick_bar")]
+    pub default_bar: String,
+
+    /// Current scroll offset (which wrapped row is at top of viewport)
+    #[serde(default)]
+    pub scroll_offset: usize,
+}
+
+fn default_quick_bar() -> String {
+    "quick".to_string()
+}
+
 /// Window definition - enum with widget-specific variants
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "widget_type")]
@@ -890,6 +914,14 @@ pub enum WindowDef {
         #[serde(flatten)]
         data: SpellsWidgetData,
     },
+
+    #[serde(rename = "quickbar")]
+    QuickBar {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: QuickBarWidgetData,
+    },
 }
 
 impl WindowDef {
@@ -913,6 +945,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => &base.name,
             WindowDef::Spacer { base, .. } => &base.name,
             WindowDef::Spells { base, .. } => &base.name,
+            WindowDef::QuickBar { base, .. } => &base.name,
         }
     }
 
@@ -936,6 +969,7 @@ impl WindowDef {
             WindowDef::Players { .. } => "players",
             WindowDef::Spacer { .. } => "spacer",
             WindowDef::Spells { .. } => "spells",
+            WindowDef::QuickBar { .. } => "quickbar",
         }
     }
 
@@ -959,6 +993,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
+            WindowDef::QuickBar { base, .. } => base,
         }
     }
 
@@ -982,6 +1017,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
+            WindowDef::QuickBar { base, .. } => base,
         }
     }
 
@@ -2717,6 +2753,7 @@ impl Config {
                     title: Some("Story".to_string()),
                     rows: 37,
                     cols: 120,
+                    locked: true,
                     ..base_defaults
                 },
                 data: TextWidgetData {
@@ -2769,6 +2806,7 @@ impl Config {
                     cols: 120,
                     min_rows: Some(1),
                     max_rows: Some(3),
+                    locked: true,
                     ..base_defaults.clone()
                 },
                 data: CommandInputWidgetData::default(),
@@ -3286,6 +3324,22 @@ impl Config {
                 },
             }),
 
+            "society" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "society".to_string(),
+                    title: Some("Society".to_string()),
+                    rows: 10,
+                    cols: 50,
+                    show_border: true,
+                    text_color: Some("#9370DB".to_string()), // Medium purple
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["society".to_string()],
+                    buffer_size: 500,
+                },
+            }),
+
             "spells" => Some(WindowDef::Spells {
                 base: WindowBase {
                     name: "spells".to_string(),
@@ -3294,9 +3348,39 @@ impl Config {
                     cols: 40,
                     show_border: true,
                     text_color: Some("#9370DB".to_string()), // Medium purple
-                    ..base_defaults
+                    ..base_defaults.clone()
                 },
                 data: SpellsWidgetData {},
+            }),
+
+            "quickbar" => Some(WindowDef::QuickBar {
+                base: WindowBase {
+                    name: "quickbar".to_string(),
+                    title: None, // No title bar for QuickBar
+                    rows: 1, // Default 1 row
+                    cols: 80,
+                    show_border: true,
+                    show_title: false, // Explicitly no title
+                    min_rows: Some(1),
+                    max_rows: Some(5), // Reasonable maximum
+                    ..base_defaults
+                },
+                data: QuickBarWidgetData {
+                    active_bar: "quick".to_string(),
+                    bars: {
+                        let mut bars = std::collections::HashMap::new();
+                        // Pre-populate with default bar content from GemStone IV
+                        bars.insert("quick".to_string(),
+                            "[look] [roleplay...] [actions...] [search] [inventory] [character sheet] [skill goals] [directions] [get assistance] [society] [SimuCoins]".to_string());
+                        bars.insert("quick-combat".to_string(),
+                            "[look] [attack] [ambush] [aim] [target] [fire] [multistrike] [targeted multistrike] [maneuvers]".to_string());
+                        bars.insert("quick-simu".to_string(),
+                            "[policy] [news] [calendar] [documentation] [premium] [platinum] [maps] [Discord] [version notes] [SimuCoins Store]".to_string());
+                        bars
+                    },
+                    default_bar: "quick".to_string(),
+                    scroll_offset: 0,
+                },
             }),
 
             "spacer" => Some(WindowDef::Spacer {
@@ -3340,6 +3424,9 @@ impl Config {
             "familiar",
             "ambients",
             "bounty",
+            "society",
+            // Special widgets
+            "quickbar",
             // Countdowns
             "roundtime",
             "casttime",

@@ -402,7 +402,7 @@ impl WindowEditor {
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: false,
-            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+S: Save | Esc: Back/Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+s: Save | Esc: Back/Cancel".to_string(),
         }
     }
 
@@ -410,7 +410,7 @@ impl WindowEditor {
     pub fn new_from_template(template: WindowDef) -> Self {
         // Create editor with template (reuse new() logic)
         let mut editor = Self::new(template);
-        // Mark as new so Ctrl+S adds instead of updates
+        // Mark as new so Ctrl+s adds instead of updates
         editor.is_new = true;
         editor
     }
@@ -547,7 +547,7 @@ impl WindowEditor {
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: true,
-            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+S: Save | Esc: Back/Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+s: Save | Esc: Back/Cancel".to_string(),
         }
     }
 

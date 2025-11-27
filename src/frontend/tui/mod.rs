@@ -22,6 +22,7 @@ mod performance_stats;
 mod players;
 mod popup_menu;
 mod progress_bar;
+mod quickbar;
 mod room_window;
 mod scrollable_container;
 pub mod settings_editor;
@@ -86,6 +87,8 @@ pub struct TuiFrontend {
     compass_widgets: HashMap<String, compass::Compass>,
     /// Cache of InjuryDoll widgets per window name
     injury_doll_widgets: HashMap<String, injury_doll::InjuryDoll>,
+    /// Cache of QuickBar widgets per window name
+    quickbar_widgets: HashMap<String, quickbar::QuickBar>,
     /// Performance stats widget (singleton overlay)
     performance_stats_widget: Option<performance_stats::PerformanceStatsWidget>,
     /// Track last synced generation per text window to know what's new
@@ -482,6 +485,7 @@ impl TuiFrontend {
             tabbed_text_windows: HashMap::new(),
             compass_widgets: HashMap::new(),
             injury_doll_widgets: HashMap::new(),
+            quickbar_widgets: HashMap::new(),
             performance_stats_widget: None,
             last_synced_generation: HashMap::new(),
             popup_menu: None,
@@ -946,6 +950,65 @@ impl TuiFrontend {
                 } else {
                     tracing::warn!(
                         "Spells widget '{}' not found in spells_windows HashMap!",
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Sync QuickBar widgets - create/configure and update content
+    fn sync_quickbar_widgets(
+        &mut self,
+        app_core: &crate::core::AppCore,
+        theme: &crate::theme::AppTheme,
+    ) {
+        // Find QuickBar windows in ui_state
+        for (name, window) in &app_core.ui_state.windows {
+            if let crate::data::WindowContent::QuickBar { content } = &window.content {
+                // Look up the WindowDef from layout to get config
+                let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
+
+                // Get or create QuickBar widget for this window
+                if !self.quickbar_widgets.contains_key(name) {
+                    // Extract QuickBarWidgetData from WindowDef
+                    let data = if let Some(crate::config::WindowDef::QuickBar { data, .. }) =
+                        window_def
+                    {
+                        data.clone()
+                    } else {
+                        // Fallback: create default data
+                        crate::config::QuickBarWidgetData {
+                            active_bar: "quick".to_string(),
+                            bars: std::collections::HashMap::new(),
+                            default_bar: "quick".to_string(),
+                            scroll_offset: 0,
+                        }
+                    };
+
+                    let quickbar_widget = quickbar::QuickBar::new(data);
+                    self.quickbar_widgets.insert(name.clone(), quickbar_widget);
+                    tracing::debug!("Created QuickBar widget for '{}'", name);
+                }
+
+                // Update configuration and content from WindowDef if present
+                if let Some(quickbar_widget) = self.quickbar_widgets.get_mut(name) {
+                    if let Some(def) = window_def {
+                        // Update content if it changed
+                        if !content.is_empty() {
+                            let available_width = def.base().cols.saturating_sub(if def.base().show_border { 2 } else { 0 }) as usize;
+                            quickbar_widget.set_content(content, available_width);
+                            tracing::debug!(
+                                "Updated QuickBar '{}' content: {} chars, wrapped to {} lines",
+                                name,
+                                content.len(),
+                                quickbar_widget.total_lines
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "QuickBar widget '{}' not found in quickbar_widgets HashMap!",
                         name
                     );
                 }
@@ -1785,6 +1848,23 @@ impl TuiFrontend {
             return;
         }
 
+        // Try quickbar widget
+        if let Some(quickbar) = self.quickbar_widgets.get_mut(window_name) {
+            // QuickBar scrolls 1 row at a time
+            // Use a safe default for visible height (will be accurate during actual display)
+            let visible_rows = 5;
+            if lines > 0 {
+                for _ in 0..lines {
+                    quickbar.scroll_up();
+                }
+            } else if lines < 0 {
+                for _ in 0..(-lines) {
+                    quickbar.scroll_down(visible_rows);
+                }
+            }
+            return;
+        }
+
         // Try tabbed text window
         if let Some(tabbed_window) = self.tabbed_text_windows.get_mut(window_name) {
             if lines > 0 {
@@ -2287,6 +2367,31 @@ impl TuiFrontend {
             }
         }
 
+        // Try quickbar widget
+        if let Some(quickbar) = self.quickbar_widgets.get(window_name) {
+            let border_offset = 1u16; // Assume border for now
+
+            // Bounds check within content area
+            if mouse_col >= window_rect.x + border_offset
+                && mouse_col < window_rect.x + window_rect.width - border_offset
+                && mouse_row >= window_rect.y + border_offset
+                && mouse_row < window_rect.y + window_rect.height - border_offset
+            {
+                // Convert to widget-relative coordinates
+                let widget_row = mouse_row - window_rect.y - border_offset;
+                let widget_col = mouse_col - window_rect.x - border_offset;
+
+                if let Some(link) = quickbar.get_link_at(widget_row, widget_col) {
+                    return Some(crate::data::LinkData {
+                        exist_id: link.exist_id.clone(),
+                        noun: link.noun.clone(),
+                        text: link.text.clone(),
+                        coord: link.coord.clone(),
+                    });
+                }
+            }
+        }
+
         None
     }
 
@@ -2411,6 +2516,9 @@ impl Frontend for TuiFrontend {
         // Sync spells window data from AppCore
         self.sync_spells_windows(app_core, &theme);
 
+        // Sync quickbar widgets from AppCore
+        self.sync_quickbar_widgets(app_core, &theme);
+
         // Sync progress bar data from AppCore
         self.sync_progress_bars(app_core, &theme);
         self.sync_countdowns(app_core, &theme);
@@ -2443,6 +2551,7 @@ impl Frontend for TuiFrontend {
         let mut tabbed_text_windows = std::mem::take(&mut self.tabbed_text_windows);
         let mut compass_widgets = std::mem::take(&mut self.compass_widgets);
         let mut injury_doll_widgets = std::mem::take(&mut self.injury_doll_widgets);
+        let mut quickbar_widgets = std::mem::take(&mut self.quickbar_widgets);
 
         // Clone cached theme for use in render closure (cheaper than HashMap lookup + clone per widget)
         let theme_for_render = theme.clone();
@@ -2677,6 +2786,13 @@ impl Frontend for TuiFrontend {
                             dashboard_widget.render(area, f.buffer_mut());
                         }
                     }
+                    WindowContent::QuickBar { .. } => {
+                        // Use the QuickBar widget
+                        if let Some(quickbar_widget) = quickbar_widgets.get_mut(name) {
+                            // QuickBar render method handles border styling internally
+                            quickbar_widget.render(area, f.buffer_mut(), None);
+                        }
+                    }
                     WindowContent::TabbedText(_) => {
                         // Use the TabbedTextWindow widget
                         if let Some(tabbed_window) = tabbed_text_windows.get_mut(name) {
@@ -2843,6 +2959,7 @@ impl Frontend for TuiFrontend {
         self.tabbed_text_windows = tabbed_text_windows;
         self.compass_widgets = compass_widgets;
         self.injury_doll_widgets = injury_doll_widgets;
+        self.quickbar_widgets = quickbar_widgets;
 
         Ok(())
     }

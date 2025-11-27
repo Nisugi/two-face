@@ -581,6 +581,7 @@ impl AppCore {
                 "targets" => WidgetType::Targets,
                 "players" => WidgetType::Players,
                 "spells" => WidgetType::Spells,
+                "quickbar" => WidgetType::QuickBar,
                 _ => WidgetType::Text,
             };
 
@@ -659,6 +660,9 @@ impl AppCore {
                 WidgetType::Dashboard => WindowContent::Dashboard {
                     indicators: Vec::new(),
                 },
+                WidgetType::QuickBar => WindowContent::QuickBar {
+                    content: String::new(), // Will be populated by XML messages
+                },
                 _ => WindowContent::Empty,
             };
 
@@ -730,6 +734,7 @@ impl AppCore {
             "targets" => WidgetType::Targets,
             "players" => WidgetType::Players,
             "spells" => WidgetType::Spells,
+            "quickbar" => WidgetType::QuickBar,
             _ => WidgetType::Text,
         };
 
@@ -806,6 +811,9 @@ impl AppCore {
             },
             WidgetType::Dashboard => WindowContent::Dashboard {
                 indicators: Vec::new(),
+            },
+            WidgetType::QuickBar => WindowContent::QuickBar {
+                content: "[look] [roleplay...] [actions...] [search] [inventory] [character sheet] [skill goals] [directions] [get assistance] [society] [SimuCoins]".to_string(), // Default "quick" bar - will be updated by XML messages
             },
             _ => WindowContent::Empty,
         };
@@ -900,6 +908,9 @@ impl AppCore {
                 .flush_current_stream_with_tts(&mut self.ui_state, Some(&mut self.tts_manager));
         }
 
+        // Update QuickBar cache with any new content
+        self.update_quickbar_cache();
+
         Ok(())
     }
 
@@ -909,6 +920,14 @@ impl AppCore {
         if let ParsedElement::MenuResponse { id, coords } = element {
             self.message_processor.chunk_has_silent_updates = true; // Mark as silent update
             self.handle_menu_response(id, coords);
+            self.needs_render = true;
+            return Ok(());
+        }
+
+        // Handle SwitchQuickBar specially (needs access to layout)
+        if let ParsedElement::SwitchQuickBar { id } = element {
+            self.message_processor.chunk_has_silent_updates = true; // Mark as silent update
+            self.handle_switch_quickbar(id);
             self.needs_render = true;
             return Ok(());
         }
@@ -2723,25 +2742,30 @@ impl AppCore {
 
     /// Show a window (unhide it - restore from layout template)
     pub fn show_window(&mut self, name: &str, terminal_width: u16, terminal_height: u16) {
-        // Find window in layout and mark as visible
-        let window_def_clone =
-            if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
-                // Mark as visible
-                window_def.base_mut().visible = true;
-                // Clone for use after the mutable borrow ends
-                window_def.clone()
-            } else {
-                self.add_system_message(&format!("Window template '{}' not found in layout", name));
-                return;
-            };
+        // Use Layout's add_window() which handles both:
+        // 1. Existing windows (just marks visible)
+        // 2. New windows (creates from template and adds to layout)
+        if let Err(e) = self.layout.add_window(name) {
+            self.add_system_message(&format!("Failed to add window '{}': {}", name, e));
+            return;
+        }
 
-        // Create in UI state from layout template (borrow checker happy now)
+        // Get the window definition (now guaranteed to exist)
+        let window_def_clone = self
+            .layout
+            .windows
+            .iter()
+            .find(|w| w.name() == name)
+            .expect("Window should exist after add_window")
+            .clone();
+
+        // Create in UI state from layout template
         self.add_new_window(&window_def_clone, terminal_width, terminal_height);
 
         self.add_system_message(&format!("Window '{}' shown", name));
         self.mark_layout_modified();
         self.needs_render = true;
-        tracing::info!("Showed window '{}' - restored from layout template", name);
+        tracing::info!("Showed window '{}' - added to layout and UI state", name);
     }
 
     /// Delete a window (legacy - use hide_window instead)
@@ -3457,6 +3481,74 @@ impl AppCore {
             "Created context menu with {} items",
             self.ui_state.popup_menu.as_ref().unwrap().get_items().len()
         );
+    }
+
+    /// Handle QuickBar switch command - updates window content from cached bar data
+    fn handle_switch_quickbar(&mut self, bar_id: &str) {
+        tracing::debug!("Switching QuickBar to: {}", bar_id);
+
+        // Find all QuickBar window definitions and update their content
+        for window_def in &mut self.layout.windows {
+            if let crate::config::WindowDef::QuickBar { base, data } = window_def {
+                let window_name = &base.name;
+
+                // Update the active bar
+                data.active_bar = bar_id.to_string();
+
+                // Get the cached content for this bar variation
+                if let Some(bar_content) = data.bars.get(bar_id) {
+                    // Update the window content
+                    if let Some(window) = self.ui_state.get_window_mut(window_name) {
+                        if let crate::data::WindowContent::QuickBar { ref mut content } = window.content {
+                            *content = bar_content.clone();
+                            tracing::debug!(
+                                "Switched QuickBar '{}' to variation '{}' ({} bytes)",
+                                window_name,
+                                bar_id,
+                                bar_content.len()
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "QuickBar variation '{}' not found in cache for window '{}'",
+                        bar_id,
+                        window_name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Update QuickBar cache when content changes
+    /// Call this after processing messages to sync current window content to cache
+    pub fn update_quickbar_cache(&mut self) {
+        for window_def in &mut self.layout.windows {
+            if let crate::config::WindowDef::QuickBar { base, data } = window_def {
+                let window_name = &base.name;
+                let active_bar = data.active_bar.clone();
+
+                // Get current window content
+                if let Some(window) = self.ui_state.get_window(window_name) {
+                    if let crate::data::WindowContent::QuickBar { ref content } = window.content {
+                        // Update cache if content has changed
+                        let should_update = data.bars.get(&active_bar)
+                            .map(|cached| cached != content)
+                            .unwrap_or(true); // Update if not in cache
+
+                        if should_update && !content.is_empty() {
+                            data.bars.insert(active_bar.clone(), content.clone());
+                            tracing::debug!(
+                                "Updated QuickBar cache for '{}' variation '{}' ({} bytes)",
+                                window_name,
+                                active_bar,
+                                content.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Format menu text by removing @ and # placeholders and substituting %

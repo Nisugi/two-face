@@ -190,7 +190,7 @@ impl KeybindFormWidget {
             KeyCode::Char('s') | KeyCode::Char('S')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                // Ctrl+S to save
+                // Ctrl+s to save
                 self.save_internal()
             }
             KeyCode::Char('d') | KeyCode::Char('D')
@@ -437,7 +437,7 @@ impl KeybindFormWidget {
         self.render_fields(x, y, width, buf, config, theme);
 
         // Footer (centered at row 7)
-        let footer = "Ctrl+S:Save Ctrl+D:Delete Esc:Cancel";
+        let footer = "Ctrl+s:Save Ctrl+D:Delete Esc:Cancel";
         let footer_y = y + 7;
         let footer_x = x + (width.saturating_sub(footer.len() as u16)) / 2;
         for (i, ch) in footer.chars().enumerate() {

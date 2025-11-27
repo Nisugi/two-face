@@ -36,6 +36,7 @@ pub enum WidgetType {
     Map,
     Spells,
     Spacer,
+    QuickBar,
 }
 
 // helper maybe not needed currently
@@ -72,6 +73,9 @@ pub enum WindowContent {
     },
     Dashboard {
         indicators: Vec<(String, u8)>, // (id, value) pairs
+    },
+    QuickBar {
+        content: String, // Raw content for currently active bar
     },
     Empty, // For spacers or not-yet-implemented widgets
 }

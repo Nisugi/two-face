@@ -41,7 +41,7 @@ Separate from gameplay keybinds, menu navigation shortcuts live in `menu_keybind
 - `Tab` / `Shift+Tab`: cycle form fields.
 - `Enter`: select/confirm.
 - `Esc`: cancel/close.
-- `Ctrl+S`: save in most forms.
+- `Ctrl+s`: save in most forms.
 
 ## Menus & Browsers
 

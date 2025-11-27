@@ -92,6 +92,9 @@ pub enum ParsedElement {
     ClearStream {
         id: String,
     },
+    SwitchQuickBar {
+        id: String,
+    },
     ClearDialogData {
         id: String,
     },
@@ -434,6 +437,8 @@ impl XmlParser {
             self.current_stream = "main".to_string();
         } else if tag.starts_with("<clearStream ") {
             self.handle_clear_stream(tag, elements);
+        } else if tag.starts_with("<switchQuickBar ") {
+            self.handle_switch_quickbar(tag, elements);
         } else if tag.starts_with("<prompt ") {
             self.handle_prompt(tag, elements);
         } else if tag.starts_with("<roundTime ") {
@@ -574,6 +579,13 @@ impl XmlParser {
         // <clearStream id='room'/>
         if let Some(id) = Self::extract_attribute(tag, "id") {
             elements.push(ParsedElement::ClearStream { id });
+        }
+    }
+
+    fn handle_switch_quickbar(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
+        // <switchQuickBar id='quick'/>
+        if let Some(id) = Self::extract_attribute(tag, "id") {
+            elements.push(ParsedElement::SwitchQuickBar { id });
         }
     }
 
