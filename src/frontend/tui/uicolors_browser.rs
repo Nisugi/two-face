@@ -386,7 +386,7 @@ impl UIColorEditor {
         }
 
         // Footer (one line above the bottom border)
-        let footer = " Ctrl+S:Save | Tab:Next Field | Esc:Cancel ";
+        let footer = " Ctrl+s:Save | Tab:Next Field | Esc:Cancel ";
         let footer_x = x + (width - footer.len() as u16) / 2;
         for (i, ch) in footer.chars().enumerate() {
             if let Some(cell) = buf.cell_mut((footer_x + i as u16, y + height - 2)) {
@@ -897,7 +897,7 @@ impl UIColorsBrowser {
         }
 
         // Footer
-        let footer = " Tab/Arrows:Navigate | Enter/Space:Edit | Ctrl+S:Save | Esc:Close ";
+        let footer = " Tab/Arrows:Navigate | Enter/Space:Edit | Ctrl+s:Save | Esc:Close ";
         let footer_y = y + self.height - 2;
         let footer_x = x + ((self.width - footer.len() as u16) / 2);
         for (i, ch) in footer.chars().enumerate() {

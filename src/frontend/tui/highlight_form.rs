@@ -285,7 +285,7 @@ impl HighlightFormWidget {
             KeyCode::Char('s') | KeyCode::Char('S')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                // Ctrl+S to save
+                // Ctrl+s to save
                 self.save_internal()
             }
             KeyCode::Char(' ') | KeyCode::Enter if (7..=9).contains(&self.focused_field) => {
@@ -517,7 +517,7 @@ impl HighlightFormWidget {
         self.render_fields(x, y, width, height, buf, config, theme);
 
         // Footer
-        let footer = " Ctrl+S:Save | Del/Ctrl+D:Delete | Esc:Cancel ";
+        let footer = " Ctrl+s:Save | Del/Ctrl+D:Delete | Esc:Cancel ";
         let footer_y = y + height - 2;
         let footer_x = x + ((width - footer.len() as u16) / 2);
         for (i, ch) in footer.chars().enumerate() {

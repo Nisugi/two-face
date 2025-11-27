@@ -631,6 +631,12 @@ impl MessageProcessor {
                     }
                 }
             }
+            ParsedElement::SwitchQuickBar { id } => {
+                self.chunk_has_silent_updates = true; // Mark as silent update
+
+                // Switch QuickBar is handled at AppCore level (needs access to layout cache)
+                // This is just a placeholder to prevent the catch-all from triggering
+            }
             _ => {
                 // Other elements handled elsewhere or not yet implemented
             }

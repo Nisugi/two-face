@@ -378,7 +378,7 @@ impl SpellColorFormWidget {
         y += 2;
 
         // Status bar
-        let status = "Tab:Next  Shift+Tab:Prev  Ctrl+S:Save  Esc:Close";
+        let status = "Tab:Next  Shift+Tab:Prev  Ctrl+s:Save  Esc:Close";
         buf.set_string(popup_col + 2, y, status, Style::default().fg(Color::Gray));
     }
 

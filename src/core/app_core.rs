@@ -581,6 +581,7 @@ impl AppCore {
                 "targets" => WidgetType::Targets,
                 "players" => WidgetType::Players,
                 "spells" => WidgetType::Spells,
+                "quickbar" => WidgetType::QuickBar,
                 _ => WidgetType::Text,
             };
 
@@ -659,6 +660,9 @@ impl AppCore {
                 WidgetType::Dashboard => WindowContent::Dashboard {
                     indicators: Vec::new(),
                 },
+                WidgetType::QuickBar => WindowContent::QuickBar {
+                    content: String::new(), // Will be populated by XML messages
+                },
                 _ => WindowContent::Empty,
             };
 
@@ -730,6 +734,7 @@ impl AppCore {
             "targets" => WidgetType::Targets,
             "players" => WidgetType::Players,
             "spells" => WidgetType::Spells,
+            "quickbar" => WidgetType::QuickBar,
             _ => WidgetType::Text,
         };
 
@@ -806,6 +811,9 @@ impl AppCore {
             },
             WidgetType::Dashboard => WindowContent::Dashboard {
                 indicators: Vec::new(),
+            },
+            WidgetType::QuickBar => WindowContent::QuickBar {
+                content: "[look] [roleplay...] [actions...] [search] [inventory] [character sheet] [skill goals] [directions] [get assistance] [society] [SimuCoins]".to_string(), // Default "quick" bar - will be updated by XML messages
             },
             _ => WindowContent::Empty,
         };
@@ -900,6 +908,9 @@ impl AppCore {
                 .flush_current_stream_with_tts(&mut self.ui_state, Some(&mut self.tts_manager));
         }
 
+        // Update QuickBar cache with any new content
+        self.update_quickbar_cache();
+
         Ok(())
     }
 
@@ -909,6 +920,14 @@ impl AppCore {
         if let ParsedElement::MenuResponse { id, coords } = element {
             self.message_processor.chunk_has_silent_updates = true; // Mark as silent update
             self.handle_menu_response(id, coords);
+            self.needs_render = true;
+            return Ok(());
+        }
+
+        // Handle SwitchQuickBar specially (needs access to layout)
+        if let ParsedElement::SwitchQuickBar { id } = element {
+            self.message_processor.chunk_has_silent_updates = true; // Mark as silent update
+            self.handle_switch_quickbar(id);
             self.needs_render = true;
             return Ok(());
         }
@@ -1316,6 +1335,33 @@ impl AppCore {
             .iter()
             .map(|w| w.name().to_string())
             .collect()
+    }
+
+    /// Generate a unique spacer widget name based on existing spacers in layout
+    /// Uses max number + 1 algorithm, checking ALL widgets including hidden ones
+    /// Pattern: spacer_1, spacer_2, spacer_3, etc.
+    pub fn generate_spacer_name(layout: &Layout) -> String {
+        let max_number = layout
+            .windows
+            .iter()
+            .filter_map(|w| {
+                // Only consider spacer widgets
+                match w {
+                    crate::config::WindowDef::Spacer { base, .. } => {
+                        // Extract number from name like "spacer_5"
+                        if let Some(num_str) = base.name.strip_prefix("spacer_") {
+                            num_str.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        format!("spacer_{}", max_number + 1)
     }
 
     /// List all loaded highlights
@@ -1794,294 +1840,239 @@ impl AppCore {
         static_both: &std::collections::HashSet<String>,
         static_height: &std::collections::HashSet<String>,
     ) {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
+
         if height_delta == 0 {
             return;
         }
 
-        tracing::debug!("--- HEIGHT SCALING ---");
+        tracing::debug!("--- HEIGHT SCALING (VellumFE COLUMN-BY-COLUMN) ---");
+        tracing::debug!("height_delta={}", height_delta);
 
+        // Snapshot baseline rows for calculation (so repeated columns don't amplify deltas)
+        let baseline_rows: HashMap<String, (u16, u16)> = self
+            .layout
+            .windows
+            .iter()
+            .map(|w| {
+                let base = w.base();
+                (base.name.clone(), (base.row, base.rows))
+            })
+            .collect();
+
+        // Find max column
+        let max_col = self.layout.windows.iter()
+            .map(|w| {
+                let base = w.base();
+                base.col + base.cols
+            })
+            .max()
+            .unwrap_or(0);
+
+        tracing::debug!("Processing columns 0..{}", max_col);
+
+        // Track which windows have already had their delta applied
         let mut height_applied = HashSet::new();
 
-        // Build list of ALL widgets that participate in column stacks
-        // Include static_both + static_height + scalable for natural cascading
-        // Everything flows together - no special cases, no gap preservation
-        let mut scalable_widgets: Vec<(String, u16, u16, u16, u16)> = Vec::new();
-        for window_def in &self.layout.windows {
-            let base = window_def.base();
-            scalable_widgets.push((base.name.clone(), base.row, base.rows, base.col, base.cols));
-        }
+        // Column-by-column: Calculate and immediately apply height deltas
+        for current_col in 0..max_col {
+            // Find all windows that occupy this column
+            let mut windows_at_col: Vec<String> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.col <= current_col && base.col + base.cols > current_col {
+                        Some(base.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-        while !scalable_widgets.is_empty() {
-            let anchor = scalable_widgets.remove(0);
-            let (anchor_name, anchor_row, anchor_rows, anchor_col, anchor_cols) = anchor;
-            if height_applied.contains(&anchor_name) {
+            if windows_at_col.is_empty() {
                 continue;
             }
 
-            let anchor_col_end = anchor_col + anchor_cols;
-            tracing::debug!(
-                "Processing column stack anchored by '{}' (col {}-{})",
-                anchor_name,
-                anchor_col,
-                anchor_col_end
-            );
+            tracing::debug!("Column {}: {} windows present", current_col, windows_at_col.len());
 
-            let mut widgets_in_col =
-                vec![(anchor_name.clone(), anchor_row, anchor_rows, anchor_cols)];
-            scalable_widgets.retain(|(name, row, rows, col, cols)| {
-                let col_end = *col + *cols;
-                let overlaps = *col < anchor_col_end && col_end > anchor_col;
-                if overlaps {
-                    // Include ALL overlapping windows (even if already processed)
-                    // This ensures correct proportional calculations
-                    widgets_in_col.push((name.clone(), *row, *rows, *cols));
-                    false
-                } else {
-                    true
+            // Calculate total scalable height (all non-static windows)
+            let mut total_scalable_height = 0u16;
+            for window_name in &windows_at_col {
+                // Skip if static
+                if static_both.contains(window_name.as_str()) || static_height.contains(window_name.as_str()) {
+                    continue;
                 }
-            });
 
-            // Sort by row and distribute proportionally
-            widgets_in_col.sort_by_key(|(_, row, _, _)| *row);
-
-            // Calculate total height of ONLY truly scalable windows
-            // Exclude static_both and static_height since they don't resize
-            let total_scalable_height: u16 = widgets_in_col
-                .iter()
-                .filter(|(name, _, _, _)| {
-                    !static_height.contains(name.as_str()) && !static_both.contains(name.as_str())
-                })
-                .map(|(_, _, rows, _)| *rows)
-                .sum();
+                // Get window height (include ALL non-static windows)
+                let (_, base_rows) = baseline_rows
+                    .get(window_name)
+                    .copied()
+                    .unwrap_or((0, 0));
+                total_scalable_height += base_rows;
+            }
 
             if total_scalable_height == 0 {
                 continue;
             }
 
-            let mut adjustments: Vec<(String, i32)> = Vec::new();
-            let mut redistribution_pool = 0i32;
-            let mut leftover = height_delta;
+            tracing::debug!("  Total scalable height at column {}: {}", current_col, total_scalable_height);
 
-            tracing::debug!(
-                "HEIGHT DISTRIBUTION (col {}-{}): height_delta={}, total_scalable_height={}",
-                anchor_col,
-                anchor_col_end,
-                height_delta,
-                total_scalable_height
-            );
-
-            // Calculate proportions for ALL scalable windows (including already-processed ones)
-            // This ensures consistent proportions across all column stacks
-            // static_both and static_height get adjustment of 0 but cascade
-            for (name, _row, rows, _cols) in &widgets_in_col {
-                // Skip static windows - they don't resize, but cascade in position
-                if static_height.contains(name.as_str()) || static_both.contains(name.as_str()) {
-                    let widget_type = if static_both.contains(name.as_str()) {
-                        "static_both"
-                    } else {
-                        "static_height"
-                    };
-                    tracing::debug!(
-                        "  {} (rows={}): {}, no adjustment (will cascade)",
-                        name,
-                        rows,
-                        widget_type
-                    );
+            // Distribute height_delta proportionally
+            let mut col_height_deltas: HashMap<String, i32> = HashMap::new();
+            let mut distributed: i32 = 0;
+            for window_name in &windows_at_col {
+                // Handle static windows
+                if static_both.contains(window_name.as_str()) || static_height.contains(window_name.as_str()) {
+                    col_height_deltas.insert(window_name.clone(), 0);
                     continue;
                 }
 
-                let proportion = *rows as f64 / total_scalable_height as f64;
-                let share = (proportion * height_delta as f64).floor() as i32;
+                // Calculate proportional delta for this window at this column
+                let (_, base_rows) = baseline_rows.get(window_name).copied().unwrap_or((0, 0));
+                let proportion = base_rows as f64 / total_scalable_height as f64;
+                let delta = (proportion * height_delta as f64).floor() as i32;
 
-                // Only add to adjustments if NOT already processed
-                // (we calculate for all, but only apply to unprocessed)
-                if !height_applied.contains(name) {
-                    leftover -= share;
-                    adjustments.push((name.clone(), share));
-                    tracing::debug!(
-                        "  {} (rows={}): proportion={:.4}, share={} (will apply)",
-                        name,
-                        rows,
-                        proportion,
-                        share
-                    );
-                } else {
-                    tracing::debug!(
-                        "  {} (rows={}): proportion={:.4}, share={} (already applied, skipping)",
-                        name,
-                        rows,
-                        proportion,
-                        share
-                    );
-                }
-            }
+                col_height_deltas.insert(window_name.clone(), delta);
+                distributed += delta;
 
-            tracing::debug!("  Leftover after proportional distribution: {}", leftover);
-
-            // Distribute leftover (one row at a time to first windows)
-            let mut idx = 0;
-            while leftover > 0 && idx < adjustments.len() {
-                adjustments[idx].1 += 1;
-                tracing::debug!("  Distributing +1 leftover row to {}", adjustments[idx].0);
-                leftover -= 1;
-                idx += 1;
-            }
-            while leftover < 0 && idx < adjustments.len() {
-                adjustments[idx].1 -= 1;
-                tracing::debug!("  Distributing -1 leftover row to {}", adjustments[idx].0);
-                leftover += 1;
-                idx += 1;
-            }
-
-            // Check for max_rows constraints and redistribute unused adjustments
-            let mut capped_widgets = HashSet::new();
-            for (name, adjustment) in &adjustments {
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
-                    .unwrap();
-                let base = window_def.base();
-                if let Some(max_rows) = base.max_rows {
-                    let current_rows = base.rows;
-                    let target_rows = (current_rows as i32 + adjustment).max(0) as u16;
-                    if target_rows > max_rows {
-                        let actual_adjustment = (max_rows as i32 - current_rows as i32).max(0);
-                        let unused = adjustment - actual_adjustment;
-                        redistribution_pool += unused;
-                        capped_widgets.insert(name.clone());
-                        tracing::debug!(
-                            "  {} capped at max_rows={}, unused adjustment={} added to pool",
-                            name,
-                            max_rows,
-                            unused
-                        );
-                    }
-                }
-            }
-
-            // Redistribute unused adjustments to non-capped windows
-            if redistribution_pool != 0 {
-                let recipients: Vec<_> = adjustments
-                    .iter()
-                    .map(|(n, _)| n.clone())
-                    .filter(|n| !capped_widgets.contains(n))
-                    .collect();
-                let recip_count = recipients.len() as i32;
-                if recip_count > 0 {
-                    let each = redistribution_pool / recip_count;
-                    let mut remainder = redistribution_pool % recip_count;
-                    tracing::debug!(
-                        "  Redistributing {} rows to {} recipients (each={}, remainder={})",
-                        redistribution_pool,
-                        recip_count,
-                        each,
-                        remainder
-                    );
-                    for (name, adj) in &mut adjustments {
-                        if !capped_widgets.contains(name) {
-                            let before = *adj;
-                            *adj += each;
-                            if remainder != 0 {
-                                *adj += remainder.signum();
-                                remainder -= remainder.signum();
-                            }
-                            tracing::debug!(
-                                "    {} receives redistribution: {} -> {}",
-                                name,
-                                before,
-                                *adj
-                            );
-                        }
-                    }
-                    redistribution_pool = 0;
-                }
-            }
-
-            tracing::debug!("  Final adjustments:");
-            for (name, delta) in &adjustments {
-                let orig_rows = widgets_in_col
-                    .iter()
-                    .find(|(n, _, _, _)| n == name)
-                    .map(|(_, _, r, _)| *r)
-                    .unwrap_or(0);
                 tracing::debug!(
-                    "    {}: {} rows -> +{} delta -> {} rows",
-                    name,
-                    orig_rows,
-                    delta,
-                    orig_rows as i32 + delta
+                    "    {} (rows={}): proportion={:.4}, delta={}",
+                    window_name,
+                    base_rows,
+                    proportion,
+                    delta
                 );
             }
 
-            let mut current_row = 0u16;
-            for (idx, (name, orig_row, orig_rows, _cols)) in widgets_in_col.iter().enumerate() {
-                if height_applied.contains(name) {
-                    continue;
-                }
-                let adjustment = adjustments
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, a)| *a)
-                    .unwrap_or(0);
+            // Distribute leftover rows within this column only
+            let mut leftover = height_delta - distributed;
+            if leftover != 0 {
+                // Sort by row (top to bottom)
+                windows_at_col.sort_by_key(|name| {
+                    self.layout.windows.iter()
+                        .find(|w| w.name() == name)
+                        .map(|w| w.base().row)
+                        .unwrap_or(0)
+                });
 
-                // Find window and get widget type
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
+                let mut idx = 0usize;
+                // At least one non-static window exists (total_scalable_height > 0)
+                while leftover != 0 {
+                    let name = &windows_at_col[idx % windows_at_col.len()];
+                    if static_both.contains(name.as_str()) || static_height.contains(name.as_str()) {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if let Some(delta) = col_height_deltas.get_mut(name) {
+                        if leftover > 0 {
+                            *delta += 1;
+                            leftover -= 1;
+                        } else {
+                            *delta -= 1;
+                            leftover += 1;
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            // Cascade and apply (discarding deltas for already-applied windows)
+            let mut windows_at_col_with_meta: Vec<(String, u16, u16)> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.col <= current_col && base.col + base.cols > current_col {
+                        let (orig_row, orig_rows) = baseline_rows
+                            .get(&base.name)
+                            .copied()
+                            .unwrap_or((base.row, base.rows));
+                        Some((base.name.clone(), orig_row, orig_rows))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            windows_at_col_with_meta.sort_by_key(|(_, row, _)| *row);
+
+            let mut current_row = windows_at_col_with_meta[0].1;
+            let win_count = windows_at_col_with_meta.len();
+
+            for idx in 0..win_count {
+                let (window_name, original_row, original_rows) =
+                    windows_at_col_with_meta[idx].clone();
+                let assigned_delta = *col_height_deltas.get(&window_name).unwrap_or(&0);
+
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == &window_name)
                     .unwrap();
-                let widget_type = window_def.widget_type();
                 let base = window_def.base();
+                let widget_type = window_def.widget_type();
                 let (_, min_rows) = self.widget_min_size(&widget_type);
                 let min_constraint = base.min_rows.unwrap_or(min_rows);
                 let max_constraint = base.max_rows;
 
+                if height_applied.contains(&window_name) {
+                    // Already applied: keep existing size/position but advance the cascade
+                    current_row = base.row + base.rows;
+                    continue;
+                }
+
                 let mut new_rows =
-                    (*orig_rows as i32 + adjustment).max(min_constraint as i32) as u16;
+                    (original_rows as i32 + assigned_delta).max(min_constraint as i32) as u16;
                 if let Some(max) = max_constraint {
                     new_rows = new_rows.min(max);
                 }
 
-                // Cascade from previous widget (VellumFE behavior)
-                let new_row = if idx == 0 {
-                    *orig_row  // First widget keeps original row
-                } else {
-                    current_row  // Cascade from previous widget
-                };
+                let used_delta = new_rows as i32 - original_rows as i32;
+                let mut remainder = assigned_delta - used_delta;
 
-                // Apply changes
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
                     let base = w.base_mut();
-                    base.row = new_row;
+                    base.row = current_row;
                     base.rows = new_rows;
-                    height_applied.insert(name.clone());
+                    height_applied.insert(window_name.clone());
+
+                    tracing::debug!(
+                        "  Col {}: {} row {} -> {}, rows {} -> {} (delta={})",
+                        current_col, window_name, original_row, current_row, original_rows, new_rows, assigned_delta
+                    );
                 }
 
-                current_row = new_row + new_rows;
+                current_row += new_rows;
+
+                // If constraints prevented full use of delta, distribute remainder
+                if remainder != 0 {
+                    for (name, _, _) in windows_at_col_with_meta.iter().skip(idx + 1) {
+                        if static_both.contains(name.as_str())
+                            || static_height.contains(name.as_str())
+                            || height_applied.contains(name)
+                        {
+                            continue;
+                        }
+                        if let Some(d) = col_height_deltas.get_mut(name) {
+                            if remainder == 0 {
+                                break;
+                            }
+                            if remainder > 0 {
+                                *d += 1;
+                                remainder -= 1;
+                            } else {
+                                *d -= 1;
+                                remainder += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Anchor command_input to bottom; build continuous top stack of statics
-        let new_height = if let Some(ref baseline) = self.baseline_layout {
-            if let (Some(_bw), Some(bh)) = (baseline.terminal_width, baseline.terminal_height) {
-                (bh as i32 + height_delta).max(0) as u16
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        // Snapshot baseline rows to avoid mixing updates while computing the stack
-        let baseline_rows: Vec<u16> = self.layout.windows.iter().map(|w| w.base().row).collect();
-
-        // All widgets (static_both, static_height, scalable) are now positioned
-        // as part of column stacks with natural cascading
-        // No additional positioning logic needed!
+        tracing::debug!("Height resize complete");
     }
 
     /// Apply proportional width resize (from VellumFE apply_width_resize)
@@ -2091,227 +2082,238 @@ impl AppCore {
         &mut self,
         width_delta: i32,
         static_both: &std::collections::HashSet<String>,
-        baseline_rows: &[(String, u16, u16)],
+        _baseline_rows: &[(String, u16, u16)],
     ) {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
+
         if width_delta == 0 {
             return;
         }
 
-        tracing::debug!("--- WIDTH SCALING ---");
+        tracing::debug!("--- WIDTH SCALING (VellumFE ROW-BY-ROW) ---");
+        tracing::debug!("width_delta={}", width_delta);
 
-        let mut width_applied = HashSet::new();
-        // Use baseline rows for max_row calculation
-        let max_row = baseline_rows
+        // Snapshot baseline cols for calculation (freeze widths during distribution)
+        let baseline_cols: HashMap<String, (u16, u16)> = self
+            .layout
+            .windows
             .iter()
-            .map(|(_, row, rows)| *row + *rows)
+            .map(|w| {
+                let base = w.base();
+                (base.name.clone(), (base.col, base.cols))
+            })
+            .collect();
+
+        // Find max row
+        let max_row = self.layout.windows.iter()
+            .map(|w| {
+                let base = w.base();
+                base.row + base.rows
+            })
             .max()
             .unwrap_or(0);
 
+        tracing::debug!("Processing rows 0..{}", max_row);
+
+        // Track which windows have already had their delta applied
+        let mut width_applied = HashSet::new();
+
+        // Row-by-row: Calculate and immediately apply width deltas
         for current_row in 0..max_row {
-            let mut widgets_at_row: Vec<(String, String, u16, u16, u16, u16)> = Vec::new();
-            for window_def in &self.layout.windows {
-                let base = window_def.base();
+            // Find all windows that occupy this row
+            let mut windows_at_row: Vec<String> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.row <= current_row && base.row + base.rows > current_row {
+                        Some(base.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                // Use BASELINE row positions to group windows, not current (height-adjusted) positions
-                // This ensures windows that were on the same row originally are processed together
-                let (baseline_row, baseline_rows) = baseline_rows
-                    .iter()
-                    .find(|(name, _, _)| name == &base.name)
-                    .map(|(_, row, rows)| (*row, *rows))
-                    .unwrap_or((base.row, base.rows));
-
-                // Include ALL windows that touch this baseline row (even if already processed)
-                // This ensures correct proportional calculations across all rows
-                if current_row >= baseline_row && current_row < baseline_row + baseline_rows {
-                    widgets_at_row.push((
-                        base.name.clone(),
-                        window_def.widget_type().to_string(),
-                        baseline_row,  // Use baseline row for grouping
-                        base.col,
-                        baseline_rows,  // Use baseline rows for grouping
-                        base.cols,
-                    ));
-                }
-            }
-            if widgets_at_row.is_empty() {
+            if windows_at_row.is_empty() {
                 continue;
             }
-            widgets_at_row.sort_by_key(|(_, _, _, col, _, _)| *col);
 
-            let mut total_scalable_width: u16 = 0;
-            let mut embedded_widgets = HashSet::new();
-            for (i, (_name_i, _, _, col_i, _, cols_i)) in widgets_at_row.iter().enumerate() {
-                let col_i_end = *col_i + *cols_i;
-                for (j, (name_j, _, _, col_j, _, cols_j)) in widgets_at_row.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    let col_j_end = *col_j + *cols_j;
-                    if *col_j >= *col_i && col_j_end <= col_i_end {
-                        embedded_widgets.insert(name_j.clone());
-                    }
-                }
-            }
-            for (name, _, _, _col, _, cols) in widgets_at_row.iter() {
-                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+            tracing::debug!("Row {}: {} windows present", current_row, windows_at_row.len());
+
+            // Calculate total scalable width (all non-static windows)
+            let mut total_scalable_width = 0u16;
+            for window_name in &windows_at_row {
+                // Skip if static
+                if static_both.contains(window_name.as_str()) {
                     continue;
                 }
-                // Include ALL windows in total, even if already processed (for correct proportions)
-                total_scalable_width += *cols;
+
+                // Get window width (include ALL non-static windows)
+                let (_, base_cols) = baseline_cols
+                    .get(window_name)
+                    .copied()
+                    .unwrap_or((0, 0));
+                total_scalable_width += base_cols;
             }
+
             if total_scalable_width == 0 {
                 continue;
             }
 
-            let mut adjustments: Vec<(String, i32)> = Vec::new();
-            let mut redistribution_pool = 0i32;
-            let mut leftover = width_delta;
+            tracing::debug!("  Total scalable width at row {}: {}", current_row, total_scalable_width);
 
-            // Calculate proportions for ALL windows (including already-processed ones)
-            // This ensures consistent proportions across all rows
-            for (name, _wt, _row, _col, _rows, cols) in &widgets_at_row {
-                if static_both.contains(name.as_str()) || embedded_widgets.contains(name) {
+            // Distribute width_delta proportionally
+            let mut row_width_deltas: HashMap<String, i32> = HashMap::new();
+            let mut distributed: i32 = 0;
+            for window_name in &windows_at_row {
+                // Handle static windows
+                if static_both.contains(window_name.as_str()) {
+                    row_width_deltas.insert(window_name.clone(), 0);
                     continue;
                 }
-                let proportion = *cols as f64 / total_scalable_width as f64;
-                let share = (proportion * width_delta as f64).floor() as i32;
 
-                // Only add to adjustments if NOT already processed
-                // (we calculate for all, but only apply to unprocessed)
-                if !width_applied.contains(name) {
-                    leftover -= share;
-                    adjustments.push((name.clone(), share));
-                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (will apply)", name, cols, proportion, share);
-                } else {
-                    tracing::debug!("  {} (cols={}): proportion={:.4}, share={} (already applied, skipping)", name, cols, proportion, share);
+                // Calculate proportional delta for this window at this row
+                let (_, base_cols) = baseline_cols.get(window_name).copied().unwrap_or((0, 0));
+                let proportion = base_cols as f64 / total_scalable_width as f64;
+                let delta = (proportion * width_delta as f64).floor() as i32;
+
+                row_width_deltas.insert(window_name.clone(), delta);
+                distributed += delta;
+
+                tracing::debug!(
+                    "    {} (cols={}): proportion={:.4}, delta={}",
+                    window_name,
+                    base_cols,
+                    proportion,
+                    delta
+                );
+            }
+
+            // Distribute leftover columns within this row only
+            let mut leftover = width_delta - distributed;
+            if leftover != 0 {
+                // Sort by column (left to right)
+                windows_at_row.sort_by_key(|name| {
+                    self.layout.windows.iter()
+                        .find(|w| w.name() == name)
+                        .map(|w| w.base().col)
+                        .unwrap_or(0)
+                });
+
+                let mut idx = 0usize;
+                // At least one non-static window exists (total_scalable_width > 0)
+                while leftover != 0 {
+                    let name = &windows_at_row[idx % windows_at_row.len()];
+                    if static_both.contains(name.as_str()) {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if let Some(delta) = row_width_deltas.get_mut(name) {
+                        if leftover > 0 {
+                            *delta += 1;
+                            leftover -= 1;
+                        } else {
+                            *delta -= 1;
+                            leftover += 1;
+                        }
+                    }
+                    idx += 1;
                 }
             }
 
-            // Distribute leftover (one column at a time to first windows)
-            let mut idx = 0;
-            while leftover > 0 && idx < adjustments.len() {
-                adjustments[idx].1 += 1;
-                leftover -= 1;
-                idx += 1;
-            }
-            while leftover < 0 && idx < adjustments.len() {
-                adjustments[idx].1 -= 1;
-                leftover += 1;
-                idx += 1;
-            }
+            // Cascade and apply (discarding deltas for already-applied windows)
+            let mut windows_at_row_with_meta: Vec<(String, u16, u16)> = self
+                .layout
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    let base = w.base();
+                    if base.row <= current_row && base.row + base.rows > current_row {
+                        let (orig_col, orig_cols) = baseline_cols
+                            .get(&base.name)
+                            .copied()
+                            .unwrap_or((base.col, base.cols));
+                        Some((base.name.clone(), orig_col, orig_cols))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            let mut capped_widgets = HashSet::new();
-            for (name, adjustment) in &adjustments {
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
+            windows_at_row_with_meta.sort_by_key(|(_, col, _)| *col);
+
+            let mut current_col_pos = windows_at_row_with_meta[0].1;
+            let win_count = windows_at_row_with_meta.len();
+
+            for idx in 0..win_count {
+                let (window_name, original_col, original_cols) =
+                    windows_at_row_with_meta[idx].clone();
+                let assigned_delta = *row_width_deltas.get(&window_name).unwrap_or(&0);
+
+                let window_def = self.layout.windows.iter()
+                    .find(|w| w.name() == &window_name)
                     .unwrap();
                 let base = window_def.base();
-                if let Some(max_cols) = base.max_cols {
-                    let current_cols = base.cols;
-                    let target_cols = (current_cols as i32 + adjustment).max(0) as u16;
-                    if target_cols > max_cols {
-                        let actual_adjustment = (max_cols as i32 - current_cols as i32).max(0);
-                        let unused = adjustment - actual_adjustment;
-                        redistribution_pool += unused;
-                        capped_widgets.insert(name.clone());
-                    }
+                let widget_type = window_def.widget_type();
+                let (min_cols, _) = self.widget_min_size(&widget_type);
+                let min_constraint = base.min_cols.unwrap_or(min_cols);
+                let max_constraint = base.max_cols;
+
+                if width_applied.contains(&window_name) {
+                    // Already applied: keep existing size/position but advance the cascade
+                    current_col_pos = base.col + base.cols;
+                    continue;
                 }
-            }
-            if redistribution_pool != 0 {
-                let recipients: Vec<_> = adjustments
-                    .iter()
-                    .map(|(n, _)| n.clone())
-                    .filter(|n| !capped_widgets.contains(n))
-                    .collect();
-                let recip_count = recipients.len() as i32;
-                if recip_count > 0 {
-                    let each = redistribution_pool / recip_count;
-                    let mut remainder = redistribution_pool % recip_count;
-                    for (name, adj) in &mut adjustments {
-                        if !capped_widgets.contains(name) {
-                            *adj += each;
-                            if remainder != 0 {
-                                *adj += remainder.signum();
-                                remainder -= remainder.signum();
+
+                let mut new_cols =
+                    (original_cols as i32 + assigned_delta).max(min_constraint as i32) as u16;
+                if let Some(max) = max_constraint {
+                    new_cols = new_cols.min(max);
+                }
+
+                let used_delta = new_cols as i32 - original_cols as i32;
+                let mut remainder = assigned_delta - used_delta;
+
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
+                    let base = w.base_mut();
+                    base.col = current_col_pos;
+                    base.cols = new_cols;
+                    width_applied.insert(window_name.clone());
+
+                    tracing::debug!(
+                        "  Row {}: {} col {} -> {}, cols {} -> {} (delta={})",
+                        current_row, window_name, original_col, current_col_pos, original_cols, new_cols, assigned_delta
+                    );
+                }
+
+                current_col_pos += new_cols;
+
+                // If constraints prevented full use of delta, distribute remainder
+                if remainder != 0 {
+                    for (name, _, _) in windows_at_row_with_meta.iter().skip(idx + 1) {
+                        if static_both.contains(name.as_str()) || width_applied.contains(name) {
+                            continue;
+                        }
+                        if let Some(d) = row_width_deltas.get_mut(name) {
+                            if remainder == 0 {
+                                break;
+                            }
+                            if remainder > 0 {
+                                *d += 1;
+                                remainder -= 1;
+                            } else {
+                                *d -= 1;
+                                remainder += 1;
                             }
                         }
                     }
                 }
             }
-
-            let mut previous_original_col = 0u16;
-            let mut previous_original_width = 0u16;
-            let mut current_col = 0u16;
-            let mut first_widget_end = 0u16;
-            for (idx, (name, _wt, _row, orig_col, _rows, orig_cols)) in
-                widgets_at_row.iter().enumerate()
-            {
-                if width_applied.contains(name) {
-                    let window_def = self
-                        .layout
-                        .windows
-                        .iter()
-                        .find(|w| w.name() == name)
-                        .unwrap();
-                    let base = window_def.base();
-                    // Update tracking vars for already-processed windows
-                    previous_original_col = *orig_col;
-                    previous_original_width = *orig_cols;
-                    current_col = base.col + base.cols;
-                    continue;
-                }
-                let adjustment = adjustments
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, a)| *a)
-                    .unwrap_or(0);  // static_both gets 0 adjustment
-                let window_def = self
-                    .layout
-                    .windows
-                    .iter()
-                    .find(|w| w.name() == name)
-                    .unwrap();
-                let base = window_def.base();
-                let (min_cols, _) = self.widget_min_size(&window_def.widget_type());
-                let min_constraint = base.min_cols.unwrap_or(min_cols);
-                let max_constraint = base.max_cols;
-                let mut new_cols =
-                    (*orig_cols as i32 + adjustment).max(min_constraint as i32) as u16;
-                if let Some(max) = max_constraint {
-                    new_cols = new_cols.min(max);
-                }
-                if idx == 0 {
-                    first_widget_end = *orig_col + *orig_cols;
-                }
-                let overlaps_first = idx > 0 && *orig_col < first_widget_end;
-                let overlaps_previous = if idx == 0 {
-                    false
-                } else {
-                    *orig_col < previous_original_col + previous_original_width
-                };
-                let new_col = if idx == 0 || overlaps_previous || overlaps_first {
-                    *orig_col
-                } else {
-                    let original_gap =
-                        orig_col.saturating_sub(previous_original_col + previous_original_width);
-                    current_col + original_gap
-                };
-
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
-                    let base_mut = w.base_mut();
-                    base_mut.col = new_col;
-                    base_mut.cols = new_cols;
-                    width_applied.insert(name.clone());
-                }
-                previous_original_col = *orig_col;
-                previous_original_width = *orig_cols;
-                current_col = new_col + new_cols;
-            }
         }
+
+        tracing::debug!("Width resize complete");
     }
 
     /// Sync layout WindowDefs to ui_state WindowStates without destroying content
@@ -2740,25 +2742,30 @@ impl AppCore {
 
     /// Show a window (unhide it - restore from layout template)
     pub fn show_window(&mut self, name: &str, terminal_width: u16, terminal_height: u16) {
-        // Find window in layout and mark as visible
-        let window_def_clone =
-            if let Some(window_def) = self.layout.windows.iter_mut().find(|w| w.name() == name) {
-                // Mark as visible
-                window_def.base_mut().visible = true;
-                // Clone for use after the mutable borrow ends
-                window_def.clone()
-            } else {
-                self.add_system_message(&format!("Window template '{}' not found in layout", name));
-                return;
-            };
+        // Use Layout's add_window() which handles both:
+        // 1. Existing windows (just marks visible)
+        // 2. New windows (creates from template and adds to layout)
+        if let Err(e) = self.layout.add_window(name) {
+            self.add_system_message(&format!("Failed to add window '{}': {}", name, e));
+            return;
+        }
 
-        // Create in UI state from layout template (borrow checker happy now)
+        // Get the window definition (now guaranteed to exist)
+        let window_def_clone = self
+            .layout
+            .windows
+            .iter()
+            .find(|w| w.name() == name)
+            .expect("Window should exist after add_window")
+            .clone();
+
+        // Create in UI state from layout template
         self.add_new_window(&window_def_clone, terminal_width, terminal_height);
 
         self.add_system_message(&format!("Window '{}' shown", name));
         self.mark_layout_modified();
         self.needs_render = true;
-        tracing::info!("Showed window '{}' - restored from layout template", name);
+        tracing::info!("Showed window '{}' - added to layout and UI state", name);
     }
 
     /// Delete a window (legacy - use hide_window instead)
@@ -3476,6 +3483,74 @@ impl AppCore {
         );
     }
 
+    /// Handle QuickBar switch command - updates window content from cached bar data
+    fn handle_switch_quickbar(&mut self, bar_id: &str) {
+        tracing::debug!("Switching QuickBar to: {}", bar_id);
+
+        // Find all QuickBar window definitions and update their content
+        for window_def in &mut self.layout.windows {
+            if let crate::config::WindowDef::QuickBar { base, data } = window_def {
+                let window_name = &base.name;
+
+                // Update the active bar
+                data.active_bar = bar_id.to_string();
+
+                // Get the cached content for this bar variation
+                if let Some(bar_content) = data.bars.get(bar_id) {
+                    // Update the window content
+                    if let Some(window) = self.ui_state.get_window_mut(window_name) {
+                        if let crate::data::WindowContent::QuickBar { ref mut content } = window.content {
+                            *content = bar_content.clone();
+                            tracing::debug!(
+                                "Switched QuickBar '{}' to variation '{}' ({} bytes)",
+                                window_name,
+                                bar_id,
+                                bar_content.len()
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "QuickBar variation '{}' not found in cache for window '{}'",
+                        bar_id,
+                        window_name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Update QuickBar cache when content changes
+    /// Call this after processing messages to sync current window content to cache
+    pub fn update_quickbar_cache(&mut self) {
+        for window_def in &mut self.layout.windows {
+            if let crate::config::WindowDef::QuickBar { base, data } = window_def {
+                let window_name = &base.name;
+                let active_bar = data.active_bar.clone();
+
+                // Get current window content
+                if let Some(window) = self.ui_state.get_window(window_name) {
+                    if let crate::data::WindowContent::QuickBar { ref content } = window.content {
+                        // Update cache if content has changed
+                        let should_update = data.bars.get(&active_bar)
+                            .map(|cached| cached != content)
+                            .unwrap_or(true); // Update if not in cache
+
+                        if should_update && !content.is_empty() {
+                            data.bars.insert(active_bar.clone(), content.clone());
+                            tracing::debug!(
+                                "Updated QuickBar cache for '{}' variation '{}' ({} bytes)",
+                                window_name,
+                                active_bar,
+                                content.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Format menu text by removing @ and # placeholders and substituting %
     fn format_menu_text(menu: &str, secondary_noun: Option<&str>) -> String {
         let mut text = menu.to_string();
@@ -3760,5 +3835,218 @@ impl AppCore {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Layout, WindowBase, WindowDef, SpacerWidgetData, BorderSides};
+
+    // Test helper to create a minimal WindowBase
+    fn test_window_base(name: &str) -> WindowBase {
+        WindowBase {
+            name: name.to_string(),
+            row: 0,
+            col: 0,
+            rows: 2,
+            cols: 5,
+            show_border: false,
+            border_style: "single".to_string(),
+            border_sides: BorderSides::default(),
+            border_color: None,
+            show_title: false,
+            title: None,
+            background_color: None,
+            text_color: None,
+            transparent_background: true,
+            locked: false,
+            min_rows: None,
+            max_rows: None,
+            min_cols: None,
+            max_cols: None,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn test_generate_spacer_name_empty_layout() {
+        // RED: With no spacers, should return spacer_1
+        let layout = Layout {
+            windows: vec![],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_1");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_single_spacer() {
+        // RED: With one spacer_1, should return spacer_2
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_2");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_multiple_spacers() {
+        // RED: With spacer_1, spacer_2, spacer_3, should return spacer_4
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let spacer2 = WindowDef::Spacer {
+            base: test_window_base("spacer_2"),
+            data: SpacerWidgetData {},
+        };
+        let spacer3 = WindowDef::Spacer {
+            base: test_window_base("spacer_3"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1, spacer2, spacer3],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_4");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_with_gaps() {
+        // RED: With spacer_1 and spacer_3 (gap at 2), should return spacer_4 (max + 1)
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let spacer3 = WindowDef::Spacer {
+            base: test_window_base("spacer_3"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer1, spacer3],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_4");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_ignores_non_spacers() {
+        // RED: Non-spacer widgets should be ignored
+        let text_widget = WindowDef::Text {
+            base: test_window_base("main"),
+            data: crate::config::TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+        let spacer1 = WindowDef::Spacer {
+            base: test_window_base("spacer_1"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![text_widget, spacer1],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_2");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_with_hidden_spacers() {
+        // RED: Hidden spacers should be considered (widgets can be hidden, not deleted)
+        let mut visible_base = test_window_base("spacer_1");
+        visible_base.visible = true;
+
+        let mut hidden_base = test_window_base("spacer_2");
+        hidden_base.visible = false;
+
+        let visible_spacer = WindowDef::Spacer {
+            base: visible_base,
+            data: SpacerWidgetData {},
+        };
+        let hidden_spacer = WindowDef::Spacer {
+            base: hidden_base,
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![visible_spacer, hidden_spacer],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_3");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_non_sequential() {
+        // RED: With spacer_2, spacer_5 (max is 5), should return spacer_6
+        let spacer2 = WindowDef::Spacer {
+            base: test_window_base("spacer_2"),
+            data: SpacerWidgetData {},
+        };
+        let spacer5 = WindowDef::Spacer {
+            base: test_window_base("spacer_5"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer2, spacer5],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_6");
+    }
+
+    #[test]
+    fn test_generate_spacer_name_large_numbers() {
+        // RED: Should handle large numbers correctly
+        let spacer99 = WindowDef::Spacer {
+            base: test_window_base("spacer_99"),
+            data: SpacerWidgetData {},
+        };
+        let layout = Layout {
+            windows: vec![spacer99],
+            terminal_width: None,
+            terminal_height: None,
+            base_layout: None,
+            theme: None,
+        };
+
+        let name = AppCore::generate_spacer_name(&layout);
+        assert_eq!(name, "spacer_100");
     }
 }

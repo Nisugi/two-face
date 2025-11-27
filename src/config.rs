@@ -751,6 +751,30 @@ pub struct SpellsWidgetData {
     // No extra fields currently - uses "spells" stream
 }
 
+/// QuickBar widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickBarWidgetData {
+    /// Currently active bar ("quick", "quick-combat", "quick-simu", or custom name)
+    #[serde(default = "default_quick_bar")]
+    pub active_bar: String,
+
+    /// Stored bar variations (bar_id -> raw content)
+    #[serde(default)]
+    pub bars: std::collections::HashMap<String, String>,
+
+    /// Default bar to use when active_bar is empty or invalid
+    #[serde(default = "default_quick_bar")]
+    pub default_bar: String,
+
+    /// Current scroll offset (which wrapped row is at top of viewport)
+    #[serde(default)]
+    pub scroll_offset: usize,
+}
+
+fn default_quick_bar() -> String {
+    "quick".to_string()
+}
+
 /// Window definition - enum with widget-specific variants
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "widget_type")]
@@ -890,6 +914,14 @@ pub enum WindowDef {
         #[serde(flatten)]
         data: SpellsWidgetData,
     },
+
+    #[serde(rename = "quickbar")]
+    QuickBar {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: QuickBarWidgetData,
+    },
 }
 
 impl WindowDef {
@@ -913,6 +945,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => &base.name,
             WindowDef::Spacer { base, .. } => &base.name,
             WindowDef::Spells { base, .. } => &base.name,
+            WindowDef::QuickBar { base, .. } => &base.name,
         }
     }
 
@@ -936,6 +969,7 @@ impl WindowDef {
             WindowDef::Players { .. } => "players",
             WindowDef::Spacer { .. } => "spacer",
             WindowDef::Spells { .. } => "spells",
+            WindowDef::QuickBar { .. } => "quickbar",
         }
     }
 
@@ -959,6 +993,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
+            WindowDef::QuickBar { base, .. } => base,
         }
     }
 
@@ -982,6 +1017,7 @@ impl WindowDef {
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
+            WindowDef::QuickBar { base, .. } => base,
         }
     }
 
@@ -1537,7 +1573,7 @@ fn default_cancel() -> String {
     "Esc".to_string()
 }
 fn default_save() -> String {
-    "Ctrl+S".to_string()
+    "Ctrl+s".to_string()
 }
 fn default_delete() -> String {
     "Delete".to_string()
@@ -2215,28 +2251,16 @@ impl Layout {
                 {
                     if curr_width != layout_width || curr_height != layout_height {
                         tracing::info!(
-                            "Terminal size changed from {}x{} to {}x{}, scaling from base layout",
+                            "Terminal size changed from {}x{} to {}x{}, scaling current layout (preserving user customizations like spacers)",
                             layout_width,
                             layout_height,
                             curr_width,
                             curr_height
                         );
 
-                        // Try to load base layout for accurate scaling
-                        let base_path = shared_layouts_dir.join(format!("{}.toml", base_name));
-                        if base_path.exists() {
-                            match Self::load_from_file(&base_path) {
-                                Ok(base_layout) => {
-                                    tracing::info!("Scaling from base layout '{}'", base_name);
-                                    layout = base_layout;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to load base layout '{}': {}, using auto layout as base", base_name, e);
-                                }
-                            }
-                        }
-
-                        // Scale to current terminal size
+                        // DO NOT load base layout - it would overwrite user customizations!
+                        // The current layout (with spacers and other customizations) is the correct baseline
+                        // Scale the CURRENT layout to the new terminal size
                         layout.scale_to_terminal_size(curr_width, curr_height);
                     }
                 }
@@ -2419,6 +2443,16 @@ impl Layout {
     /// Saves to: ~/.two-face/default/layouts/{name}.toml
     /// Normalize windows before saving - convert None colors back to "-" to preserve transparency
     fn normalize_windows_for_save(&mut self) {
+        // Sort windows: spacers last, others maintain relative order
+        // This prevents spacers from appearing first in TOML and overlapping during resize
+        self.windows.sort_by_key(|w| {
+            if w.widget_type() == "spacer" {
+                1 // Spacers go last
+            } else {
+                0 // All other windows maintain order
+            }
+        });
+
         for window in &mut self.windows {
             // Convert None to Some("-") for color fields to preserve transparency setting
             let normalize = |field: &mut Option<String>| {
@@ -2534,6 +2568,33 @@ impl Layout {
     }
 
     /// Add a window to the layout (from template or make visible if exists)
+    /// Generate a unique spacer widget name based on existing spacers in layout
+    /// Uses max number + 1 algorithm, checking ALL widgets including hidden ones
+    /// Pattern: spacer_1, spacer_2, spacer_3, etc.
+    pub fn generate_spacer_name(&self) -> String {
+        let max_number = self
+            .windows
+            .iter()
+            .filter_map(|w| {
+                // Only consider spacer widgets
+                match w {
+                    WindowDef::Spacer { base, .. } => {
+                        // Extract number from name like "spacer_5"
+                        if let Some(num_str) = base.name.strip_prefix("spacer_") {
+                            num_str.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        format!("spacer_{}", max_number + 1)
+    }
+
     pub fn add_window(&mut self, name: &str) -> Result<()> {
         // Check if window already exists in layout
         if let Some(existing) = self.windows.iter_mut().find(|w| w.name() == name) {
@@ -2546,6 +2607,13 @@ impl Layout {
         // Get template
         let mut window_def = Config::get_window_template(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown window template: {}", name))?;
+
+        // Special handling for spacer: auto-generate unique name
+        if name == "spacer" {
+            let auto_name = self.generate_spacer_name();
+            window_def.base_mut().name = auto_name.clone();
+            tracing::info!("Auto-generated spacer name: {}", auto_name);
+        }
 
         // Set visible
         window_def.base_mut().visible = true;
@@ -2685,6 +2753,7 @@ impl Config {
                     title: Some("Story".to_string()),
                     rows: 37,
                     cols: 120,
+                    locked: true,
                     ..base_defaults
                 },
                 data: TextWidgetData {
@@ -2737,6 +2806,7 @@ impl Config {
                     cols: 120,
                     min_rows: Some(1),
                     max_rows: Some(3),
+                    locked: true,
                     ..base_defaults.clone()
                 },
                 data: CommandInputWidgetData::default(),
@@ -3254,6 +3324,22 @@ impl Config {
                 },
             }),
 
+            "society" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "society".to_string(),
+                    title: Some("Society".to_string()),
+                    rows: 10,
+                    cols: 50,
+                    show_border: true,
+                    text_color: Some("#9370DB".to_string()), // Medium purple
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["society".to_string()],
+                    buffer_size: 500,
+                },
+            }),
+
             "spells" => Some(WindowDef::Spells {
                 base: WindowBase {
                     name: "spells".to_string(),
@@ -3262,9 +3348,52 @@ impl Config {
                     cols: 40,
                     show_border: true,
                     text_color: Some("#9370DB".to_string()), // Medium purple
-                    ..base_defaults
+                    ..base_defaults.clone()
                 },
                 data: SpellsWidgetData {},
+            }),
+
+            "quickbar" => Some(WindowDef::QuickBar {
+                base: WindowBase {
+                    name: "quickbar".to_string(),
+                    title: None, // No title bar for QuickBar
+                    rows: 1, // Default 1 row
+                    cols: 80,
+                    show_border: true,
+                    show_title: false, // Explicitly no title
+                    min_rows: Some(1),
+                    max_rows: Some(5), // Reasonable maximum
+                    ..base_defaults
+                },
+                data: QuickBarWidgetData {
+                    active_bar: "quick".to_string(),
+                    bars: {
+                        let mut bars = std::collections::HashMap::new();
+                        // Pre-populate with default bar content from GemStone IV
+                        bars.insert("quick".to_string(),
+                            "[look] [roleplay...] [actions...] [search] [inventory] [character sheet] [skill goals] [directions] [get assistance] [society] [SimuCoins]".to_string());
+                        bars.insert("quick-combat".to_string(),
+                            "[look] [attack] [ambush] [aim] [target] [fire] [multistrike] [targeted multistrike] [maneuvers]".to_string());
+                        bars.insert("quick-simu".to_string(),
+                            "[policy] [news] [calendar] [documentation] [premium] [platinum] [maps] [Discord] [version notes] [SimuCoins Store]".to_string());
+                        bars
+                    },
+                    default_bar: "quick".to_string(),
+                    scroll_offset: 0,
+                },
+            }),
+
+            "spacer" => Some(WindowDef::Spacer {
+                base: WindowBase {
+                    name: String::new(), // Will be set by caller with auto-generated name
+                    rows: 2,
+                    cols: 2,
+                    show_border: false, // Spacers never show borders
+                    show_title: false, // Spacers never show titles
+                    transparent_background: false, // Respects theme background color
+                    ..base_defaults
+                },
+                data: SpacerWidgetData {},
             }),
 
             _ => None,
@@ -3295,6 +3424,9 @@ impl Config {
             "familiar",
             "ambients",
             "bounty",
+            "society",
+            // Special widgets
+            "quickbar",
             // Countdowns
             "roundtime",
             "casttime",
@@ -3314,6 +3446,7 @@ impl Config {
             "spells",
             "compass",
             "injuries",
+            "spacer",
             // command_input is NOT in this list - it's always present and can't be added/removed
         ]
     }
@@ -3908,5 +4041,742 @@ impl Default for Config {
             menu_keybinds: MenuKeybinds::default(),
             active_theme: default_theme_name(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spacer_template_exists() {
+        // RED: Spacer template should exist and be retrievable
+        let template = Config::get_window_template("spacer");
+        assert!(template.is_some(), "Spacer template should exist");
+    }
+
+    #[test]
+    fn test_spacer_template_returns_spacer_widget() {
+        // RED: Template should return Spacer widget type
+        let template = Config::get_window_template("spacer");
+        assert!(template.is_some());
+
+        match template.unwrap() {
+            WindowDef::Spacer { .. } => {
+                // Expected
+            }
+            _ => {
+                panic!("Expected WindowDef::Spacer variant");
+            }
+        }
+    }
+
+    #[test]
+    fn test_spacer_template_widget_type() {
+        // RED: widget_type() should return "spacer"
+        let template = Config::get_window_template("spacer").expect("Spacer template exists");
+        assert_eq!(template.widget_type(), "spacer");
+    }
+
+    #[test]
+    fn test_spacer_template_defaults() {
+        // GREEN: Spacer template should have sensible defaults
+        let template = Config::get_window_template("spacer").expect("Spacer template exists");
+
+        if let WindowDef::Spacer { base, .. } = template {
+            // Name should be empty (will be set by caller)
+            assert_eq!(base.name, "");
+
+            // Dimensions - minimal 2x2 spacer
+            assert_eq!(base.rows, 2);
+            assert_eq!(base.cols, 2);
+
+            // Spacer should NOT show borders
+            assert!(!base.show_border);
+
+            // Spacer should NOT show title
+            assert!(!base.show_title);
+
+            // Should NOT be transparent (respects theme background color)
+            assert!(!base.transparent_background);
+
+            // Should be visible
+            assert!(base.visible);
+        } else {
+            panic!("Expected WindowDef::Spacer variant");
+        }
+    }
+
+    #[test]
+    fn test_spacer_in_templates_list() {
+        // RED: Spacer should be in the list of available templates
+        let templates = Config::list_window_templates();
+        assert!(
+            templates.contains(&"spacer"),
+            "Spacer should be in available templates list"
+        );
+    }
+
+    #[test]
+    fn test_spacer_widget_category() {
+        // RED: Spacer should be categorized as "Other"
+        let category = WidgetCategory::from_widget_type("spacer");
+        assert_eq!(category, WidgetCategory::Other);
+    }
+
+    #[test]
+    fn test_spacer_in_templates_by_category() {
+        // RED: Spacer should appear in templates by category under "Other"
+        let by_category = Config::get_templates_by_category();
+
+        if let Some(other_templates) = by_category.get(&WidgetCategory::Other) {
+            assert!(
+                other_templates.contains(&"spacer".to_string()),
+                "Spacer should be in Other category"
+            );
+        } else {
+            panic!("Other category should exist");
+        }
+    }
+
+    #[test]
+    fn test_spacer_data_structure() {
+        // RED: SpacerWidgetData should be valid
+        let template = Config::get_window_template("spacer").expect("Spacer template exists");
+
+        if let WindowDef::Spacer { data, .. } = template {
+            // Should construct without issues
+            let _data = SpacerWidgetData {};
+            assert_eq!(data, SpacerWidgetData {});
+        } else {
+            panic!("Expected WindowDef::Spacer variant");
+        }
+    }
+
+    #[test]
+    fn test_spacer_toml_serialization() {
+        // RED: Spacer widget should serialize to TOML
+        let spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 2,
+                col: 5,
+                rows: 3,
+                cols: 8,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let layout = Layout {
+            windows: vec![spacer],
+            terminal_width: Some(200),
+            terminal_height: Some(50),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Should serialize without error
+        let toml_str = toml::to_string_pretty(&layout).expect("Failed to serialize layout");
+        assert!(!toml_str.is_empty());
+        assert!(toml_str.contains("spacer_1"));
+    }
+
+    #[test]
+    fn test_spacer_toml_deserialization() {
+        // RED: Spacer widget should deserialize from TOML
+        let toml_str = r#"
+terminal_width = 200
+terminal_height = 50
+
+[[windows]]
+widget_type = "spacer"
+name = "spacer_1"
+row = 2
+col = 5
+rows = 3
+cols = 8
+show_border = false
+show_title = false
+transparent_background = true
+visible = true
+"#;
+
+        let layout: Layout = toml::from_str(toml_str).expect("Failed to deserialize layout");
+        assert_eq!(layout.windows.len(), 1);
+        assert_eq!(layout.windows[0].widget_type(), "spacer");
+        assert_eq!(layout.windows[0].name(), "spacer_1");
+    }
+
+    #[test]
+    fn test_spacer_toml_round_trip() {
+        // RED: Layout with spacer should survive serialize/deserialize round-trip
+        let spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_2".to_string(),
+                row: 5,
+                col: 10,
+                rows: 4,
+                cols: 6,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let original_layout = Layout {
+            windows: vec![spacer],
+            terminal_width: Some(240),
+            terminal_height: Some(60),
+            base_layout: Some("default".to_string()),
+            theme: Some("classic".to_string()),
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string_pretty(&original_layout).expect("Failed to serialize");
+
+        // Deserialize back
+        let restored_layout: Layout = toml::from_str(&toml_str).expect("Failed to deserialize");
+
+        // Verify structure
+        assert_eq!(restored_layout.windows.len(), 1);
+        assert_eq!(restored_layout.terminal_width, Some(240));
+        assert_eq!(restored_layout.terminal_height, Some(60));
+        assert_eq!(restored_layout.base_layout, Some("default".to_string()));
+        assert_eq!(restored_layout.theme, Some("classic".to_string()));
+
+        // Verify spacer properties
+        assert_eq!(restored_layout.windows[0].widget_type(), "spacer");
+        assert_eq!(restored_layout.windows[0].name(), "spacer_2");
+        let base = restored_layout.windows[0].base();
+        assert_eq!(base.row, 5);
+        assert_eq!(base.col, 10);
+        assert_eq!(base.rows, 4);
+        assert_eq!(base.cols, 6);
+        assert!(!base.show_border);
+        assert!(!base.show_title);
+        assert!(base.transparent_background);
+        assert!(base.visible);
+    }
+
+    #[test]
+    fn test_multiple_spacers_toml_round_trip() {
+        // RED: Layout with multiple spacers should preserve all of them
+        let spacer1 = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 0,
+                rows: 2,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let spacer2 = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_2".to_string(),
+                row: 10,
+                col: 20,
+                rows: 3,
+                cols: 8,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let original_layout = Layout {
+            windows: vec![spacer1, spacer2],
+            terminal_width: Some(200),
+            terminal_height: Some(50),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Serialize and deserialize
+        let toml_str = toml::to_string_pretty(&original_layout).expect("Failed to serialize");
+        let restored_layout: Layout = toml::from_str(&toml_str).expect("Failed to deserialize");
+
+        // Verify both spacers are present
+        assert_eq!(restored_layout.windows.len(), 2);
+        assert_eq!(restored_layout.windows[0].name(), "spacer_1");
+        assert_eq!(restored_layout.windows[1].name(), "spacer_2");
+        assert_eq!(restored_layout.windows[0].base().row, 0);
+        assert_eq!(restored_layout.windows[1].base().row, 10);
+    }
+
+    #[test]
+    fn test_hidden_spacer_toml_round_trip() {
+        // RED: Hidden spacers should persist in layout files
+        let visible_spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 0,
+                rows: 2,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let hidden_spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_2".to_string(),
+                row: 5,
+                col: 10,
+                rows: 2,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: false,  // Hidden!
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let original_layout = Layout {
+            windows: vec![visible_spacer, hidden_spacer],
+            terminal_width: Some(200),
+            terminal_height: Some(50),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Serialize and deserialize
+        let toml_str = toml::to_string_pretty(&original_layout).expect("Failed to serialize");
+        let restored_layout: Layout = toml::from_str(&toml_str).expect("Failed to deserialize");
+
+        // Verify both spacers are present, including hidden one
+        assert_eq!(restored_layout.windows.len(), 2);
+        assert_eq!(restored_layout.windows[0].name(), "spacer_1");
+        assert_eq!(restored_layout.windows[1].name(), "spacer_2");
+
+        // Verify visibility state is preserved
+        assert!(restored_layout.windows[0].base().visible);
+        assert!(!restored_layout.windows[1].base().visible);
+    }
+
+    #[test]
+    fn test_spacer_resize_scales_proportionally() {
+        // RED: Spacers should scale proportionally during resize
+        // Create layout: Widget A (0,0 10x10) - spacer (10,0 5x10) - Widget B (15,0 10x10)
+        let widget_a = WindowDef::Text {
+            base: WindowBase {
+                name: "widget_a".to_string(),
+                row: 0,
+                col: 0,
+                rows: 10,
+                cols: 10,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+
+        let spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 10,
+                rows: 10,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let widget_b = WindowDef::Text {
+            base: WindowBase {
+                name: "widget_b".to_string(),
+                row: 0,
+                col: 15,
+                rows: 10,
+                cols: 10,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+
+        let mut layout = Layout {
+            windows: vec![widget_a, spacer, widget_b],
+            terminal_width: Some(50),
+            terminal_height: Some(20),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Resize to 100x40 (2x scale)
+        layout.scale_to_terminal_size(100, 40);
+
+        // Verify spacer scaled proportionally
+        let spacer_base = layout.windows[1].base();
+        assert_eq!(spacer_base.col, 20); // 10 * 2 = 20
+        assert_eq!(spacer_base.cols, 10); // 5 * 2 = 10
+        assert_eq!(spacer_base.row, 0); // 0 * 2 = 0
+        assert_eq!(spacer_base.rows, 20); // 10 * 2 = 20
+    }
+
+    #[test]
+    fn test_spacer_maintains_gap_after_resize() {
+        // RED: Spacer should maintain gap between widgets after resize
+        // Setup: Widget A at col 0 (10 wide), spacer at col 10 (5 wide), Widget B at col 15 (10 wide)
+        let widget_a = WindowDef::Text {
+            base: WindowBase {
+                name: "a".to_string(),
+                row: 0,
+                col: 0,
+                rows: 10,
+                cols: 10,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+
+        let spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 10,
+                rows: 10,
+                cols: 5,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let widget_b = WindowDef::Text {
+            base: WindowBase {
+                name: "b".to_string(),
+                row: 0,
+                col: 15,
+                rows: 10,
+                cols: 10,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 1000,
+            },
+        };
+
+        let mut layout = Layout {
+            windows: vec![widget_a, spacer, widget_b],
+            terminal_width: Some(50),
+            terminal_height: Some(20),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Verify gap before resize: A ends at 10, spacer starts at 10, B starts at 15
+        assert_eq!(layout.windows[0].base().col + layout.windows[0].base().cols, 10); // A: 0+10
+        assert_eq!(layout.windows[1].base().col, 10); // Spacer starts at 10
+        assert_eq!(layout.windows[2].base().col, 15); // B starts at 15
+
+        // Resize to 100x40 (2x scale)
+        layout.scale_to_terminal_size(100, 40);
+
+        // After resize: Gap should still exist, proportionally
+        // A at 0, 20 wide -> ends at 20
+        // Spacer at 20, 10 wide -> covers 20-30
+        // B at 30, 20 wide -> starts at 30
+        let a_end = layout.windows[0].base().col + layout.windows[0].base().cols;
+        let spacer_start = layout.windows[1].base().col;
+        let b_start = layout.windows[2].base().col;
+
+        // Gap maintained: A-end == spacer-start, spacer-end == B-start
+        assert_eq!(a_end, spacer_start);
+        assert_eq!(
+            spacer_start + layout.windows[1].base().cols,
+            b_start
+        );
+    }
+
+    #[test]
+    fn test_spacer_no_widget_collision_after_resize() {
+        // RED: Spacers should prevent widget collisions after resize
+        // Setup: Simple 2-widget layout separated by spacer
+        let widget_a = WindowDef::Text {
+            base: WindowBase {
+                name: "main".to_string(),
+                row: 0,
+                col: 0,
+                rows: 20,
+                cols: 30,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: true,
+                title: Some("Main".to_string()),
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["main".to_string()],
+                buffer_size: 5000,
+            },
+        };
+
+        let spacer = WindowDef::Spacer {
+            base: WindowBase {
+                name: "spacer_1".to_string(),
+                row: 0,
+                col: 30,
+                rows: 20,
+                cols: 2,
+                show_border: false,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: false,
+                title: None,
+                background_color: None,
+                text_color: None,
+                transparent_background: true,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: SpacerWidgetData {},
+        };
+
+        let widget_b = WindowDef::Text {
+            base: WindowBase {
+                name: "status".to_string(),
+                row: 0,
+                col: 32,
+                rows: 20,
+                cols: 20,
+                show_border: true,
+                border_style: "single".to_string(),
+                border_sides: BorderSides::default(),
+                border_color: None,
+                show_title: true,
+                title: Some("Status".to_string()),
+                background_color: None,
+                text_color: None,
+                transparent_background: false,
+                locked: false,
+                min_rows: None,
+                max_rows: None,
+                min_cols: None,
+                max_cols: None,
+                visible: true,
+            },
+            data: TextWidgetData {
+                streams: vec!["status".to_string()],
+                buffer_size: 100,
+            },
+        };
+
+        let mut layout = Layout {
+            windows: vec![widget_a, spacer, widget_b],
+            terminal_width: Some(100),
+            terminal_height: Some(25),
+            base_layout: None,
+            theme: None,
+        };
+
+        // Verify initial no overlap
+        let a_end = layout.windows[0].base().col + layout.windows[0].base().cols;
+        let spacer_start = layout.windows[1].base().col;
+        assert_eq!(a_end, spacer_start, "Initial state: A should end where spacer starts");
+
+        // Resize to 200x50 (2x scale)
+        layout.scale_to_terminal_size(200, 50);
+
+        // Verify no collision after resize
+        let a_end = layout.windows[0].base().col + layout.windows[0].base().cols;
+        let spacer_start = layout.windows[1].base().col;
+        let spacer_end = layout.windows[1].base().col + layout.windows[1].base().cols;
+        let b_start = layout.windows[2].base().col;
+
+        // Should maintain separation
+        assert!(a_end <= spacer_start, "A should not overlap spacer");
+        assert!(spacer_end <= b_start, "Spacer should not overlap B");
     }
 }

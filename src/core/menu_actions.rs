@@ -27,7 +27,7 @@ pub enum MenuAction {
     Cancel, // Esc - close widget
 
     // Editing
-    Save,   // Ctrl+S
+    Save,   // Ctrl+s
     Delete, // Delete key or Ctrl+D
 
     // Text Editing (always available in TextAreas)
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_normalize_keybind() {
-        assert_eq!(normalize_keybind("Ctrl+S"), "Ctrl+S");
+        assert_eq!(normalize_keybind("Ctrl+s"), "Ctrl+s");
         assert_eq!(normalize_keybind("Shift+Up"), "Shift+Up");
         assert_eq!(normalize_keybind("Enter"), "Enter");
         assert_eq!(normalize_keybind("Control+A"), "Ctrl+A"); // Normalize Control -> Ctrl
