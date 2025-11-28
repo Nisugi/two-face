@@ -174,17 +174,20 @@ impl Countdown {
             return;
         }
 
-        // Simple block-based countdown:
-        // - Max 10 blocks
-        // - Show N blocks where N = min(remaining_seconds, 10)
-        const MAX_BLOCKS: u32 = 10;
-        let blocks_to_show = remaining.min(MAX_BLOCKS);
-
         // Right-align the number so it doesn't shift when going from 10->9
         // Reserve 2 chars for the number + 1 for space = 3 total
         // Format: " 9 ████████" or "10 ████████"
         let remaining_text = format!("{:>2} ", remaining);
         let text_width = remaining_text.len() as u16; // Always 3 chars
+
+        // Dynamic block-based countdown - adapts to widget width
+        // Calculate max blocks based on available space after the number
+        let max_blocks = if inner_area.width > text_width {
+            (inner_area.width - text_width) as u32
+        } else {
+            0
+        };
+        let blocks_to_show = remaining.min(max_blocks);
 
         // Render countdown number on the left (right-aligned within 3 chars)
         let y = inner_area.y;
