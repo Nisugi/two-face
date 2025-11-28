@@ -2769,7 +2769,6 @@ impl Config {
                     rows: 10,
                     cols: 80,
                     min_rows: Some(5),
-                    max_rows: Some(10),
                     ..base_defaults.clone()
                 },
                 data: RoomWidgetData {
@@ -2788,8 +2787,7 @@ impl Config {
                     title: Some("Inventory".to_string()),
                     rows: 20,
                     cols: 40,
-                    min_rows: Some(5),
-                    max_rows: Some(50),
+                    min_rows: Some(4),
                     ..base_defaults.clone()
                 },
                 data: InventoryWidgetData {
@@ -3027,9 +3025,9 @@ impl Config {
                     rows: 5, // 3 for compass grid + 2 for border
                     cols: 9, // 7 for compass grid + 2 for border
                     show_border: true,
-                    min_rows: Some(5),
+                    min_rows: Some(3),
                     max_rows: Some(5),
-                    min_cols: Some(9),
+                    min_cols: Some(7),
                     max_cols: Some(9),
                     ..base_defaults.clone()
                 },
@@ -3048,9 +3046,9 @@ impl Config {
                     rows: 8,  // 6 for injury doll + 2 for border
                     cols: 10, // 8 for injury doll (5+3 for labels) + 2 for border
                     show_border: true,
-                    min_rows: Some(8),
+                    min_rows: Some(6),
                     max_rows: Some(8),
-                    min_cols: Some(10),
+                    min_cols: Some(8),
                     max_cols: Some(10),
                     ..base_defaults.clone()
                 },
@@ -3356,7 +3354,7 @@ impl Config {
                     show_border: true,
                     show_title: false, // Explicitly no title
                     min_rows: Some(1),
-                    max_rows: Some(5), // Reasonable maximum
+                    max_rows: Some(1),
                     ..base_defaults
                 },
                 data: QuickBarWidgetData {
