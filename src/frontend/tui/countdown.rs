@@ -148,13 +148,23 @@ impl Countdown {
             .map(|c| Self::parse_color(c))
             .unwrap_or(Color::White);
 
-        // Clear the bar area
+        // Determine background color - use theme background if not transparent
+        let bg_color = if !self.transparent_background {
+            Some(theme.window_background)
+        } else {
+            None
+        };
+
+        // Clear the bar area with appropriate background
         let y = inner_area.y;
         if y < buf.area().height {
             for i in 0..inner_area.width {
                 let x = inner_area.x + i;
                 if x < buf.area().width {
                     buf[(x, y)].set_char(' ');
+                    if let Some(bg) = bg_color {
+                        buf[(x, y)].set_bg(bg);
+                    }
                 }
             }
         }
@@ -184,6 +194,9 @@ impl Countdown {
                 if x < inner_area.x + inner_area.width && x < buf.area().width {
                     buf[(x, y)].set_char(c);
                     buf[(x, y)].set_fg(text_color);
+                    if let Some(bg) = bg_color {
+                        buf[(x, y)].set_bg(bg);
+                    }
                 }
             }
 
@@ -195,6 +208,9 @@ impl Countdown {
                     if x < buf.area().width {
                         buf[(x, y)].set_char(self.icon);
                         buf[(x, y)].set_fg(text_color);
+                        if let Some(bg) = bg_color {
+                            buf[(x, y)].set_bg(bg);
+                        }
                     }
                 }
             }

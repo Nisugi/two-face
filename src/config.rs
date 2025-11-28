@@ -2973,8 +2973,6 @@ impl Config {
                     rows: 3,
                     cols: 20,
                     show_border: true,
-                    min_rows: Some(1),
-                    max_rows: Some(3),
                     text_color: Some("#FF0000".to_string()), // Red
                     ..base_defaults.clone()
                 },
@@ -2993,8 +2991,6 @@ impl Config {
                     rows: 3,
                     cols: 20,
                     show_border: true,
-                    min_rows: Some(1),
-                    max_rows: Some(3),
                     text_color: Some("#00BFFF".to_string()), // Deep sky blue
                     ..base_defaults.clone()
                 },
@@ -3013,8 +3009,6 @@ impl Config {
                     rows: 3,
                     cols: 20,
                     show_border: true,
-                    min_rows: Some(1),
-                    max_rows: Some(3),
                     text_color: Some("#FFFF00".to_string()), // Yellow
                     ..base_defaults.clone()
                 },
