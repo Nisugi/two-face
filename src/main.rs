@@ -66,6 +66,14 @@ struct Cli {
     #[arg(long, requires = "direct")]
     direct_character: Option<String>,
 
+    /// Enable clickable links in the interface
+    #[arg(long)]
+    links: bool,
+
+    /// Disable startup music
+    #[arg(long)]
+    nomusic: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -1036,11 +1044,19 @@ fn main() -> Result<()> {
     // Load configuration
     let port = cli.port.unwrap_or(8000);
     let character = cli.character.as_deref();
-    let config = if let Some(config_path) = &cli.config {
+    let mut config = if let Some(config_path) = &cli.config {
         config::Config::load_from_path(config_path, character, port)?
     } else {
         config::Config::load_with_options(character, port)?
     };
+
+    // Apply CLI flag overrides
+    if cli.nomusic {
+        config.ui.startup_music = false;
+    }
+    // Note: --links flag is reserved for future clickable links feature
+    // Currently no-op but prevents argument errors
+    let _links_enabled = cli.links;
 
     let direct_config = build_direct_config(&cli, &config)?;
 
