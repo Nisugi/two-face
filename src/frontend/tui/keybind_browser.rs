@@ -7,7 +7,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Clear, Widget},
 };
 use std::collections::HashMap;
@@ -132,7 +132,7 @@ impl KeybindBrowser {
             let entry_section = &entry.action_type;
 
             // Add section header if needed
-            if last_section.as_deref() != Some(entry_section) {
+            if last_section != Some(entry_section) {
                 total_display_rows += 1;
                 last_section = Some(entry_section);
             }
@@ -236,7 +236,7 @@ impl KeybindBrowser {
         }
 
         // Draw border
-        self.draw_border(x, y, width, height, buf, &theme);
+        self.draw_border(x, y, width, height, buf, theme);
 
         // Title (left-aligned on top border)
         let title = format!(" Keybinds ({}) ", self.entries.len());
@@ -289,7 +289,7 @@ impl KeybindBrowser {
             let entry_section = &entry.action_type;
 
             // Check if we need a section header
-            if last_section.as_deref() != Some(entry_section) {
+            if last_section != Some(entry_section) {
                 // Always increment display_row for the header
                 if display_row >= visible_start {
                     // Render header if in visible range AND we have room
@@ -326,7 +326,7 @@ impl KeybindBrowser {
             }
 
             // If this is a new section in the visible area and we haven't rendered its header yet (sticky header)
-            if last_rendered_section.as_deref() != Some(entry_section) && render_row < list_height {
+            if last_rendered_section != Some(entry_section) && render_row < list_height {
                 let current_y = list_y + render_row as u16;
                 let header_text = if entry_section == "Action" {
                     " ═══ ACTIONS ═══"

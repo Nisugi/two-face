@@ -41,7 +41,7 @@ impl ThemeBrowser {
         // Merge and sort all themes
         let mut themes: Vec<(String, AppTheme)> = builtin_themes
             .into_iter()
-            .chain(custom_themes.into_iter())
+            .chain(custom_themes)
             .collect();
         themes.sort_by(|a, b| a.0.cmp(&b.0));
 

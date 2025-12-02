@@ -169,7 +169,7 @@ impl SettingsEditor {
 
         for (idx, (_, item)) in filtered.iter().enumerate() {
             // Add section header row if category changes
-            if last_category != Some(&item.category.as_str()) {
+            if last_category != Some(item.category.as_str()) {
                 total_display_rows += 1;
                 last_category = Some(&item.category);
             }
@@ -286,12 +286,10 @@ impl SettingsEditor {
                 if let Some(current_idx) = options.iter().position(|o| o == current) {
                     let new_idx = if forward {
                         (current_idx + 1) % options.len()
+                    } else if current_idx == 0 {
+                        options.len() - 1
                     } else {
-                        if current_idx == 0 {
-                            options.len() - 1
-                        } else {
-                            current_idx - 1
-                        }
+                        current_idx - 1
                     };
                     *current = options[new_idx].clone();
                 }
@@ -304,48 +302,48 @@ impl SettingsEditor {
             match key.code {
                 KeyCode::Esc => {
                     self.stop_editing(false);
-                    return true;
+                    true
                 }
                 KeyCode::Enter => {
                     self.stop_editing(true);
-                    return true;
+                    true
                 }
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // Select all
-                    return true;
+                    true
                 }
                 KeyCode::Backspace => {
                     self.edit_buffer.pop();
-                    return true;
+                    true
                 }
                 KeyCode::Char(c) => {
                     self.edit_buffer.push(c);
-                    return true;
+                    true
                 }
-                _ => return true,
+                _ => true,
             }
         } else {
             // Not editing - handle navigation and actions
             match key.code {
                 KeyCode::Up => {
                     self.previous();
-                    return true;
+                    true
                 }
                 KeyCode::Down => {
                     self.next();
-                    return true;
+                    true
                 }
                 KeyCode::PageUp => {
                     self.page_up();
-                    return true;
+                    true
                 }
                 KeyCode::PageDown => {
                     self.page_down();
-                    return true;
+                    true
                 }
                 KeyCode::Enter => {
                     self.start_editing();
-                    return true;
+                    true
                 }
                 KeyCode::Char(' ') => {
                     // Toggle boolean or start editing enum
@@ -358,7 +356,7 @@ impl SettingsEditor {
                             return true;
                         }
                     }
-                    return false;
+                    false
                 }
                 KeyCode::Left => {
                     // Cycle enum backward
@@ -368,7 +366,7 @@ impl SettingsEditor {
                             return true;
                         }
                     }
-                    return false;
+                    false
                 }
                 KeyCode::Right => {
                     // Cycle enum forward
@@ -378,9 +376,9 @@ impl SettingsEditor {
                             return true;
                         }
                     }
-                    return false;
+                    false
                 }
-                _ => return false,
+                _ => false,
             }
         }
     }
@@ -557,7 +555,7 @@ impl SettingsEditor {
 
         for (rel_idx, (abs_idx, item)) in filtered.iter().enumerate() {
             // Check if we need a category header
-            if last_category != Some(&item.category.as_str()) {
+            if last_category != Some(item.category.as_str()) {
                 // Always increment display_row for the header
                 if display_row >= visible_start {
                     // Header is in visible range or we're past it
@@ -595,7 +593,7 @@ impl SettingsEditor {
             }
 
             // If this is a new category in the visible area and we haven't rendered its header yet
-            if last_rendered_category != Some(&item.category.as_str())
+            if last_rendered_category != Some(item.category.as_str())
                 && render_row < list_area.height as usize
             {
                 // Render sticky header for this category
@@ -638,7 +636,7 @@ impl SettingsEditor {
                 list_area.width,
                 buf,
                 textarea_bg,
-                &theme,
+                theme,
             );
 
             display_row += 1;

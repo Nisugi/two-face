@@ -10,7 +10,6 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Block, BorderType, Widget},
 };
 use std::collections::HashMap;
@@ -304,7 +303,7 @@ impl QuickBar {
                         let y = inner_area.y + viewport_row as u16;
 
                         if x < inner_area.x + inner_area.width {
-                            buf.get_mut(x, y).set_char(ch).set_style(style);
+                            buf[(x, y)].set_char(ch).set_style(style);
                         }
                     }
 

@@ -48,9 +48,10 @@ pub struct HighlightFormWidget {
     bold: bool,
     color_entire_line: bool,
     fast_parse: bool,
+    squelch: bool,
 
     // Form state
-    focused_field: usize, // 0-9: which field has focus (0-6 text, 7-9 checkboxes)
+    focused_field: usize, // 0-10: which field has focus (0-6 text, 7-10 checkboxes)
     status_message: String,
     pattern_error: Option<String>,
     mode: FormMode,
@@ -140,6 +141,7 @@ impl HighlightFormWidget {
             bold: false,
             color_entire_line: false,
             fast_parse: false,
+            squelch: false,
             focused_field: 0,
             status_message: "Ready".to_string(),
             pattern_error: None,
@@ -199,6 +201,7 @@ impl HighlightFormWidget {
         form.bold = pattern.bold;
         form.color_entire_line = pattern.color_entire_line;
         form.fast_parse = pattern.fast_parse;
+        form.squelch = pattern.squelch;
 
         form.status_message = "Editing highlight".to_string();
         form
@@ -211,13 +214,13 @@ impl HighlightFormWidget {
 
     /// Move focus to next field
     pub fn focus_next(&mut self) {
-        self.focused_field = (self.focused_field + 1) % 10;
+        self.focused_field = (self.focused_field + 1) % 11;
     }
 
     /// Move focus to previous field
     pub fn focus_prev(&mut self) {
         self.focused_field = if self.focused_field == 0 {
-            9
+            10
         } else {
             self.focused_field - 1
         };
@@ -288,12 +291,13 @@ impl HighlightFormWidget {
                 // Ctrl+s to save
                 self.save_internal()
             }
-            KeyCode::Char(' ') | KeyCode::Enter if (7..=9).contains(&self.focused_field) => {
-                // Toggle checkboxes (fields 7-9)
+            KeyCode::Char(' ') | KeyCode::Enter if (7..=10).contains(&self.focused_field) => {
+                // Toggle checkboxes (fields 7-10)
                 match self.focused_field {
                     7 => self.bold = !self.bold,
                     8 => self.color_entire_line = !self.color_entire_line,
                     9 => self.fast_parse = !self.fast_parse,
+                    10 => self.squelch = !self.squelch,
                     _ => {}
                 }
                 None
@@ -330,17 +334,17 @@ impl HighlightFormWidget {
                 let rt_key = crate::core::event_bridge::to_textarea_event(key);
 
                 let handled = match self.focused_field {
-                    0 => self.name.input(rt_key.clone()),
+                    0 => self.name.input(rt_key),
                     1 => {
-                        let result = self.pattern.input(rt_key.clone());
+                        let result = self.pattern.input(rt_key);
                         self.validate_pattern();
                         result
                     }
-                    2 => self.category.input(rt_key.clone()),
-                    3 => self.fg_color.input(rt_key.clone()),
-                    4 => self.bg_color.input(rt_key.clone()),
-                    5 => self.sound.input(rt_key.clone()),
-                    6 => self.sound_volume.input(rt_key.clone()),
+                    2 => self.category.input(rt_key),
+                    3 => self.fg_color.input(rt_key),
+                    4 => self.bg_color.input(rt_key),
+                    5 => self.sound.input(rt_key),
+                    6 => self.sound_volume.input(rt_key),
                     _ => false,
                 };
 
@@ -447,6 +451,7 @@ impl HighlightFormWidget {
             bold: self.bold,
             color_entire_line: self.color_entire_line,
             fast_parse: self.fast_parse,
+            squelch: self.squelch,
             sound,
             sound_volume,
             compiled_regex: None, // Will be compiled when config is loaded
@@ -467,7 +472,7 @@ impl HighlightFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let width = 62;
-        let height = 20; // Reduced from 40 to fit style guide pattern
+        let height = 21; // Increased for squelch checkbox
 
         // Center popup initially
         if self.popup_x == 0 && self.popup_y == 0 {
@@ -497,7 +502,7 @@ impl HighlightFormWidget {
         }
 
         // Draw cyan border
-        self.draw_border(x, y, width, height, buf, &theme);
+        self.draw_border(x, y, width, height, buf, theme);
 
         // Title (left-aligned)
         let title = match &self.mode {
@@ -610,7 +615,7 @@ impl HighlightFormWidget {
             30,
             txtbg,
             buf,
-            &theme,
+            theme,
         );
         current_y += 1;
 
@@ -627,7 +632,7 @@ impl HighlightFormWidget {
             30,
             txtbg,
             buf,
-            &theme,
+            theme,
         );
         current_y += 1;
 
@@ -644,7 +649,7 @@ impl HighlightFormWidget {
             30,
             txtbg,
             buf,
-            &theme,
+            theme,
         );
         current_y += 1;
 
@@ -662,7 +667,7 @@ impl HighlightFormWidget {
                 input_start,
                 txtbg,
                 buf,
-                &theme,
+                theme,
             );
             // Color preview
             buf[(input_start + 10, current_y)]
@@ -695,7 +700,7 @@ impl HighlightFormWidget {
                 input_start,
                 txtbg,
                 buf,
-                &theme,
+                theme,
             );
             // Color preview
             buf[(input_start + 10, current_y)]
@@ -715,7 +720,7 @@ impl HighlightFormWidget {
         current_y += 1;
 
         // Field 5: Sound (dropdown)
-        self.render_sound_dropdown(x + 2, current_y, input_start, txtbg, buf, &theme);
+        self.render_sound_dropdown(x + 2, current_y, input_start, txtbg, buf, theme);
         current_y += 1;
 
         // Field 6: Volume
@@ -731,7 +736,7 @@ impl HighlightFormWidget {
             10,
             txtbg,
             buf,
-            &theme,
+            theme,
         );
         current_y += 2;
 
@@ -839,6 +844,45 @@ impl HighlightFormWidget {
             buf[(x + 5 + i as u16, current_y)]
                 .set_char(ch)
                 .set_fg(if self.focused_field == 9 {
+                    theme.form_label_focused
+                } else {
+                    theme.form_label
+                })
+                .set_bg(theme.browser_background);
+        }
+
+        current_y += 1;
+
+        // Field 10: Squelch checkbox
+        buf[(x + 2, current_y)]
+            .set_char('[')
+            .set_fg(if self.focused_field == 10 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            })
+            .set_bg(theme.browser_background);
+        buf[(x + 3, current_y)]
+            .set_char(if self.squelch { '✓' } else { ' ' })
+            .set_fg(if self.focused_field == 10 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            })
+            .set_bg(theme.browser_background);
+        buf[(x + 4, current_y)]
+            .set_char(']')
+            .set_fg(if self.focused_field == 10 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            })
+            .set_bg(theme.browser_background);
+        let squelch_label = " Squelch (ignore line)";
+        for (i, ch) in squelch_label.chars().enumerate() {
+            buf[(x + 5 + i as u16, current_y)]
+                .set_char(ch)
+                .set_fg(if self.focused_field == 10 {
                     theme.form_label_focused
                 } else {
                     theme.form_label
@@ -1073,7 +1117,7 @@ use super::widget_traits::{Cyclable, FieldNavigable, TextEditable, Toggleable};
 use anyhow::Result;
 
 impl TextEditable for HighlightFormWidget {
-    fn get_focused_field<'a>(&'a self) -> Option<&'a TextArea<'static>> {
+    fn get_focused_field(&self) -> Option<&TextArea<'static>> {
         match self.focused_field {
             0 => Some(&self.name),
             1 => Some(&self.pattern),
@@ -1086,7 +1130,7 @@ impl TextEditable for HighlightFormWidget {
         }
     }
 
-    fn get_focused_field_mut<'a>(&'a mut self) -> Option<&'a mut TextArea<'static>> {
+    fn get_focused_field_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.focused_field {
             0 => Some(&mut self.name),
             1 => Some(&mut self.pattern),
@@ -1150,12 +1194,11 @@ impl Toggleable for HighlightFormWidget {
 
 impl Cyclable for HighlightFormWidget {
     fn cycle_forward(&mut self) {
-        if self.focused_field == 5 && !self.sound_files.is_empty() {
-            if self.sound_file_index + 1 < self.sound_files.len() {
+        if self.focused_field == 5 && !self.sound_files.is_empty()
+            && self.sound_file_index + 1 < self.sound_files.len() {
                 self.sound_file_index += 1;
                 self.update_sound_from_index();
             }
-        }
     }
 
     fn cycle_backward(&mut self) {

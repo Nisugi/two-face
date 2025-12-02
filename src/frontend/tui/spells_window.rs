@@ -175,8 +175,8 @@ impl SpellsWindow {
             let link_text_lower = link.text.to_lowercase();
             let word_lower = word.to_lowercase();
 
-            if link_text_lower.split_whitespace().count() == 1 {
-                if link_text_lower.split_whitespace().any(|w| w == word_lower) {
+            if link_text_lower.split_whitespace().count() == 1
+                && link_text_lower.split_whitespace().any(|w| w == word_lower) {
                     tracing::debug!(
                         "Found single-word text match: '{}' -> text='{}' noun='{}' exist_id='{}'",
                         word,
@@ -186,7 +186,6 @@ impl SpellsWindow {
                     );
                     return Some(link.clone());
                 }
-            }
         }
 
         // No match found

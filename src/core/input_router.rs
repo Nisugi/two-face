@@ -5,8 +5,8 @@
 //! - Menu keybinds configuration
 //! - Widget context (browser vs form vs editor)
 
-use crate::config::{Config, MenuKeybinds};
-use crate::core::menu_actions::{key_event_to_string, ActionContext, MenuAction};
+use crate::config::Config;
+use crate::core::menu_actions::{ActionContext, MenuAction};
 use crate::data::ui_state::InputMode;
 use crossterm::event::KeyEvent;
 

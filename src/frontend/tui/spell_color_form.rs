@@ -328,7 +328,7 @@ impl SpellColorFormWidget {
             popup_width - 4,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -343,7 +343,7 @@ impl SpellColorFormWidget {
             y,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -358,7 +358,7 @@ impl SpellColorFormWidget {
             y,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -373,7 +373,7 @@ impl SpellColorFormWidget {
             y,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 2;
 
@@ -506,10 +506,9 @@ impl SpellColorFormWidget {
 
 // Trait implementations for SpellColorFormWidget
 use super::widget_traits::{Cyclable, FieldNavigable, TextEditable, Toggleable};
-use anyhow::Result;
 
 impl TextEditable for SpellColorFormWidget {
-    fn get_focused_field<'a>(&'a self) -> Option<&'a TextArea<'static>> {
+    fn get_focused_field(&self) -> Option<&TextArea<'static>> {
         match self.focused_field {
             0 => Some(&self.spell_ids),
             1 => Some(&self.bar_color),
@@ -519,7 +518,7 @@ impl TextEditable for SpellColorFormWidget {
         }
     }
 
-    fn get_focused_field_mut<'a>(&'a mut self) -> Option<&'a mut TextArea<'static>> {
+    fn get_focused_field_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.focused_field {
             0 => Some(&mut self.spell_ids),
             1 => Some(&mut self.bar_color),

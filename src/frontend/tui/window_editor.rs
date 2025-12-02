@@ -16,9 +16,22 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use tui_textarea::TextArea;
+
+/// Available content alignment options (matches VellumFE)
+const CONTENT_ALIGN_OPTIONS: &[&str] = &[
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+];
 
 /// Field reference for section-based navigation
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,6 +54,7 @@ enum FieldRef {
     TextColor,
     CursorColor,
     CursorBg,
+    ContentAlign,
 
     // Checkboxes
     ShowTitle,
@@ -82,6 +96,7 @@ impl FieldRef {
             FieldRef::TextColor => 23,
             FieldRef::CursorColor => 24,
             FieldRef::CursorBg => 25,
+            FieldRef::ContentAlign => 26,
         }
     }
 }
@@ -140,6 +155,7 @@ pub struct WindowEditor {
     text_color_input: TextArea<'static>,
     cursor_color_input: TextArea<'static>,
     cursor_bg_input: TextArea<'static>,
+    content_align_input: TextArea<'static>,
 
     window_def: WindowDef,
     original_window_def: WindowDef,
@@ -157,7 +173,7 @@ impl WindowEditor {
 
     fn textarea_with_value(value: u16) -> TextArea<'static> {
         let mut ta = Self::create_textarea();
-        ta.insert_str(&value.to_string());
+        ta.insert_str(value.to_string());
         ta
     }
 
@@ -172,6 +188,7 @@ impl WindowEditor {
                     FieldRef::Locked,
                     FieldRef::TransparentBg,
                     FieldRef::BgColor,
+                    FieldRef::ContentAlign,
                 ],
             },
             // Section 2: Position & Size
@@ -292,9 +309,26 @@ impl WindowEditor {
         self.cols_input = Self::textarea_with_value(self.window_def.base().content_cols().max(1));
     }
 
+    /// Current content alignment value (defaults to first option)
+    fn current_content_align_value(&self) -> &str {
+        self.content_align_input
+            .lines()
+            .get(0)
+            .map(|s| if s.is_empty() { None } else { Some(s.as_str()) })
+            .flatten()
+            .or_else(|| {
+                self.window_def
+                    .base()
+                    .content_align
+                    .as_ref()
+                    .map(|s| s.as_str())
+            })
+            .unwrap_or_else(|| CONTENT_ALIGN_OPTIONS[0])
+    }
+
     pub fn new(window_def: WindowDef) -> Self {
         let mut name_input = Self::create_textarea();
-        name_input.insert_str(&window_def.name());
+        name_input.insert_str(window_def.name());
 
         let mut title_input = Self::create_textarea();
         if let Some(ref title) = window_def.base().title {
@@ -302,10 +336,10 @@ impl WindowEditor {
         }
 
         let mut row_input = Self::create_textarea();
-        row_input.insert_str(&window_def.base().row.to_string());
+        row_input.insert_str(window_def.base().row.to_string());
 
         let mut col_input = Self::create_textarea();
-        col_input.insert_str(&window_def.base().col.to_string());
+        col_input.insert_str(window_def.base().col.to_string());
 
         let rows_input = Self::textarea_with_value(window_def.base().content_rows().max(1));
 
@@ -313,22 +347,22 @@ impl WindowEditor {
 
         let mut min_rows_input = Self::create_textarea();
         if let Some(min_rows) = window_def.base().min_rows {
-            min_rows_input.insert_str(&min_rows.to_string());
+            min_rows_input.insert_str(min_rows.to_string());
         }
 
         let mut min_cols_input = Self::create_textarea();
         if let Some(min_cols) = window_def.base().min_cols {
-            min_cols_input.insert_str(&min_cols.to_string());
+            min_cols_input.insert_str(min_cols.to_string());
         }
 
         let mut max_rows_input = Self::create_textarea();
         if let Some(max_rows) = window_def.base().max_rows {
-            max_rows_input.insert_str(&max_rows.to_string());
+            max_rows_input.insert_str(max_rows.to_string());
         }
 
         let mut max_cols_input = Self::create_textarea();
         if let Some(max_cols) = window_def.base().max_cols {
-            max_cols_input.insert_str(&max_cols.to_string());
+            max_cols_input.insert_str(max_cols.to_string());
         }
 
         let mut bg_color_input = Self::create_textarea();
@@ -343,7 +377,7 @@ impl WindowEditor {
 
         let mut streams_input = Self::create_textarea();
         if let crate::config::WindowDef::Text { data, .. } = &window_def {
-            streams_input.insert_str(&data.streams.join(", "));
+            streams_input.insert_str(data.streams.join(", "));
         }
 
         let mut text_color_input = Self::create_textarea();
@@ -359,6 +393,11 @@ impl WindowEditor {
             if let Some(ref color) = data.cursor_background_color {
                 cursor_bg_input.insert_str(color);
             }
+        }
+
+        let mut content_align_input = Self::create_textarea();
+        if let Some(ref align) = window_def.base().content_align {
+            content_align_input.insert_str(align);
         }
 
         let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
@@ -399,6 +438,7 @@ impl WindowEditor {
             text_color_input,
             cursor_color_input,
             cursor_bg_input,
+            content_align_input,
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: false,
@@ -443,6 +483,7 @@ impl WindowEditor {
             min_cols: None,
             max_cols: None,
             visible: true,
+            content_align: None,
         };
 
         // Create window_def based on widget type
@@ -505,6 +546,7 @@ impl WindowEditor {
         let text_color_input = Self::create_textarea();
         let cursor_color_input = Self::create_textarea();
         let cursor_bg_input = Self::create_textarea();
+        let content_align_input = Self::create_textarea();
 
         let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
         let sections = Self::build_sections(is_command_input);
@@ -544,6 +586,7 @@ impl WindowEditor {
             text_color_input,
             cursor_color_input,
             cursor_bg_input,
+            content_align_input,
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: true,
@@ -672,6 +715,11 @@ impl WindowEditor {
         self.focused_field == 11
     }
 
+    /// Check if the currently focused field is the content alignment dropdown
+    pub fn is_on_content_align(&self) -> bool {
+        self.focused_field == FieldRef::ContentAlign.legacy_field_id()
+    }
+
     /// Cycle to the next border style
     pub fn cycle_border_style(&mut self) {
         let current = &self.window_def.base().border_style;
@@ -685,56 +733,84 @@ impl WindowEditor {
         self.window_def.base_mut().border_style = next.to_string();
     }
 
+    /// Cycle content alignment through the presets
+    pub fn cycle_content_align(&mut self, reverse: bool) {
+        let current = self.current_content_align_value().to_string();
+        let len = CONTENT_ALIGN_OPTIONS.len();
+        let current_idx = CONTENT_ALIGN_OPTIONS
+            .iter()
+            .position(|opt| opt.eq_ignore_ascii_case(&current))
+            .unwrap_or(0);
+        let next_idx = if reverse {
+            if current_idx == 0 {
+                len - 1
+            } else {
+                current_idx - 1
+            }
+        } else {
+            (current_idx + 1) % len
+        };
+        let new_value = CONTENT_ALIGN_OPTIONS[next_idx];
+
+        let mut new_input = Self::create_textarea();
+        new_input.insert_str(new_value);
+        self.content_align_input = new_input;
+        self.window_def.base_mut().content_align = Some(new_value.to_string());
+    }
+
     pub fn input(&mut self, input: ratatui::crossterm::event::KeyEvent) {
         // Route input to appropriate TextArea based on focused_field
         match self.focused_field {
             0 => {
-                self.name_input.input(input.clone());
+                self.name_input.input(input);
             }
             1 => {
-                self.title_input.input(input.clone());
+                self.title_input.input(input);
             }
             2 => {
-                self.row_input.input(input.clone());
+                self.row_input.input(input);
             }
             3 => {
-                self.col_input.input(input.clone());
+                self.col_input.input(input);
             }
             4 => {
-                self.rows_input.input(input.clone());
+                self.rows_input.input(input);
             }
             5 => {
-                self.cols_input.input(input.clone());
+                self.cols_input.input(input);
             }
             6 => {
-                self.min_rows_input.input(input.clone());
+                self.min_rows_input.input(input);
             }
             7 => {
-                self.min_cols_input.input(input.clone());
+                self.min_cols_input.input(input);
             }
             8 => {
-                self.max_rows_input.input(input.clone());
+                self.max_rows_input.input(input);
             }
             9 => {
-                self.max_cols_input.input(input.clone());
+                self.max_cols_input.input(input);
             }
             20 => {
-                self.bg_color_input.input(input.clone());
+                self.bg_color_input.input(input);
             }
             21 => {
-                self.border_color_input.input(input.clone());
+                self.border_color_input.input(input);
             }
             22 => {
-                self.streams_input.input(input.clone());
+                self.streams_input.input(input);
             }
             23 => {
-                self.text_color_input.input(input.clone());
+                self.text_color_input.input(input);
             }
             24 => {
-                self.cursor_color_input.input(input.clone());
+                self.cursor_color_input.input(input);
             }
             25 => {
-                self.cursor_bg_input.input(input.clone());
+                self.cursor_bg_input.input(input);
+            }
+            26 => {
+                self.content_align_input.input(input);
             }
             _ => {} // Checkboxes/dropdowns don't handle text input
         }
@@ -809,13 +885,11 @@ impl WindowEditor {
         self.window_def.base_mut().row = self.row_input.lines()[0].parse().unwrap_or(0);
         self.window_def.base_mut().col = self.col_input.lines()[0].parse().unwrap_or(0);
         let rows_lines = self.rows_input.lines();
-        let content_rows = rows_lines
-            .get(0)
+        let content_rows = rows_lines.first()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(1);
         let cols_lines = self.cols_input.lines();
-        let content_cols = cols_lines
-            .get(0)
+        let content_cols = cols_lines.first()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(40);
         let border_rows = self.window_def.base().horizontal_border_units();
@@ -830,6 +904,8 @@ impl WindowEditor {
             Some(self.bg_color_input.lines()[0].to_string()).filter(|s| !s.is_empty());
         self.window_def.base_mut().border_color =
             Some(self.border_color_input.lines()[0].to_string()).filter(|s| !s.is_empty());
+        self.window_def.base_mut().content_align =
+            Some(self.content_align_input.lines()[0].to_string()).filter(|s| !s.is_empty());
 
         // Update streams only for Text variant
         if let crate::config::WindowDef::Text { data, .. } = &mut self.window_def {
@@ -1114,6 +1190,19 @@ impl WindowEditor {
                     }
                     FieldRef::BgColor => {
                         self.render_color_field(field_id, "BG Color:", &self.bg_color_input, x, y, buf, theme, is_current);
+                    }
+                    FieldRef::ContentAlign => {
+                        let value = self.current_content_align_value();
+                        self.render_dropdown_compact(
+                            field_id,
+                            "Content Align:",
+                            value,
+                            x,
+                            y,
+                            buf,
+                            theme,
+                            is_current,
+                        );
                     }
                     FieldRef::BorderColor => {
                         self.render_color_field(field_id, "Border Color:", &self.border_color_input, x, y, buf, theme, is_current);
@@ -1463,6 +1552,7 @@ mod tests {
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+            content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -1507,3 +1597,4 @@ mod tests {
         assert!(sections.iter().any(|s| s.name == "Border"));
     }
 }
+

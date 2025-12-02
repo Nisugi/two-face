@@ -340,10 +340,7 @@ impl ResizeDebouncer {
         let now = std::time::Instant::now();
 
         // If no resize has been processed yet, there's nothing pending
-        let last_time = match self.last_resize_time {
-            Some(t) => t,
-            None => return None,
-        };
+        let last_time = self.last_resize_time?;
 
         let elapsed = now.duration_since(last_time);
 
@@ -567,6 +564,7 @@ impl TuiFrontend {
                         tw.set_border_sides(def.base().border_sides.clone());
                         tw.set_background_color(colors.background.clone());
                         tw.set_text_color(colors.text.clone());
+                        tw.set_content_align(def.base().content_align.clone());
                     }
 
                     // Set highlights from config
@@ -588,6 +586,7 @@ impl TuiFrontend {
                     text_window.set_border_sides(def.base().border_sides.clone());
                     text_window.set_background_color(colors.background.clone());
                     text_window.set_text_color(colors.text.clone());
+                    text_window.set_content_align(def.base().content_align.clone());
                 }
 
                 // Update width for proper wrapping
@@ -1031,8 +1030,7 @@ impl TuiFrontend {
                 // Get or create ProgressBar for this window
                 if !self.progress_bars.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref())
-                        .map(|t| t.clone())
+                        .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| progress_data.label.clone());
 
                     let bar = progress_bar::ProgressBar::new(&label);
@@ -1046,13 +1044,13 @@ impl TuiFrontend {
                     if let Some(ref custom_text) = progress_data.color {
                         // color field is being used as custom text (e.g., "clear as a bell")
                         progress_bar.set_value_with_text(
-                            progress_data.value as u32,
-                            progress_data.max as u32,
+                            progress_data.value,
+                            progress_data.max,
                             Some(custom_text.clone()),
                         );
                     } else {
                         progress_bar
-                            .set_value(progress_data.value as u32, progress_data.max as u32);
+                            .set_value(progress_data.value, progress_data.max);
                     }
 
                     // Apply window config from WindowDef
@@ -1111,8 +1109,7 @@ impl TuiFrontend {
                 // Get or create Countdown for this window
                 if !self.countdowns.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref())
-                        .map(|t| t.clone())
+                        .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| name.clone());
 
                     let countdown = countdown::Countdown::new(&label);
@@ -1165,8 +1162,7 @@ impl TuiFrontend {
                 // Get or create ActiveEffects for this window
                 if !self.active_effects_windows.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref())
-                        .map(|t| t.clone())
+                        .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| name.clone());
 
                     let widget = active_effects::ActiveEffects::new(
@@ -1413,6 +1409,7 @@ impl TuiFrontend {
                         widget.set_border_sides(window_def.base().border_sides.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
+                        widget.set_content_align(window_def.base().content_align.clone());
                     }
                 }
             }
@@ -1458,6 +1455,7 @@ impl TuiFrontend {
                         widget.set_border_sides(window_def.base().border_sides.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
+                        widget.set_content_align(window_def.base().content_align.clone());
                         widget.apply_window_colors(colors.text.clone(), colors.background.clone());
                     }
                 }
@@ -1496,6 +1494,7 @@ impl TuiFrontend {
                         widget.set_border_sides(window_def.base().border_sides.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
+                        widget.set_content_align(window_def.base().content_align.clone());
                         widget.set_title(
                             window_def
                                 .base()
@@ -1872,7 +1871,6 @@ impl TuiFrontend {
             } else if lines < 0 {
                 tabbed_window.scroll_down((-lines) as usize);
             }
-            return;
         }
     }
 
@@ -1886,6 +1884,20 @@ impl TuiFrontend {
     ) -> Option<(usize, usize)> {
         let text_window = self.text_windows.get(window_name)?;
         text_window.mouse_to_text_coords(mouse_col, mouse_row, window_rect)
+    }
+
+    /// Handle a tab click for a tabbed text window; returns true if a tab was activated.
+    pub fn handle_tabbed_click(
+        &mut self,
+        window_name: &str,
+        window_rect: ratatui::layout::Rect,
+        mouse_col: u16,
+        mouse_row: u16,
+    ) -> bool {
+        if let Some(tabbed_window) = self.tabbed_text_windows.get_mut(window_name) {
+            return tabbed_window.handle_mouse_click(window_rect, mouse_col, mouse_row);
+        }
+        false
     }
 
     /// Extract selected text from a text window
@@ -1954,7 +1966,7 @@ impl TuiFrontend {
                                     while pos > 0
                                         && chars
                                             .get(pos.saturating_sub(1))
-                                            .map_or(false, |c| c.is_whitespace())
+                                            .is_some_and(|c| c.is_whitespace())
                                     {
                                         count += 1;
                                         pos -= 1;
@@ -1964,7 +1976,7 @@ impl TuiFrontend {
                                     while pos > 0
                                         && chars
                                             .get(pos.saturating_sub(1))
-                                            .map_or(false, |c| !c.is_whitespace())
+                                            .is_some_and(|c| !c.is_whitespace())
                                     {
                                         count += 1;
                                         pos -= 1;
@@ -2535,7 +2547,7 @@ impl Frontend for TuiFrontend {
 
         // Temporarily take ownership of widgets to use in render
         let mut text_windows = std::mem::take(&mut self.text_windows);
-        let mut command_inputs = std::mem::take(&mut self.command_inputs);
+        let command_inputs = std::mem::take(&mut self.command_inputs);
         let mut room_windows = std::mem::take(&mut self.room_windows);
         let mut inventory_windows = std::mem::take(&mut self.inventory_windows);
         let mut spells_windows = std::mem::take(&mut self.spells_windows);
@@ -2926,7 +2938,7 @@ impl Frontend for TuiFrontend {
                 theme_editor.render(screen_area, f.buffer_mut(), &app_core.config, &theme);
             }
             if let Some(ref theme_browser) = self.theme_browser {
-                use ratatui::widgets::Widget;
+                
                 f.render_widget(theme_browser, screen_area);
             }
             if let Some(ref mut settings_editor) = self.settings_editor {

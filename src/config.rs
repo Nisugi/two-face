@@ -55,6 +55,7 @@ impl WidgetCategory {
         match widget_type {
             "progress" => Self::ProgressBar,
             "text" => Self::TextWindow,
+            "tabbedtext" => Self::TextWindow,
             "countdown" => Self::Countdown,
             "hand" => Self::Hand,
             "active_effects" => Self::ActiveEffects,
@@ -369,14 +370,6 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TabConfig {
-    pub name: String,   // Tab display name
-    pub stream: String, // Stream to route to this tab
-    #[serde(default)]
-    pub show_timestamps: Option<bool>, // Show timestamps at end of lines for this tab
-}
-
 /// Border sides configuration - which borders to show
 /// Serializes to/from array of strings in TOML: ["left", "right", "top", "bottom"]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -580,6 +573,9 @@ pub struct WindowBase {
     /// Whether this window is currently visible (defaults to true for backwards compatibility)
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Content alignment within widget area
+    #[serde(default)]
+    pub content_align: Option<String>,
 }
 
 /// Text widget specific data
@@ -1020,45 +1016,6 @@ impl WindowDef {
             WindowDef::QuickBar { base, .. } => base,
         }
     }
-
-    /// Resolve an optional string field with three-state logic:
-    /// - None = use provided default
-    /// - Some("-") = explicitly empty (return None)
-    /// - Some(value) = use value
-    pub fn resolve_optional_string(field: &Option<String>, default: &str) -> Option<String> {
-        match field {
-            None => Some(default.to_string()), // Use default
-            Some(s) if s == "-" => None,       // Explicitly empty
-            Some(s) => Some(s.clone()),        // Use value
-        }
-    }
-
-    /// Get the effective border color (with global default fallback)
-    pub fn get_border_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.base().border_color, &colors.ui.border_color)
-    }
-
-    /// Get the effective text color (with global default fallback)
-    pub fn get_text_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.base().text_color, &colors.ui.text_color)
-    }
-
-    /// Get the effective border style
-    pub fn get_border_style(&self) -> &str {
-        &self.base().border_style
-    }
-
-    /// Get the effective background color (with global default fallback)
-    pub fn get_background_color(&self, colors: &ColorConfig) -> Option<String> {
-        Self::resolve_optional_string(&self.base().background_color, &colors.ui.background_color)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DashboardIndicatorDef {
-    pub id: String,          // e.g., "poisoned", "diseased"
-    pub icon: String,        // Unicode icon character
-    pub colors: Vec<String>, // [off_color, on_color]
 }
 
 /// Parse border sides configuration into ratatui Borders bitflags
@@ -1158,6 +1115,9 @@ pub struct UiConfig {
     pub perf_stats_width: u16,
     #[serde(default = "default_perf_stats_height")]
     pub perf_stats_height: u16,
+    // Squelch/ignore settings
+    #[serde(default = "default_ignores_enabled")]
+    pub ignores_enabled: bool, // Global toggle for squelch patterns (can disable without deleting patterns)
 }
 
 // CommandInputConfig removed - command_input is now a regular window in the windows array
@@ -1264,6 +1224,8 @@ pub struct HighlightPattern {
     pub sound_volume: Option<f32>, // Volume override for this sound (0.0 to 1.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>, // Category for grouping highlights (e.g., "Combat", "Healing", "Death")
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub squelch: bool, // If true, completely hide lines matching this pattern (ignore/filter)
 
     // Performance optimization: cache compiled regex (not serialized)
     #[serde(skip)]
@@ -1287,17 +1249,14 @@ pub struct EventPattern {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EventAction {
+    #[default]
     Set,       // Set state/timer (e.g., start stun countdown)
     Clear,     // Clear state/timer (e.g., recover from stun)
     Increment, // Add to existing value (future use)
 }
 
-impl Default for EventAction {
-    fn default() -> Self {
-        EventAction::Set
-    }
-}
 
 fn default_duration_multiplier() -> f32 {
     1.0
@@ -1648,11 +1607,10 @@ impl MenuKeybinds {
         let key_str = key_event_to_string(key);
 
         // Special handling for BackTab (Shift+Tab)
-        if matches!(key.code, crossterm::event::KeyCode::BackTab) {
-            if key_str == self.previous_field || "Shift+Tab" == self.previous_field {
+        if matches!(key.code, crossterm::event::KeyCode::BackTab)
+            && (key_str == self.previous_field || "Shift+Tab" == self.previous_field) {
                 return MenuAction::PreviousField;
             }
-        }
 
         // Context-specific bindings first (override general bindings)
         match context {
@@ -2188,6 +2146,10 @@ fn default_perf_stats_height() -> u16 {
     23
 }
 
+fn default_ignores_enabled() -> bool {
+    true
+}
+
 // default_command_input* functions removed - command_input is now in windows array
 
 fn default_true() -> bool {
@@ -2716,7 +2678,7 @@ impl Config {
         crate::theme::ThemePresets::all_with_custom(self.character.as_deref())
             .get(&self.active_theme)
             .cloned()
-            .unwrap_or_else(|| crate::theme::ThemePresets::dark())
+            .unwrap_or_else(crate::theme::ThemePresets::dark)
     }
 
     /// Get a window template by name
@@ -2744,6 +2706,7 @@ impl Config {
             min_cols: None,
             max_cols: None,
             visible: true,
+                content_align: None,
         };
 
         match name {
@@ -3375,6 +3338,47 @@ impl Config {
                 },
             }),
 
+            "chat" => Some(WindowDef::TabbedText {
+                base: WindowBase {
+                    name: "chat".to_string(),
+                    title: Some("Chat".to_string()),
+                    rows: 10,
+                    cols: 60,
+                    show_border: true,
+                    ..base_defaults.clone()
+                },
+                data: TabbedTextWidgetData {
+                    tabs: vec![
+                        TabbedTextTab {
+                            name: "Thoughts".to_string(),
+                            streams: vec!["thoughts".to_string()],
+                            show_timestamps: None,
+                        },
+                        TabbedTextTab {
+                            name: "Speech".to_string(),
+                            streams: vec!["speech".to_string()],
+                            show_timestamps: None,
+                        },
+                        TabbedTextTab {
+                            name: "Announcements".to_string(),
+                            streams: vec!["announcements".to_string()],
+                            show_timestamps: None,
+                        },
+                        TabbedTextTab {
+                            name: "Loot".to_string(),
+                            streams: vec!["loot".to_string()],
+                            show_timestamps: None,
+                        },
+                        TabbedTextTab {
+                            name: "Ambients".to_string(),
+                            streams: vec!["ambients".to_string()],
+                            show_timestamps: None,
+                        },
+                    ],
+                    buffer_size: 5000,
+                },
+            }),
+
             "spacer" => Some(WindowDef::Spacer {
                 base: WindowBase {
                     name: String::new(), // Will be set by caller with auto-generated name
@@ -3417,6 +3421,8 @@ impl Config {
             "ambients",
             "bounty",
             "society",
+            // Tabbed text windows
+            "chat",
             // Special widgets
             "quickbar",
             // Countdowns
@@ -3458,7 +3464,7 @@ impl Config {
                 let category = WidgetCategory::from_widget_type(template.widget_type());
                 categories
                     .entry(category)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(template_name.to_string());
             }
         }
@@ -3485,6 +3491,37 @@ impl Config {
                     })
                     .collect();
                 (category, available)
+            })
+            .filter(|(_, templates)| !templates.is_empty())
+            .collect()
+    }
+
+    /// Get visible windows by category (for Hide/Edit menus)
+    /// Returns only categories that have visible windows (excludes essential windows like main/command_input for hide menu)
+    pub fn get_visible_templates_by_category(
+        layout: &crate::config::Layout,
+        exclude_essential: bool,
+    ) -> HashMap<WidgetCategory, Vec<String>> {
+        let all_by_category = Self::get_templates_by_category();
+
+        all_by_category
+            .into_iter()
+            .map(|(category, templates)| {
+                let visible: Vec<String> = templates
+                    .into_iter()
+                    .filter(|name| {
+                        // Skip essential windows for hide menu
+                        if exclude_essential && (*name == "main" || *name == "command_input") {
+                            return false;
+                        }
+                        // Include only visible windows
+                        layout
+                            .windows
+                            .iter()
+                            .any(|w| w.name() == *name && w.base().visible)
+                    })
+                    .collect();
+                (category, visible)
             })
             .filter(|(_, templates)| !templates.is_empty())
             .collect()
@@ -4021,6 +4058,7 @@ impl Default for Config {
                 perf_stats_y: default_perf_stats_y(),
                 perf_stats_width: default_perf_stats_width(),
                 perf_stats_height: default_perf_stats_height(),
+                ignores_enabled: default_ignores_enabled(),
             },
             highlights: HashMap::new(),     // Loaded from highlights.toml
             keybinds: HashMap::new(),       // Loaded from keybinds.toml
@@ -4170,6 +4208,7 @@ mod tests {
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4239,6 +4278,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4303,6 +4343,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4329,6 +4370,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4378,6 +4420,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4403,7 +4446,8 @@ visible = true
                 max_rows: None,
                 min_cols: None,
                 max_cols: None,
-                visible: false,  // Hidden!
+                visible: false,
+                content_align: None,  // Hidden!
             },
             data: SpacerWidgetData {},
         };
@@ -4456,6 +4500,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4485,6 +4530,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4511,6 +4557,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4563,6 +4610,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4592,6 +4640,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4618,6 +4667,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4683,6 +4733,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4712,6 +4763,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: SpacerWidgetData {},
         };
@@ -4738,6 +4790,7 @@ visible = true
                 min_cols: None,
                 max_cols: None,
                 visible: true,
+                content_align: None,
             },
             data: TextWidgetData {
                 streams: vec!["status".to_string()],
@@ -4772,3 +4825,4 @@ visible = true
         assert!(spacer_end <= b_start, "Spacer should not overlap B");
     }
 }
+

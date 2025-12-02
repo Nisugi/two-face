@@ -40,10 +40,10 @@ pub trait Selectable {
 /// Trait for widgets with text input fields (forms, editors)
 pub trait TextEditable {
     /// Get reference to the currently focused text field
-    fn get_focused_field<'a>(&'a self) -> Option<&'a TextArea<'static>>;
+    fn get_focused_field(&self) -> Option<&TextArea<'static>>;
 
     /// Get mutable reference to the currently focused text field
-    fn get_focused_field_mut<'a>(&'a mut self) -> Option<&'a mut TextArea<'static>>;
+    fn get_focused_field_mut(&mut self) -> Option<&mut TextArea<'static>>;
 
     /// Select all text in the focused field (Ctrl+A)
     fn select_all(&mut self) {

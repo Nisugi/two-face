@@ -199,7 +199,7 @@ impl UiState {
         for (name, window) in &self.windows {
             self.widget_type_index
                 .entry(window.widget_type.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(name.clone());
         }
     }

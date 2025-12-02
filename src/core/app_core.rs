@@ -564,7 +564,7 @@ impl AppCore {
                     height: 24,
                 });
 
-            let mut widget_type = match window_def.widget_type() {
+            let widget_type = match window_def.widget_type() {
                 "text" => WidgetType::Text,
                 "tabbedtext" => WidgetType::TabbedText,
                 "progress" => WidgetType::Progress,
@@ -672,6 +672,7 @@ impl AppCore {
                 content,
                 position,
                 visible: true,
+                content_align: window_def.base().content_align.clone(),
                 focused: false,
             };
 
@@ -753,6 +754,30 @@ impl AppCore {
                 };
                 WindowContent::Text(TextContent::new(title, buffer_size))
             }
+            WidgetType::TabbedText => {
+                // Extract tab definitions and buffer size from window def
+                if let crate::config::WindowDef::TabbedText { data, .. } = window_def {
+                    let tabs: Vec<(String, String)> = data
+                        .tabs
+                        .iter()
+                        .map(|tab| {
+                            // Each tab can have multiple streams - join them with comma for now
+                            let stream = tab.streams.join(",");
+                            (tab.name.clone(), stream)
+                        })
+                        .collect();
+                    WindowContent::TabbedText(crate::data::TabbedTextContent::new(
+                        tabs,
+                        data.buffer_size,
+                    ))
+                } else {
+                    // Fallback if window_def is wrong type
+                    WindowContent::TabbedText(crate::data::TabbedTextContent::new(
+                        vec![("Default".to_string(), "main".to_string())],
+                        5000,
+                    ))
+                }
+            }
             WidgetType::CommandInput => WindowContent::CommandInput {
                 text: String::new(),
                 cursor: 0,
@@ -824,6 +849,7 @@ impl AppCore {
             content,
             position: position.clone(),
             visible: true,
+            content_align: window_def.base().content_align.clone(),
             focused: false,
         };
 
@@ -2009,11 +2035,11 @@ impl AppCore {
                 let assigned_delta = *col_height_deltas.get(&window_name).unwrap_or(&0);
 
                 let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == &window_name)
+                    .find(|w| w.name() == window_name)
                     .unwrap();
                 let base = window_def.base();
                 let widget_type = window_def.widget_type();
-                let (_, min_rows) = self.widget_min_size(&widget_type);
+                let (_, min_rows) = self.widget_min_size(widget_type);
                 let min_constraint = base.min_rows.unwrap_or(min_rows);
                 let max_constraint = base.max_rows;
 
@@ -2032,7 +2058,7 @@ impl AppCore {
                 let used_delta = new_rows as i32 - original_rows as i32;
                 let mut remainder = assigned_delta - used_delta;
 
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == window_name) {
                     let base = w.base_mut();
                     base.row = current_row;
                     base.rows = new_rows;
@@ -2253,11 +2279,11 @@ impl AppCore {
                 let assigned_delta = *row_width_deltas.get(&window_name).unwrap_or(&0);
 
                 let window_def = self.layout.windows.iter()
-                    .find(|w| w.name() == &window_name)
+                    .find(|w| w.name() == window_name)
                     .unwrap();
                 let base = window_def.base();
                 let widget_type = window_def.widget_type();
-                let (min_cols, _) = self.widget_min_size(&widget_type);
+                let (min_cols, _) = self.widget_min_size(widget_type);
                 let min_constraint = base.min_cols.unwrap_or(min_cols);
                 let max_constraint = base.max_cols;
 
@@ -2276,7 +2302,7 @@ impl AppCore {
                 let used_delta = new_cols as i32 - original_cols as i32;
                 let mut remainder = assigned_delta - used_delta;
 
-                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == &window_name) {
+                if let Some(w) = self.layout.windows.iter_mut().find(|w| w.name() == window_name) {
                     let base = w.base_mut();
                     base.col = current_col_pos;
                     base.cols = new_cols;
@@ -2867,6 +2893,7 @@ impl AppCore {
                 height,
             },
             visible: true,
+            content_align: None,
             focused: false,
         };
 
@@ -2899,6 +2926,7 @@ impl AppCore {
             min_cols: None,
             max_cols: None,
             visible: true,
+            content_align: None,
         };
 
         let window_def = match widget_type_str.to_lowercase().as_str() {
@@ -3291,7 +3319,7 @@ impl AppCore {
     }
 
     /// Build windows submenu
-    fn build_windows_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+    pub fn build_windows_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         vec![
             crate::data::ui_state::PopupMenuItem {
                 text: "Add window".to_string(),
@@ -3317,7 +3345,7 @@ impl AppCore {
     }
 
     /// Build layouts submenu
-    fn build_layouts_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+    pub fn build_layouts_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         let mut items = Vec::new();
 
         // Get list of saved layouts
@@ -3326,7 +3354,7 @@ impl AppCore {
                 for layout_name in layouts {
                     items.push(crate::data::ui_state::PopupMenuItem {
                         text: layout_name.clone(),
-                        command: format!("loadlayout:{}", layout_name),
+                        command: format!("action:loadlayout:{}", layout_name),
                         disabled: false,
                     });
                 }
@@ -3412,7 +3440,7 @@ impl AppCore {
                     entry.menu_cat.clone()
                 };
 
-                categories.entry(category).or_insert_with(Vec::new).push(
+                categories.entry(category).or_default().push(
                     crate::data::ui_state::PopupMenuItem {
                         text: menu_text,
                         command,
@@ -3561,7 +3589,7 @@ impl AppCore {
         }
 
         // Find first @ or #
-        if let Some(pos) = text.find(|c| c == '@' || c == '#') {
+        if let Some(pos) = text.find(['@', '#']) {
             let remaining = text[pos + 1..].trim();
             if remaining.is_empty() {
                 // Placeholder at end - truncate
@@ -3691,7 +3719,10 @@ impl AppCore {
 
     /// Save configuration to disk
     pub fn save_config(&mut self) -> Result<()> {
-        self.config.save(self.config.character.as_deref())
+        self.config.save(self.config.character.as_deref())?;
+        // Update squelch patterns after config save (in case highlights changed)
+        self.message_processor.update_squelch_patterns();
+        Ok(())
     }
 
     /// Start search mode (Ctrl+F)
@@ -3765,38 +3796,90 @@ impl AppCore {
         }
     }
 
-    /// Build "Hide Window" menu showing currently visible windows
+    /// Build "Hide Window" menu showing widget categories (only categories with visible windows)
     pub fn build_hide_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
-        let visible = crate::config::Config::list_visible_windows(&self.layout);
+        let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, true);
 
-        visible
+        // Sort categories for consistent display
+        let mut categories: Vec<_> = categories_map.into_iter().collect();
+        categories.sort_by_key(|(cat, _)| cat.clone());
+
+        categories
             .into_iter()
-            // Filter out essential windows that should never be hidden
-            .filter(|name| name != "story" && name != "command_input")
-            .map(|name| crate::data::ui_state::PopupMenuItem {
-                text: self.get_window_display_name(&name),
-                command: format!("__HIDE__{}", name),
-                disabled: false,
-            })
+            .map(
+                |(category, _templates)| crate::data::ui_state::PopupMenuItem {
+                    text: category.display_name().to_string(),
+                    command: format!("__SUBMENU_HIDE__{:?}", category),
+                    disabled: false,
+                },
+            )
             .collect()
     }
 
-    /// Build "Edit Window" menu showing currently visible windows
-    pub fn build_edit_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
-        let visible = crate::config::Config::list_visible_windows(&self.layout);
+    /// Build category submenu for hiding windows
+    pub fn build_hide_window_category_menu(
+        &self,
+        category: &crate::config::WidgetCategory,
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, true);
 
-        visible
+        if let Some(templates) = categories_map.get(category) {
+            templates
+                .iter()
+                .map(|name| crate::data::ui_state::PopupMenuItem {
+                    text: self.get_window_display_name(name),
+                    command: format!("__HIDE__{}", name),
+                    disabled: false,
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Build "Edit Window" menu showing widget categories (only categories with visible windows)
+    pub fn build_edit_window_menu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, false);
+
+        // Sort categories for consistent display
+        let mut categories: Vec<_> = categories_map.into_iter().collect();
+        categories.sort_by_key(|(cat, _)| cat.clone());
+
+        categories
             .into_iter()
-            .map(|name| crate::data::ui_state::PopupMenuItem {
-                text: self.get_window_display_name(&name),
-                command: format!("__EDIT__{}", name),
-                disabled: false,
-            })
+            .map(
+                |(category, _templates)| crate::data::ui_state::PopupMenuItem {
+                    text: category.display_name().to_string(),
+                    command: format!("__SUBMENU_EDIT__{:?}", category),
+                    disabled: false,
+                },
+            )
             .collect()
+    }
+
+    /// Build category submenu for editing windows
+    pub fn build_edit_window_category_menu(
+        &self,
+        category: &crate::config::WidgetCategory,
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, false);
+
+        if let Some(templates) = categories_map.get(category) {
+            templates
+                .iter()
+                .map(|name| crate::data::ui_state::PopupMenuItem {
+                    text: self.get_window_display_name(name),
+                    command: format!("__EDIT__{}", name),
+                    disabled: false,
+                })
+                .collect()
+        } else {
+            vec![]
+        }
     }
 
     /// Get display name for a window (uses title from template, or falls back to name)
-    fn get_window_display_name(&self, name: &str) -> String {
+    pub fn get_window_display_name(&self, name: &str) -> String {
         crate::config::Config::get_window_template(name)
             .and_then(|t| t.base().title.clone())
             .unwrap_or_else(|| name.to_string())
@@ -3805,7 +3888,7 @@ impl AppCore {
     /// Check if text matches any highlight patterns with sounds and play them
     pub fn check_sound_triggers(&self, text: &str) {
         if let Some(ref sound_player) = self.sound_player {
-            for (_name, pattern) in &self.config.highlights {
+            for pattern in self.config.highlights.values() {
                 // Skip if no sound configured for this pattern
                 if pattern.sound.is_none() {
                     continue;
@@ -3866,6 +3949,7 @@ mod tests {
             min_cols: None,
             max_cols: None,
             visible: true,
+            content_align: None,
         }
     }
 
@@ -4050,3 +4134,4 @@ mod tests {
         assert_eq!(name, "spacer_100");
     }
 }
+

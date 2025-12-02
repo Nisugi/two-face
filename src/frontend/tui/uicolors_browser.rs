@@ -753,8 +753,8 @@ impl UIColorsBrowser {
         for (idx, entry) in self.entries.iter().enumerate() {
             // Check if we need a category header
             if last_category != Some(entry.category.as_str()) {
-                if display_row >= visible_start {
-                    if display_row < visible_end && render_row < list_height {
+                if display_row >= visible_start
+                    && display_row < visible_end && render_row < list_height {
                         // Render the header
                         let current_y = list_y + render_row as u16;
                         let header_text = format!(" ═══ {} ═══", entry.category);
@@ -783,7 +783,6 @@ impl UIColorsBrowser {
                         render_row += 1;
                         last_rendered_category = Some(&entry.category);
                     }
-                }
                 display_row += 1;
                 last_category = Some(&entry.category);
             }
@@ -841,14 +840,12 @@ impl UIColorsBrowser {
                         cell.set_style(Style::default().bg(fg_color));
                     }
                 }
-            } else {
-                if let Some(cell) = buf.cell_mut((x + 3, current_y)) {
-                    cell.set_char('-').set_style(
-                        Style::default()
-                            .fg(theme.menu_separator)
-                            .bg(theme.browser_background),
-                    );
-                }
+            } else if let Some(cell) = buf.cell_mut((x + 3, current_y)) {
+                cell.set_char('-').set_style(
+                    Style::default()
+                        .fg(theme.menu_separator)
+                        .bg(theme.browser_background),
+                );
             }
 
             // Col 7-9: BG color preview
@@ -860,14 +857,12 @@ impl UIColorsBrowser {
                         cell.set_style(Style::default().bg(bg_color));
                     }
                 }
-            } else {
-                if let Some(cell) = buf.cell_mut((x + 8, current_y)) {
-                    cell.set_char('-').set_style(
-                        Style::default()
-                            .fg(theme.menu_separator)
-                            .bg(theme.browser_background),
-                    );
-                }
+            } else if let Some(cell) = buf.cell_mut((x + 8, current_y)) {
+                cell.set_char('-').set_style(
+                    Style::default()
+                        .fg(theme.menu_separator)
+                        .bg(theme.browser_background),
+                );
             }
 
             // Col 13+: Entry name

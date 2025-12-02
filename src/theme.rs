@@ -426,7 +426,9 @@ impl ThemeVariant {
         let luminance = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
 
         // If luminance > 0.5, make it lighter; otherwise make it darker
-        let boost = if luminance > 0.5 {
+        
+
+        if luminance > 0.5 {
             // Light color - boost towards white
             let factor = 1.5;
             Color::Rgb(
@@ -442,9 +444,7 @@ impl ThemeVariant {
                 ((g as f32 * factor).max(0.0)) as u8,
                 ((b as f32 * factor).max(0.0)) as u8,
             )
-        };
-
-        boost
+        }
     }
 
     /// Colorblind-safe transformation - converts to deuteranopia/protanopia safe palette

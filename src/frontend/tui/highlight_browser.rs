@@ -7,7 +7,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Modifier},
     widgets::{Clear, Widget},
 };
 use std::collections::HashMap;
@@ -21,6 +21,7 @@ pub struct HighlightEntry {
     pub fg: Option<String>,
     pub bg: Option<String>,
     pub has_sound: bool,
+    pub is_squelched: bool,
 }
 
 /// Popup list component used for browsing configured highlights.
@@ -49,6 +50,7 @@ impl HighlightBrowser {
                 fg: pattern.fg.clone(),
                 bg: pattern.bg.clone(),
                 has_sound: pattern.sound.is_some(),
+                is_squelched: pattern.squelch,
             })
             .collect();
 
@@ -134,9 +136,7 @@ impl HighlightBrowser {
 
         for (idx, entry) in filtered.iter().enumerate() {
             let entry_category = entry
-                .category
-                .as_ref()
-                .map(|s| s.as_str())
+                .category.as_deref()
                 .unwrap_or("Uncategorized");
 
             // Add category header row if category changes
@@ -279,9 +279,7 @@ impl HighlightBrowser {
 
         for (idx, entry) in filtered.iter().enumerate() {
             let entry_category = entry
-                .category
-                .as_ref()
-                .map(|s| s.as_str())
+                .category.as_deref()
                 .unwrap_or("Uncategorized");
 
             // Check if we need a category header
@@ -420,8 +418,9 @@ impl HighlightBrowser {
             };
 
             let sound_indicator = if entry.has_sound { " ♫" } else { "" };
-            let name_with_sound = format!("   {}{}", entry.name, sound_indicator);
-            for (i, ch) in name_with_sound.chars().enumerate() {
+            let squelch_indicator = if entry.is_squelched { " [SQUELCH]" } else { "" };
+            let name_with_indicators = format!("   {}{}{}", entry.name, sound_indicator, squelch_indicator);
+            for (i, ch) in name_with_indicators.chars().enumerate() {
                 let col = x + 13 + i as u16;
                 if col < x + width - 1 {
                     buf[(col, current_y)].set_char(ch).set_style(name_style);

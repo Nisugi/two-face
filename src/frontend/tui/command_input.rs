@@ -270,7 +270,7 @@ impl CommandInput {
     }
 
     pub fn get_last_command(&self) -> Option<String> {
-        self.history.get(0).cloned()
+        self.history.front().cloned()
     }
 
     pub fn get_second_last_command(&self) -> Option<String> {
@@ -367,7 +367,7 @@ impl CommandInput {
         let mut block = Block::default();
 
         // Check if border_style is "none" - that should disable borders too
-        let border_is_none = self.border_style.as_ref().map_or(false, |s| s == "none");
+        let border_is_none = self.border_style.as_ref().is_some_and(|s| s == "none");
 
         if self.show_border && !border_is_none {
             let borders = config::parse_border_sides(&self.border_sides);
@@ -616,7 +616,7 @@ impl CommandInput {
     fn get_history_path(character: Option<&str>) -> Result<PathBuf, std::io::Error> {
         // Use the two-face profile structure: ~/.two-face/{character}/history.txt
         crate::config::Config::history_path(character)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     /// Load command history from disk

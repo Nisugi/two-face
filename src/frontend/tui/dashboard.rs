@@ -7,7 +7,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    widgets::{Block, BorderType, Borders, Widget as RatatuiWidget},
+    widgets::{Block, BorderType, Widget as RatatuiWidget},
 };
 use std::collections::HashMap;
 
@@ -128,7 +128,7 @@ impl Dashboard {
         // Clear area
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
-                buf.get_mut(x, y).reset();
+                buf[(x, y)].reset();
             }
         }
 
@@ -169,7 +169,7 @@ impl Dashboard {
                 let bg_color = Self::parse_color(bg_color_str);
                 for y in inner_area.top()..inner_area.bottom() {
                     for x in inner_area.left()..inner_area.right() {
-                        buf.get_mut(x, y).set_bg(bg_color);
+                        buf[(x, y)].set_bg(bg_color);
                     }
                 }
             }
@@ -219,7 +219,7 @@ impl Dashboard {
                 if x >= area.right() {
                     break;
                 }
-                buf.get_mut(x, area.y).set_char(ch).set_fg(color);
+                buf[(x, area.y)].set_char(ch).set_fg(color);
                 x += 1;
             }
 
@@ -250,7 +250,7 @@ impl Dashboard {
                 if x >= area.right() {
                     break;
                 }
-                buf.get_mut(x, y).set_char(ch).set_fg(color);
+                buf[(x, y)].set_char(ch).set_fg(color);
                 x += 1;
             }
 
@@ -289,7 +289,7 @@ impl Dashboard {
                 if curr_x >= area.right() || curr_x >= x + cell_width as u16 {
                     break;
                 }
-                buf.get_mut(curr_x, y).set_char(ch).set_fg(color);
+                buf[(curr_x, y)].set_char(ch).set_fg(color);
                 curr_x += 1;
             }
         }
@@ -312,11 +312,7 @@ impl Dashboard {
                 base_x + offset as u16
             }
             "right" => {
-                let offset = if available_width > content_width {
-                    available_width - content_width
-                } else {
-                    0
-                };
+                let offset = available_width.saturating_sub(content_width);
                 base_x + offset as u16
             }
             _ => base_x,
@@ -340,11 +336,7 @@ impl Dashboard {
                 base_y + offset as u16
             }
             "bottom" => {
-                let offset = if available_height > content_height {
-                    available_height - content_height
-                } else {
-                    0
-                };
+                let offset = available_height.saturating_sub(content_height);
                 base_y + offset as u16
             }
             _ => base_y,

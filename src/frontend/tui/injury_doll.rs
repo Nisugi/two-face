@@ -187,23 +187,6 @@ impl InjuryDoll {
 
         let bg_color = self.background_color;
 
-        // Calculate content alignment offset
-        // Injury doll content is 5 cols x 6 rows
-        const CONTENT_WIDTH: u16 = 5;
-        const CONTENT_HEIGHT: u16 = 6;
-
-        let (row_offset, col_offset) = if let Some(ref align_str) = self.content_align {
-            let align = crate::config::ContentAlign::from_str(align_str);
-            align.calculate_offset(
-                CONTENT_WIDTH,
-                CONTENT_HEIGHT,
-                inner_area.width,
-                inner_area.height,
-            )
-        } else {
-            (0, 0) // Default to top-left
-        };
-
         // Define all body part positions (col, row, char, body_part_name)
         let positions = [
             // Row 0: Eyes
@@ -227,6 +210,44 @@ impl InjuryDoll {
             (4, 5, 'o', "rightLeg"),
         ];
 
+        // Render special indicators on the right with text labels: nk, bk, ns
+        let text_indicators = [
+            (6, 1, "nk", "neck"), // neck - row 1
+            (6, 3, "bk", "back"), // back - row 3
+            (6, 5, "ns", "nsys"), // nerves - row 5
+        ];
+
+        // Calculate content alignment offset based on actual footprint
+        let mut content_width = 0u16;
+        let mut content_height = 0u16;
+
+        for (col, row, _glyph, _) in positions.iter() {
+            // Each glyph is a single character in the grid
+            let col_val = *col;
+            let row_val = *row;
+            content_width = content_width.max(col_val + 1);
+            content_height = content_height.max(row_val + 1);
+        }
+        for (start_col, row, text, _) in text_indicators.iter() {
+            let text_width = text.chars().count() as u16;
+            let start_col_val = *start_col;
+            let row_val = *row;
+            content_width = content_width.max(start_col_val + text_width);
+            content_height = content_height.max(row_val + 1);
+        }
+
+        let (row_offset, col_offset) = if let Some(ref align_str) = self.content_align {
+            let align = crate::config::ContentAlign::from_str(align_str);
+            align.calculate_offset(
+                content_width,
+                content_height,
+                inner_area.width,
+                inner_area.height,
+            )
+        } else {
+            (0, 0) // Default to top-left
+        };
+
         // Render body parts
         for (col, row, ch, body_part) in positions.iter() {
             let x = inner_area.x + col + col_offset;
@@ -244,13 +265,6 @@ impl InjuryDoll {
                 }
             }
         }
-
-        // Render special indicators on the right with text labels: nk, bk, ns
-        let text_indicators = [
-            (6, 1, "nk", "neck"), // neck - row 1
-            (6, 3, "bk", "back"), // back - row 3
-            (6, 5, "ns", "nsys"), // nerves - row 5
-        ];
 
         for (start_col, row, text, body_part) in text_indicators.iter() {
             let color = self.get_injury_color(body_part);

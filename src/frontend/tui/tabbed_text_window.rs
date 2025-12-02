@@ -8,7 +8,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders, Widget as RatatuiWidget},
+    widgets::{Block, BorderType, Widget as RatatuiWidget},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +104,35 @@ impl TabbedTextWindow {
     pub fn with_unread_prefix(mut self, prefix: String) -> Self {
         self.tab_unread_prefix = prefix;
         self
+    }
+
+    pub fn set_content_align(&mut self, align: Option<String>) {
+        for tab in &mut self.tabs {
+            tab.window.set_content_align(align.clone());
+        }
+    }
+
+    /// Handle a mouse click; returns true if it activated a tab.
+    pub fn handle_mouse_click(
+        &mut self,
+        window_rect: ratatui::layout::Rect,
+        mouse_col: u16,
+        mouse_row: u16,
+    ) -> bool {
+        let tab_bar = self.tab_bar_rect(window_rect);
+        if mouse_col < tab_bar.x
+            || mouse_col >= tab_bar.x + tab_bar.width
+            || mouse_row != tab_bar.y
+        {
+            return false;
+        }
+
+        if let Some(idx) = self.get_tab_at_position(mouse_col, tab_bar) {
+            self.switch_to_tab(idx);
+            return true;
+        }
+
+        false
     }
 
     pub fn add_tab(
@@ -413,6 +442,46 @@ impl TabbedTextWindow {
         None
     }
 
+    /// Compute the tab bar and content areas for a given outer window rect
+    fn tab_bar_rect(&self, outer: Rect) -> Rect {
+        // Match render() logic for border handling
+        let inner_area = if self.show_border {
+            let mut block = Block::default();
+            let border_type = match self
+                .border_style
+                .as_deref()
+                .unwrap_or("single")
+                .to_lowercase()
+                .as_str()
+            {
+                "double" => BorderType::Double,
+                "rounded" => BorderType::Rounded,
+                "thick" => BorderType::Thick,
+                _ => BorderType::Plain,
+            };
+            let borders = crate::config::parse_border_sides(&self.border_sides);
+            block = block.borders(borders).border_type(border_type);
+            block.inner(outer)
+        } else {
+            outer
+        };
+
+        match self.tab_bar_position {
+            TabBarPosition::Top => Rect {
+                x: inner_area.x,
+                y: inner_area.y,
+                width: inner_area.width,
+                height: 1,
+            },
+            TabBarPosition::Bottom => Rect {
+                x: inner_area.x,
+                y: inner_area.y + inner_area.height.saturating_sub(1),
+                width: inner_area.width,
+                height: 1,
+            },
+        }
+    }
+
     fn parse_color(hex: &str) -> Color {
         let hex = hex.trim_start_matches('#');
         if hex.len() != 6 {
@@ -551,7 +620,7 @@ impl TabbedTextWindow {
                 if x >= area.right() {
                     break;
                 }
-                buf.get_mut(x, area.y).set_char(ch).set_style(style);
+                buf[(x, area.y)].set_char(ch).set_style(style);
                 x += 1;
             }
 
@@ -562,7 +631,7 @@ impl TabbedTextWindow {
                     if x >= area.right() {
                         break;
                     }
-                    buf.get_mut(x, area.y)
+                    buf[(x, area.y)]
                         .set_char(ch)
                         .set_style(Style::default().fg(inactive_color));
                     x += 1;

@@ -41,7 +41,7 @@ impl SpellColorBrowser {
                     .text_color
                     .clone()
                     .unwrap_or_else(|| "#ffffff".to_string()),
-                bg_color: sc.bg_color.clone().unwrap_or_else(|| String::new()),
+                bg_color: sc.bg_color.clone().unwrap_or_else(String::new),
             })
             .collect();
 
@@ -190,7 +190,7 @@ impl SpellColorBrowser {
                 popup_width - 4,
                 is_selected,
                 buf,
-                &theme,
+                theme,
             );
             y += 1;
         }

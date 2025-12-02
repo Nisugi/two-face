@@ -140,21 +140,13 @@ pub enum ParsedElement {
 /// Tracks the currently active foreground/background/bold settings while the
 /// parser walks nested XML tags.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub(crate) struct ColorStyle {
     fg: Option<String>,
     bg: Option<String>,
     bold: bool,
 }
 
-impl Default for ColorStyle {
-    fn default() -> Self {
-        Self {
-            fg: None,
-            bg: None,
-            bold: false,
-        }
-    }
-}
 
 /// Stateful streaming parser that consumes wizard XML chunks and emits
 /// high-level `ParsedElement` values.
@@ -271,7 +263,7 @@ impl XmlParser {
 
                 if let Some(tag_start) = remaining.find(&start_pattern) {
                     // Make sure this is the earliest match
-                    if remaining.find('<').map_or(false, |pos| pos < tag_start) {
+                    if remaining.find('<').is_some_and(|pos| pos < tag_start) {
                         continue;
                     }
 

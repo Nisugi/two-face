@@ -924,7 +924,7 @@ effect_default_color = "#ffffff"
 
 [[windows]]
 name = "chat"
-widget_type = "tabbed"
+widget_type = "tabbedtext"
 streams = []
 row = 43
 col = 19

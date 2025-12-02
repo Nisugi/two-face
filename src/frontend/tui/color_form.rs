@@ -386,7 +386,7 @@ impl ColorForm {
             popup_width,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -401,7 +401,7 @@ impl ColorForm {
             popup_width,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -417,7 +417,7 @@ impl ColorForm {
             y,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 1;
 
@@ -432,7 +432,7 @@ impl ColorForm {
             popup_width,
             buf,
             textarea_bg,
-            &theme,
+            theme,
         );
         y += 2;
 
@@ -643,10 +643,9 @@ pub enum FormAction {
 
 // Trait implementations for ColorForm
 use super::widget_traits::{Cyclable, FieldNavigable, TextEditable, Toggleable};
-use anyhow::Result;
 
 impl TextEditable for ColorForm {
-    fn get_focused_field<'a>(&'a self) -> Option<&'a TextArea<'static>> {
+    fn get_focused_field(&self) -> Option<&TextArea<'static>> {
         match self.focused_field {
             0 => Some(&self.name),
             1 => Some(&self.color),
@@ -655,7 +654,7 @@ impl TextEditable for ColorForm {
         }
     }
 
-    fn get_focused_field_mut<'a>(&'a mut self) -> Option<&'a mut TextArea<'static>> {
+    fn get_focused_field_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.focused_field {
             0 => Some(&mut self.name),
             1 => Some(&mut self.color),

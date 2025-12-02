@@ -452,7 +452,7 @@ impl TextWindow {
 
                 // Check character before match
                 let is_word_start = start == 0 || {
-                    bytes.get(start - 1).map_or(true, |&b| {
+                    bytes.get(start - 1).is_none_or(|&b| {
                         let c = b as char;
                         !c.is_alphanumeric() && c != '_'
                     })
@@ -460,7 +460,7 @@ impl TextWindow {
 
                 // Check character after match
                 let is_word_end = end >= bytes.len() || {
-                    bytes.get(end).map_or(true, |&b| {
+                    bytes.get(end).is_none_or(|&b| {
                         let c = b as char;
                         !c.is_alphanumeric() && c != '_'
                     })
@@ -1083,7 +1083,7 @@ impl TextWindow {
         let mut highlight_ranges: Vec<(usize, usize, bool)> = Vec::new(); // (start, end, is_current)
 
         for m in line_matches {
-            let is_current = current_match.map_or(false, |cm| {
+            let is_current = current_match.is_some_and(|cm| {
                 cm.line_idx == m.line_idx && cm.start == m.start && cm.end == m.end
             });
             highlight_ranges.push((m.start, m.end, is_current));

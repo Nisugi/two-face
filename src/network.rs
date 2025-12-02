@@ -42,7 +42,7 @@ impl LichConnection {
         host: &str,
         port: u16,
         server_tx: mpsc::UnboundedSender<ServerMessage>,
-        mut command_rx: mpsc::UnboundedReceiver<String>,
+        command_rx: mpsc::UnboundedReceiver<String>,
     ) -> Result<()> {
         info!("Connecting to Lich at {}:{}...", host, port);
 
@@ -121,7 +121,7 @@ async fn run_stream(
                     break;
                 }
                 Ok(_) => {
-                    let line = line.trim_end_matches(&['\r', '\n']);
+                    let line = line.trim_end_matches(['\r', '\n']);
                     let _ = server_tx_clone.send(ServerMessage::Text(line.to_string()));
                 }
                 Err(e) => {

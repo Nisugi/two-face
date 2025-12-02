@@ -199,7 +199,7 @@ fn check_duplicates(issues: &mut Vec<ValidationIssue>, keybinds: &MenuKeybinds) 
 fn add_binding(map: &mut HashMap<String, Vec<String>>, keybind: &str, action: &str) {
     if !keybind.trim().is_empty() {
         map.entry(keybind.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(action.to_string());
     }
 }

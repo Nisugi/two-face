@@ -223,13 +223,13 @@ impl KeybindFormWidget {
                 let _handled = match self.focused_field {
                     2 => {
                         // Field 2: Key Combo
-                        let result = self.key_combo.input(rt_key.clone());
+                        let result = self.key_combo.input(rt_key);
                         self.validate_key_combo();
                         result
                     }
                     3 if self.action_type == KeybindActionType::Macro => {
                         // Field 3: Macro text (only when macro type is selected)
-                        self.macro_text.input(rt_key.clone())
+                        self.macro_text.input(rt_key)
                     }
                     _ => false,
                 };
@@ -417,7 +417,7 @@ impl KeybindFormWidget {
         }
 
         // Draw cyan border
-        self.draw_border(x, y, width, height, buf, &theme);
+        self.draw_border(x, y, width, height, buf, theme);
 
         // Title (left-aligned on top border)
         let title = match self.mode {
@@ -581,7 +581,7 @@ impl KeybindFormWidget {
             37,
             maroon,
             buf,
-            &theme,
+            theme,
         );
         current_y += 2;
 
@@ -596,7 +596,7 @@ impl KeybindFormWidget {
                     37,
                     maroon,
                     buf,
-                    &theme,
+                    theme,
                 );
             }
             KeybindActionType::Macro => {
@@ -613,7 +613,7 @@ impl KeybindFormWidget {
                     37,
                     maroon,
                     buf,
-                    &theme,
+                    theme,
                 );
             }
         }
@@ -768,10 +768,9 @@ impl KeybindFormWidget {
 
 // Trait implementations for KeybindFormWidget
 use super::widget_traits::{Cyclable, FieldNavigable, TextEditable, Toggleable};
-use anyhow::Result;
 
 impl TextEditable for KeybindFormWidget {
-    fn get_focused_field<'a>(&'a self) -> Option<&'a TextArea<'static>> {
+    fn get_focused_field(&self) -> Option<&TextArea<'static>> {
         match self.focused_field {
             2 => Some(&self.key_combo),
             3 if self.action_type == KeybindActionType::Macro => Some(&self.macro_text),
@@ -779,7 +778,7 @@ impl TextEditable for KeybindFormWidget {
         }
     }
 
-    fn get_focused_field_mut<'a>(&'a mut self) -> Option<&'a mut TextArea<'static>> {
+    fn get_focused_field_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.focused_field {
             2 => Some(&mut self.key_combo),
             3 if self.action_type == KeybindActionType::Macro => Some(&mut self.macro_text),

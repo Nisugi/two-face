@@ -13,6 +13,7 @@ pub struct WindowState {
     pub position: WindowPosition,
     pub visible: bool,
     pub focused: bool,
+    pub content_align: Option<String>,
 }
 
 /// Types of widgets that can be displayed
@@ -104,6 +105,7 @@ impl WindowState {
             },
             visible: true,
             focused: false,
+            content_align: None,
         }
     }
 
@@ -125,6 +127,7 @@ impl WindowState {
             },
             visible: true,
             focused: false,
+            content_align: None,
         }
     }
 }

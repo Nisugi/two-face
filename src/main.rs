@@ -152,127 +152,6 @@ fn build_direct_config(
 
 /// Convert KeyCode + KeyModifiers to a string format matching the keybind HashMap
 ///
-/// NOTE: Crossterm doesn't distinguish numpad from regular number keys.
-/// So we format keys as-is. Numpad-specific keybinds (num_0, etc.) won't match.
-fn format_key_for_keybind(
-    code: crossterm::event::KeyCode,
-    modifiers: crossterm::event::KeyModifiers,
-) -> String {
-    use crossterm::event::KeyCode;
-
-    let base_key = match code {
-        KeyCode::Char(c) => {
-            // Return character as-is (don't map to numpad format)
-            if modifiers.is_empty() {
-                return c.to_string();
-            } else {
-                return format!("{}+{}", format_modifiers(modifiers), c);
-            }
-        }
-        KeyCode::Enter => "enter",
-        KeyCode::Esc => "esc",
-        KeyCode::Tab => "tab",
-        KeyCode::Backspace => "backspace",
-        KeyCode::Delete => "delete",
-        KeyCode::Up => "up",
-        KeyCode::Down => "down",
-        KeyCode::Left => "left",
-        KeyCode::Right => "right",
-        KeyCode::Home => "home",
-        KeyCode::End => "end",
-        KeyCode::PageUp => "pageup",
-        KeyCode::PageDown => "pagedown",
-        KeyCode::F(n) => return format!("f{}", n),
-        _ => return String::new(), // Unhandled key
-    };
-
-    // Add modifiers if present
-    if modifiers.is_empty() {
-        base_key.to_string()
-    } else {
-        format!("{}+{}", format_modifiers(modifiers), base_key)
-    }
-}
-
-/// Format modifiers as a string (helper for format_key_for_keybind)
-fn format_modifiers(modifiers: crossterm::event::KeyModifiers) -> String {
-    use crossterm::event::KeyModifiers;
-    let mut parts = Vec::new();
-
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        parts.push("ctrl");
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        parts.push("alt");
-    }
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        parts.push("shift");
-    }
-
-    parts.join("+")
-}
-
-/// Build windows submenu
-fn build_windows_submenu(_app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
-    let items = vec![
-        data::ui_state::PopupMenuItem {
-            text: "Add Window...".to_string(),
-            command: "action:addwindow".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Hide Window...".to_string(),
-            command: "action:hidewindow".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Edit Window...".to_string(),
-            command: "action:editwindow".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "List Windows".to_string(),
-            command: "action:listwindows".to_string(),
-            disabled: false,
-        },
-    ];
-    items
-}
-
-/// Build window picker for editing (shows only visible windows)
-fn build_window_picker(app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
-    let mut items = Vec::new();
-
-    // Collect visible window names
-    let mut visible_names: Vec<String> = app_core
-        .ui_state
-        .windows
-        .keys()
-        .map(|name| name.to_string())
-        .collect();
-
-    // Sort alphabetically by display name
-    visible_names.sort_by_key(|name| get_window_display_name(name));
-
-    for name in visible_names {
-        let display_name = get_window_display_name(&name);
-        items.push(data::ui_state::PopupMenuItem {
-            text: display_name,
-            command: format!("action:editwindow:{}", name),
-            disabled: false,
-        });
-    }
-
-    if items.is_empty() {
-        items.push(data::ui_state::PopupMenuItem {
-            text: "No visible windows to edit".to_string(),
-            command: String::new(),
-            disabled: true,
-        });
-    }
-    items
-}
-
 /// Build configuration submenu
 fn build_config_submenu() -> Vec<data::ui_state::PopupMenuItem> {
     vec![
@@ -498,134 +377,7 @@ fn build_settings_items(
     items
 }
 
-/// Build layouts submenu
-fn build_layouts_submenu() -> Vec<data::ui_state::PopupMenuItem> {
-    let mut items = Vec::new();
-
-    // Get list of saved layouts
-    match config::Config::list_layouts() {
-        Ok(layouts) => {
-            for layout_name in layouts {
-                items.push(data::ui_state::PopupMenuItem {
-                    text: layout_name.clone(),
-                    command: format!("action:loadlayout:{}", layout_name),
-                    disabled: false,
-                });
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to list layouts: {}", e);
-            items.push(data::ui_state::PopupMenuItem {
-                text: "No layouts found".to_string(),
-                command: String::new(),
-                disabled: true,
-            });
-        }
-    }
-
-    items
-}
-
 /// Build widget type picker menu (shows hidden templates that can be shown)
-/// Get clean display name for a window
-fn get_window_display_name(name: &str) -> String {
-    match name {
-        "encumlevel" => "encumbrance".to_string(),
-        "pbarStance" => "stance".to_string(),
-        "mindState" => "mind".to_string(),
-        "lblBPs" => "blood".to_string(),
-        "active_spells" => "active spells".to_string(),
-        "left_hand" => "left hand".to_string(),
-        "right_hand" => "right hand".to_string(),
-        "spell_hand" => "spell hand".to_string(),
-        _ => name.to_string(),
-    }
-}
-
-fn build_widget_picker(_app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
-    // Return category menu items
-    vec![
-        data::ui_state::PopupMenuItem {
-            text: "Countdown".to_string(),
-            command: "action:addwindow:countdown".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Hand".to_string(),
-            command: "action:addwindow:hand".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Other".to_string(),
-            command: "action:addwindow:other".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Progress Bar".to_string(),
-            command: "action:addwindow:progressbar".to_string(),
-            disabled: false,
-        },
-        data::ui_state::PopupMenuItem {
-            text: "Text".to_string(),
-            command: "action:addwindow:text".to_string(),
-            disabled: false,
-        },
-    ]
-}
-
-/// Build window list for a specific category
-fn build_widget_category_picker(app_core: &core::AppCore, category: &str) -> Vec<data::ui_state::PopupMenuItem> {
-    let mut items = Vec::new();
-
-    // Define which windows belong to each category
-    let category_windows: Vec<&str> = match category {
-        "countdown" => vec!["roundtime", "casttime", "stuntime"],
-        "hand" => vec!["left_hand", "right_hand", "spell_hand"],
-        "other" => vec!["compass", "inventory", "room", "spells", "injuries", "spacer", "quickbar"],
-        "progressbar" => vec!["health", "mana", "stamina", "spirit", "encumlevel", "pbarStance", "mindState", "lblBPs"],
-        "text" => vec!["thoughts", "speech", "announcements", "loot", "death", "logons", "familiar", "ambients", "bounty", "society"],
-        _ => vec![],
-    };
-
-    // Filter out windows that are already visible
-    for template_name in category_windows {
-        // Special case: spacer is always createable (not a singleton window)
-        let is_spacer = template_name == "spacer";
-
-        // Skip if this window is already visible in ui_state (unless it's spacer)
-        if !is_spacer && app_core.ui_state.windows.contains_key(template_name) {
-            continue;
-        }
-
-        // Add to menu
-        let display_name = get_window_display_name(template_name);
-        let command = if is_spacer {
-            // Spacers are created (not shown from layout)
-            format!("action:createwindow:{}", template_name)
-        } else {
-            // Other windows are shown from layout
-            format!("action:showwindow:{}", template_name)
-        };
-
-        items.push(data::ui_state::PopupMenuItem {
-            text: display_name.clone(),
-            command,
-            disabled: false,
-        });
-    }
-
-    // If no available windows in this category
-    if items.is_empty() {
-        items.push(data::ui_state::PopupMenuItem {
-            text: "All windows in this category are visible".to_string(),
-            command: String::new(),
-            disabled: true,
-        });
-    }
-
-    items
-}
-
 /// Build hide window menu (shows currently visible windows that can be hidden)
 fn build_hidewindow_picker(app_core: &core::AppCore) -> Vec<data::ui_state::PopupMenuItem> {
     let mut items = Vec::new();
@@ -640,10 +392,10 @@ fn build_hidewindow_picker(app_core: &core::AppCore) -> Vec<data::ui_state::Popu
         .collect();
 
     // Sort alphabetically by display name
-    visible_names.sort_by_key(|name| get_window_display_name(name));
+    visible_names.sort_by_key(|name| app_core.get_window_display_name(name));
 
     for name in visible_names {
-        let display_name = get_window_display_name(&name);
+        let display_name = app_core.get_window_display_name(&name);
         items.push(data::ui_state::PopupMenuItem {
             text: display_name,
             command: format!("action:hidewindow:{}", name),
@@ -669,9 +421,8 @@ fn handle_menu_action(
     frontend: &mut frontend::tui::TuiFrontend,
     command: &str,
 ) -> Result<()> {
-    if command.starts_with("action:loadlayout:") {
+    if let Some(layout_name) = command.strip_prefix("action:loadlayout:") {
         // Load a layout with proper terminal size
-        let layout_name = &command[18..];
         tracing::info!("[MAIN.RS] Menu action loadlayout: '{}'", layout_name);
         let (width, height) = frontend.size();
         tracing::info!(
@@ -682,10 +433,8 @@ fn handle_menu_action(
         if let Some((theme_id, theme)) = app_core.load_layout(layout_name, width, height) {
             frontend.update_theme_cache(theme_id, theme);
         }
-    } else if command.starts_with("action:createwindow:") {
+    } else if let Some(widget_type) = command.strip_prefix("action:createwindow:") {
         // Create a new window with the specified widget type
-        let widget_type = &command[20..];
-
         // Get template for this widget type (use widget type name as template name)
         if let Some(template) = config::Config::get_window_template(widget_type) {
             // Open window editor with template (proper defaults + marked as new)
@@ -700,10 +449,8 @@ fn handle_menu_action(
         } else {
             tracing::warn!("No template found for widget type: {}", widget_type);
         }
-    } else if command.starts_with("action:editwindow:") {
+    } else if let Some(window_name) = command.strip_prefix("action:editwindow:") {
         // Edit an existing window
-        let window_name = &command[18..];
-
         // Find the window definition
         if let Some(window_def) = app_core
             .layout
@@ -719,10 +466,8 @@ fn handle_menu_action(
         } else {
             tracing::warn!("Window not found for editing: {}", window_name);
         }
-    } else if command.starts_with("action:showwindow:") {
+    } else if let Some(window_name) = command.strip_prefix("action:showwindow:") {
         // Add/show the window (from template)
-        let window_name = &command[18..];
-
         // Get terminal size for window positioning
         let (width, height) = frontend.size();
 
@@ -734,29 +479,17 @@ fn handle_menu_action(
         app_core.ui_state.submenu = None;
         app_core.ui_state.input_mode = data::ui_state::InputMode::Normal;
         app_core.needs_render = true;
-    } else if command.starts_with("action:addwindow:") {
-        // Show submenu with windows for this category
-        let category = &command[17..];
-
-        // Close main menu, show submenu with windows in this category
-        app_core.ui_state.popup_menu = None;
-        app_core.ui_state.submenu = Some(data::ui_state::PopupMenu::new(
-            build_widget_category_picker(app_core, category),
-            (40, 12),
-        ));
-        app_core.ui_state.input_mode = data::ui_state::InputMode::Menu;
-    } else if command.starts_with("action:hidewindow:") {
+    } else if let Some(window_name) = command.strip_prefix("action:hidewindow:") {
         // Hide a visible window
-        let window_name = &command[18..];
         app_core.hide_window(window_name);
     } else {
         match command {
             "action:addwindow" => {
                 // Close submenu if it exists
                 app_core.ui_state.submenu = None;
-                // Show widget type picker
+                // Show widget type picker using proper build_add_window_menu
                 app_core.ui_state.popup_menu = Some(data::ui_state::PopupMenu::new(
-                    build_widget_picker(app_core),
+                    app_core.build_add_window_menu(),
                     (40, 12),
                 ));
                 // Stay in Menu mode
@@ -776,6 +509,11 @@ fn handle_menu_action(
             "action:listwindows" => {
                 // List all windows
                 app_core.send_command(".windows".to_string())?;
+
+                // Close menu and return to normal mode
+                app_core.ui_state.popup_menu = None;
+                app_core.ui_state.input_mode = data::ui_state::InputMode::Normal;
+                app_core.needs_render = true;
             }
             "action:highlights" => {
                 // Open highlight browser
@@ -1165,7 +903,8 @@ async fn async_run_tui(
                 } => {
                     use crate::data::ui_state::InputMode;
                     use crossterm::event::{KeyModifiers, MouseEventKind};
-                    use data::{DragOperation, LinkDragState, MouseDragState, PendingLinkClick};
+                    use data::{DragOperation, LinkDragState, MouseDragState, PendingLinkClick, window::WidgetType};
+                    use ratatui::layout::Rect;
 
                     // Create stable window index mapping (sorted by window name for consistency)
                     let mut window_names: Vec<&String> = app_core.ui_state.windows.keys().collect();
@@ -1284,17 +1023,14 @@ async fn async_run_tui(
                                     );
 
                                     // Handle command same way as Enter key
-                                    if command.starts_with("menu:") {
+                                    if let Some(submenu_name) = command.strip_prefix("menu:") {
                                         // Config menu submenu
-                                        let submenu_name = &command[5..];
                                         // ... handle like in keyboard code ...
                                         tracing::debug!("Clicked config submenu: {}", submenu_name);
                                         app_core.ui_state.popup_menu = None;
                                         app_core.ui_state.input_mode = InputMode::Normal;
-                                    } else if command.starts_with("__SUBMENU__") {
+                                    } else if let Some(category) = command.strip_prefix("__SUBMENU__") {
                                         // Context menu or .menu submenu
-                                        let category = &command[11..];
-
                                         // Try build_submenu first (for .menu categories)
                                         let items = app_core.build_submenu(category);
                                         let items = if !items.is_empty() {
@@ -1369,6 +1105,7 @@ async fn async_run_tui(
                             let mut found_window = None;
                             let mut drag_op = None;
                             let mut clicked_window_name: Option<String> = None;
+                            let mut handled_tab_click = false;
 
                             for (name, window) in &app_core.ui_state.windows {
                                 let pos = &window.position;
@@ -1378,6 +1115,20 @@ async fn async_run_tui(
                                     && *y < pos.y + pos.height
                                 {
                                     clicked_window_name = Some(name.clone());
+
+                                    // Handle tabbed text tab switching on click
+                                    if window.widget_type == WidgetType::TabbedText {
+                                        let rect = Rect {
+                                            x: pos.x,
+                                            y: pos.y,
+                                            width: pos.width,
+                                            height: pos.height,
+                                        };
+                                        if frontend.handle_tabbed_click(name, rect, *x, *y) {
+                                            handled_tab_click = true;
+                                            break;
+                                        }
+                                    }
 
                                     let right_col = pos.x + pos.width - 1;
                                     let bottom_row = pos.y + pos.height - 1;
@@ -1406,6 +1157,11 @@ async fn async_run_tui(
                                         break;
                                     }
                                 }
+                            }
+
+                            if handled_tab_click {
+                                app_core.needs_render = true;
+                                continue;
                             }
 
                             if let (Some(window_name), Some(operation)) = (found_window, drag_op) {
@@ -2170,7 +1926,7 @@ fn handle_frontend_event(
                     }
                     InputMode::SpellColorsBrowser => {
                         if let Some(ref mut browser) = frontend.spell_color_browser {
-                            use crate::frontend::tui::widget_traits::{Navigable, Selectable};
+                            use crate::frontend::tui::widget_traits::Navigable;
                             let action = input_router::route_input(
                                 key_event,
                                 &app_core.ui_state.input_mode,
@@ -2200,7 +1956,7 @@ fn handle_frontend_event(
                     }
                     InputMode::UIColorsBrowser => {
                         if let Some(ref mut browser) = frontend.uicolors_browser {
-                            use crate::frontend::tui::widget_traits::{Navigable, Selectable};
+                            use crate::frontend::tui::widget_traits::Navigable;
                             let action = input_router::route_input(
                                 key_event,
                                 &app_core.ui_state.input_mode,
@@ -2329,7 +2085,7 @@ fn handle_frontend_event(
                     InputMode::SettingsEditor => {
                         if let Some(ref mut editor) = frontend.settings_editor {
                             use crate::frontend::tui::widget_traits::{
-                                Cyclable, Navigable, Toggleable,
+                                Navigable, Toggleable,
                             };
                             let action = input_router::route_input(
                                 key_event,
@@ -2368,7 +2124,7 @@ fn handle_frontend_event(
                     InputMode::HighlightForm => {
                         if let Some(ref mut form) = frontend.highlight_form {
                             use crate::frontend::tui::widget_traits::{
-                                Cyclable, FieldNavigable, TextEditable, Toggleable,
+                                FieldNavigable, TextEditable, Toggleable,
                             };
                             let action = input_router::route_input(
                                 key_event,
@@ -2434,7 +2190,7 @@ fn handle_frontend_event(
                     InputMode::KeybindForm => {
                         if let Some(ref mut form) = frontend.keybind_form {
                             use crate::frontend::tui::widget_traits::{
-                                Cyclable, FieldNavigable, TextEditable, Toggleable,
+                                FieldNavigable, TextEditable, Toggleable,
                             };
                             let action = input_router::route_input(
                                 key_event,
@@ -2744,13 +2500,12 @@ fn handle_frontend_event(
                                 tracing::info!("Menu command selected: {}", command);
 
                                 // Handle submenu commands (from config menus)
-                                if command.starts_with("menu:") {
+                                if let Some(submenu_name) = command.strip_prefix("menu:") {
                                     // This is a submenu - open it
-                                    let submenu_name = &command[5..];
                                     match submenu_name {
                                         "windows" => {
-                                            // Build windows submenu
-                                            let items = build_windows_submenu(&app_core);
+                                            // Build windows submenu using app_core method
+                                            let items = app_core.build_windows_submenu();
                                             app_core.ui_state.popup_menu =
                                                 Some(crate::data::ui_state::PopupMenu::new(
                                                     items,
@@ -2768,7 +2523,7 @@ fn handle_frontend_event(
                                         }
                                         "layouts" => {
                                             // Build layouts submenu
-                                            let items = build_layouts_submenu();
+                                            let items = app_core.build_layouts_submenu();
                                             app_core.ui_state.popup_menu =
                                                 Some(crate::data::ui_state::PopupMenu::new(
                                                     items,
@@ -2776,8 +2531,8 @@ fn handle_frontend_event(
                                                 ));
                                         }
                                         "widgetpicker" => {
-                                            // Build widget type picker for adding windows
-                                            let items = build_widget_picker(&app_core);
+                                            // Build widget type picker for adding windows - use proper menu
+                                            let items = app_core.build_add_window_menu();
                                             app_core.ui_state.popup_menu =
                                                 Some(crate::data::ui_state::PopupMenu::new(
                                                     items,
@@ -2818,9 +2573,9 @@ fn handle_frontend_event(
                                         }
                                     }
                                     app_core.needs_render = true;
-                                } else if command.starts_with("__SUBMENU__") {
+                                } else if let Some(category) = command.strip_prefix("__SUBMENU__") {
                                     // Context menu or .menu submenu
-                                    let category = &command[11..]; // Skip "__SUBMENU__" prefix
+                                    // Skip "__SUBMENU__" prefix
 
                                     // Try build_submenu first (for .menu categories)
                                     let items = app_core.build_submenu(category);
@@ -2859,9 +2614,9 @@ fn handle_frontend_event(
                                         app_core.ui_state.input_mode = InputMode::Normal;
                                     }
                                     app_core.needs_render = true;
-                                } else if command.starts_with("__SUBMENU_ADD__") {
+                                } else if let Some(category_str) = command.strip_prefix("__SUBMENU_ADD__") {
                                     // Add Window category submenu - parse category and show windows
-                                    let category_str = &command[15..]; // Skip "__SUBMENU_ADD__" prefix
+                                    // Skip "__SUBMENU_ADD__" prefix
 
                                     use config::WidgetCategory;
                                     let category = match category_str {
@@ -2899,9 +2654,89 @@ fn handle_frontend_event(
                                         );
                                     }
                                     app_core.needs_render = true;
-                                } else if command.starts_with("__ADD__") {
+                                } else if let Some(category_str) = command.strip_prefix("__SUBMENU_HIDE__") {
+                                    // Hide Window category submenu
+                                    // Skip "__SUBMENU_HIDE__" prefix
+
+                                    use config::WidgetCategory;
+                                    let category = match category_str {
+                                        "ProgressBar" => WidgetCategory::ProgressBar,
+                                        "TextWindow" => WidgetCategory::TextWindow,
+                                        "Countdown" => WidgetCategory::Countdown,
+                                        "Hand" => WidgetCategory::Hand,
+                                        "ActiveEffects" => WidgetCategory::ActiveEffects,
+                                        "Other" => WidgetCategory::Other,
+                                        _ => {
+                                            tracing::warn!(
+                                                "Unknown widget category for hide: {}",
+                                                category_str
+                                            );
+                                            app_core.ui_state.popup_menu = None;
+                                            app_core.ui_state.input_mode = InputMode::Normal;
+                                            app_core.needs_render = true;
+                                            WidgetCategory::Other // Fallback
+                                        }
+                                    };
+
+                                    // Build window list for this category
+                                    let items = app_core.build_hide_window_category_menu(&category);
+
+                                    if items.is_empty() {
+                                        tracing::info!(
+                                            "No visible windows in category: {:?}",
+                                            category
+                                        );
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+                                    } else {
+                                        app_core.ui_state.popup_menu = Some(
+                                            crate::data::ui_state::PopupMenu::new(items, (40, 12)),
+                                        );
+                                    }
+                                    app_core.needs_render = true;
+                                } else if let Some(category_str) = command.strip_prefix("__SUBMENU_EDIT__") {
+                                    // Edit Window category submenu
+                                    // Skip "__SUBMENU_EDIT__" prefix
+
+                                    use config::WidgetCategory;
+                                    let category = match category_str {
+                                        "ProgressBar" => WidgetCategory::ProgressBar,
+                                        "TextWindow" => WidgetCategory::TextWindow,
+                                        "Countdown" => WidgetCategory::Countdown,
+                                        "Hand" => WidgetCategory::Hand,
+                                        "ActiveEffects" => WidgetCategory::ActiveEffects,
+                                        "Other" => WidgetCategory::Other,
+                                        _ => {
+                                            tracing::warn!(
+                                                "Unknown widget category for edit: {}",
+                                                category_str
+                                            );
+                                            app_core.ui_state.popup_menu = None;
+                                            app_core.ui_state.input_mode = InputMode::Normal;
+                                            app_core.needs_render = true;
+                                            WidgetCategory::Other // Fallback
+                                        }
+                                    };
+
+                                    // Build window list for this category
+                                    let items = app_core.build_edit_window_category_menu(&category);
+
+                                    if items.is_empty() {
+                                        tracing::info!(
+                                            "No visible windows in category: {:?}",
+                                            category
+                                        );
+                                        app_core.ui_state.popup_menu = None;
+                                        app_core.ui_state.input_mode = InputMode::Normal;
+                                    } else {
+                                        app_core.ui_state.popup_menu = Some(
+                                            crate::data::ui_state::PopupMenu::new(items, (40, 12)),
+                                        );
+                                    }
+                                    app_core.needs_render = true;
+                                } else if let Some(window_name) = command.strip_prefix("__ADD__") {
                                     // Add window command
-                                    let window_name = &command[7..]; // Skip "__ADD__" prefix
+                                    // Skip "__ADD__" prefix
 
                                     match app_core.layout.add_window(window_name) {
                                         Ok(_) => {
@@ -2934,9 +2769,9 @@ fn handle_frontend_event(
                                     app_core.ui_state.popup_menu = None;
                                     app_core.ui_state.input_mode = InputMode::Normal;
                                     app_core.needs_render = true;
-                                } else if command.starts_with("__HIDE__") {
+                                } else if let Some(window_name) = command.strip_prefix("__HIDE__") {
                                     // Hide window command
-                                    let window_name = &command[8..]; // Skip "__HIDE__" prefix
+                                    // Skip "__HIDE__" prefix
 
                                     match app_core.layout.hide_window(window_name) {
                                         Ok(_) => {
@@ -2967,9 +2802,9 @@ fn handle_frontend_event(
                                     app_core.ui_state.popup_menu = None;
                                     app_core.ui_state.input_mode = InputMode::Normal;
                                     app_core.needs_render = true;
-                                } else if command.starts_with("__EDIT__") {
+                                } else if let Some(window_name) = command.strip_prefix("__EDIT__") {
                                     // Edit window command
-                                    let window_name = &command[8..]; // Skip "__EDIT__" prefix
+                                    // Skip "__EDIT__" prefix
 
                                     if let Some(window_def) =
                                         app_core.layout.get_window(window_name)
@@ -3102,6 +2937,9 @@ fn handle_frontend_event(
                                 // Toggle only works on checkboxes
                                 editor.toggle_field();
                                 app_core.needs_render = true;
+                            } else if editor.is_on_content_align() {
+                                editor.cycle_content_align(false);
+                                app_core.needs_render = true;
                             } else if editor.is_on_border_style() {
                                 // Cycle border style dropdown
                                 editor.cycle_border_style();
@@ -3112,6 +2950,9 @@ fn handle_frontend_event(
                             if editor.is_on_checkbox() {
                                 // Enter/Select also toggles checkboxes
                                 editor.toggle_field();
+                                app_core.needs_render = true;
+                            } else if editor.is_on_content_align() {
+                                editor.cycle_content_align(false);
                                 app_core.needs_render = true;
                             } else if editor.is_on_border_style() {
                                 // Cycle border style dropdown

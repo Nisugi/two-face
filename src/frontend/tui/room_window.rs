@@ -102,7 +102,7 @@ impl RoomWindow {
         self.current_line.clear();
 
         // Initialize component buffer if it doesn't exist, or clear it
-        self.components.entry(id).or_insert_with(Vec::new).clear();
+        self.components.entry(id).or_default().clear();
     }
 
     /// Add styled text segment to current component's current line

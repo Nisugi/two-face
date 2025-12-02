@@ -7,7 +7,6 @@ use crate::config::{Config, SpellColorStyle};
 use crate::core::GameState;
 use crate::data::*;
 use crate::parser::ParsedElement;
-use std::collections::HashMap;
 
 /// Processes incoming game messages and updates state
 pub struct MessageProcessor {
@@ -49,6 +48,11 @@ pub struct MessageProcessor {
 
     /// Previous room component values (for change detection to avoid unnecessary processing)
     previous_room_components: std::collections::HashMap<String, String>,
+
+    /// Squelch/ignore system for filtering unwanted lines
+    squelch_enabled: bool,
+    squelch_matcher: Option<aho_corasick::AhoCorasick>,
+    squelch_regexes: Vec<regex::Regex>,
 }
 
 impl MessageProcessor {
@@ -63,7 +67,7 @@ impl MessageProcessor {
         let event_patterns = config.event_patterns.clone();
         let parser = crate::parser::XmlParser::with_presets(preset_list, event_patterns);
 
-        Self {
+        let mut processor = Self {
             config,
             parser,
             current_stream: String::from("main"),
@@ -77,7 +81,14 @@ impl MessageProcessor {
             combat_buffer: Vec::new(),
             playerlist_buffer: Vec::new(),
             previous_room_components: std::collections::HashMap::new(),
-        }
+            squelch_enabled: false,
+            squelch_matcher: None,
+            squelch_regexes: Vec::new(),
+        };
+
+        // Initialize squelch patterns from config
+        processor.update_squelch_patterns();
+        processor
     }
 
     /// Process a parsed XML element and update states
@@ -128,7 +139,7 @@ impl MessageProcessor {
                 let should_discard_if_no_window = matches!(id.as_str(), "spell" | "bounty" | "room");
 
                 // Check if a window exists for this stream (map stream to window name first)
-                let window_name = self.map_stream_to_window(&id);
+                let window_name = self.map_stream_to_window(id);
                 if should_discard_if_no_window && ui_state.get_window(&window_name).is_none() {
                     self.discard_current_stream = true;
                     tracing::debug!("No window exists for stream '{}' (maps to window '{}'), discarding content", id, window_name);
@@ -247,7 +258,7 @@ impl MessageProcessor {
                     }
 
                     // Finish prompt line
-                    self.flush_current_stream_with_tts(ui_state, tts_manager.as_deref_mut());
+                    self.flush_current_stream_with_tts(ui_state, tts_manager);
                 }
 
                 // Extract server time offset for countdown synchronization
@@ -758,7 +769,7 @@ impl MessageProcessor {
         // ALWAYS clear the component buffer when receiving new data (game sends full replacement, not append)
         room_components
             .entry(id.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .clear();
         *current_room_component = Some(id.to_string());
         tracing::debug!("Started/replaced room component: {}", id);
@@ -870,10 +881,31 @@ impl MessageProcessor {
     pub fn flush_current_stream_with_tts(
         &mut self,
         ui_state: &mut UiState,
-        mut tts_manager: Option<&mut crate::tts::TtsManager>,
+        tts_manager: Option<&mut crate::tts::TtsManager>,
     ) {
         if self.current_segments.is_empty() {
             return;
+        }
+
+        // Concatenate all segments to get full line text for squelch checking
+        let full_text: String = self
+            .current_segments
+            .iter()
+            .map(|seg| seg.text.as_str())
+            .collect();
+
+        // Check if line should be squelched (ignored/filtered)
+        if self.should_squelch_line(&full_text) {
+            tracing::debug!(
+                "Line squelched: '{}'",
+                if full_text.len() > 80 {
+                    format!("{}...", &full_text[..80])
+                } else {
+                    full_text.clone()
+                }
+            );
+            self.current_segments.clear();
+            return; // Discard line completely
         }
 
         let mut line = StyledLine {
@@ -1255,5 +1287,76 @@ impl MessageProcessor {
     pub fn clear_inventory_cache(&mut self) {
         self.previous_inventory.clear();
         tracing::debug!("Cleared inventory cache - next inventory update will render");
+    }
+
+    /// Update squelch pattern matching infrastructure from config
+    pub fn update_squelch_patterns(&mut self) {
+        self.squelch_enabled = self.config.ui.ignores_enabled;
+
+        // Collect all squelch patterns
+        let squelch_patterns: Vec<_> = self
+            .config
+            .highlights
+            .values()
+            .filter(|pattern| pattern.squelch)
+            .collect();
+
+        // Build Aho-Corasick for fast_parse patterns
+        let mut fast_patterns = Vec::new();
+        for pattern in squelch_patterns.iter().filter(|p| p.fast_parse) {
+            // Split pattern on | for literal matching
+            for literal in pattern.pattern.split('|') {
+                let trimmed = literal.trim();
+                if !trimmed.is_empty() {
+                    fast_patterns.push(trimmed.to_string());
+                }
+            }
+        }
+
+        if !fast_patterns.is_empty() {
+            self.squelch_matcher = aho_corasick::AhoCorasickBuilder::new()
+                .match_kind(aho_corasick::MatchKind::Standard)
+                .build(&fast_patterns)
+                .ok();
+        } else {
+            self.squelch_matcher = None;
+        }
+
+        // Compile regex patterns
+        self.squelch_regexes = squelch_patterns
+            .iter()
+            .filter(|p| !p.fast_parse)
+            .filter_map(|p| regex::Regex::new(&p.pattern).ok())
+            .collect();
+
+        tracing::debug!(
+            "Updated squelch patterns: {} fast patterns, {} regex patterns, enabled={}",
+            fast_patterns.len(),
+            self.squelch_regexes.len(),
+            self.squelch_enabled
+        );
+    }
+
+    /// Check if a line should be squelched (ignored/filtered)
+    fn should_squelch_line(&self, text: &str) -> bool {
+        if !self.squelch_enabled {
+            return false;
+        }
+
+        // Check Aho-Corasick fast patterns
+        if let Some(ref matcher) = self.squelch_matcher {
+            if matcher.is_match(text) {
+                return true;
+            }
+        }
+
+        // Check regex patterns
+        for regex in &self.squelch_regexes {
+            if regex.is_match(text) {
+                return true;
+            }
+        }
+
+        false
     }
 }

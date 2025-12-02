@@ -8,8 +8,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget as RatatuiWidget},
+    widgets::Widget as RatatuiWidget,
 };
 use tui_textarea::TextArea;
 
@@ -559,14 +558,12 @@ impl ThemeEditor {
         // Set name and description
         data.name = self
             .name
-            .lines()
-            .get(0)
+            .lines().first()
             .map(|s| s.to_string())
             .unwrap_or_default();
         data.description = self
             .description
-            .lines()
-            .get(0)
+            .lines().first()
             .map(|s| s.to_string())
             .unwrap_or_default();
 
@@ -575,8 +572,7 @@ impl ThemeEditor {
             for field in &section.fields {
                 let value = field
                     .textarea
-                    .lines()
-                    .get(0)
+                    .lines().first()
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
@@ -784,7 +780,7 @@ impl ThemeEditor {
             buf.set_string(
                 x + 2,
                 current_y,
-                &format!("--- {} ---", section_name),
+                format!("--- {} ---", section_name),
                 Style::default()
                     .fg(theme.browser_title)
                     .add_modifier(Modifier::BOLD),
@@ -819,15 +815,14 @@ impl ThemeEditor {
                 buf.set_string(
                     x + 4,
                     current_y,
-                    &format!("{:<20}", field.label),
+                    format!("{:<20}", field.label),
                     label_style,
                 );
 
                 // Get value from textarea
                 let value = field
                     .textarea
-                    .lines()
-                    .get(0)
+                    .lines().first()
                     .map(|s| s.as_str())
                     .unwrap_or("");
 
@@ -839,7 +834,7 @@ impl ThemeEditor {
                 } else {
                     Style::default().fg(theme.text_primary)
                 };
-                buf.set_string(x + 26, current_y, &format!("{:<10}", value), value_style);
+                buf.set_string(x + 26, current_y, format!("{:<10}", value), value_style);
 
                 // Color preview box (3 characters wide)
                 if let Some(color) = ThemeData::parse_color(value) {
@@ -867,7 +862,7 @@ impl ThemeEditor {
                 buf.set_string(
                     x + 4,
                     current_y,
-                    &format!("{}. {}", i + 1, section.name),
+                    format!("{}. {}", i + 1, section.name),
                     Style::default().fg(theme.text_primary),
                 );
                 current_y += 1;
