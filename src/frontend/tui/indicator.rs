@@ -10,6 +10,8 @@ use ratatui::{
     widgets::{Block, BorderType, Widget},
 };
 
+use super::crossterm_bridge;
+
 /// Indicator widget for displaying boolean status (on/off)
 /// Used for status indicators like "standing", "kneeling", "sitting", etc.
 pub struct Indicator {
@@ -109,7 +111,7 @@ impl Indicator {
 
         // Determine which borders to show
         let borders = if self.show_border {
-            crate::config::parse_border_sides(&self.border_sides)
+            crossterm_bridge::to_ratatui_borders(&self.border_sides)
         } else {
             ratatui::widgets::Borders::NONE
         };

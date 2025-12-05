@@ -3,6 +3,7 @@
 //! Buffers each component separately so that toggling desc/objs/players/exits
 //! only requires rewrapping, not reparsing, and maintains a dedicated scrollback.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::{
     config,
     data::widget::{SpanType, TextSegment},
@@ -571,7 +572,7 @@ impl RoomWindow {
 
         // Create border block
         let mut block = if self.show_border {
-            let borders = config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             Block::default().title(self.title.as_str()).borders(borders)
         } else {
             Block::default()

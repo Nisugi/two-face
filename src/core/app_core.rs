@@ -133,7 +133,7 @@ pub struct AppCore {
     // === Keybind Runtime Cache ===
     /// Runtime keybind map for fast O(1) lookups (KeyEvent -> KeyBindAction)
     /// Built from config.keybinds at startup and on config reload
-    pub keybind_map: HashMap<crossterm::event::KeyEvent, crate::config::KeyBindAction>,
+    pub keybind_map: HashMap<crate::frontend::common::KeyEvent, crate::config::KeyBindAction>,
 }
 
 impl AppCore {
@@ -265,20 +265,15 @@ impl AppCore {
 
     /// Build runtime keybind map from config for fast O(1) lookups
     /// Converts string-based keybinds (e.g., "num_0", "Ctrl+s") to KeyEvent structs
-    fn build_keybind_map(config: &Config) -> HashMap<crossterm::event::KeyEvent, crate::config::KeyBindAction> {
-        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    fn build_keybind_map(config: &Config) -> HashMap<crate::frontend::common::KeyEvent, crate::config::KeyBindAction> {
+        use crate::frontend::common::KeyEvent;
         let mut map = HashMap::new();
 
         for (key_string, action) in &config.keybinds {
             // Parse the key string into a (KeyCode, KeyModifiers) tuple
             if let Some((code, modifiers)) = crate::config::parse_key_string(key_string) {
                 // Create a KeyEvent from the parsed code and modifiers
-                let key_event = KeyEvent {
-                    code,
-                    modifiers,
-                    kind: KeyEventKind::Press,
-                    state: KeyEventState::empty(),
-                };
+                let key_event = KeyEvent { code, modifiers };
                 map.insert(key_event, action.clone());
             } else {
                 tracing::warn!("Failed to parse keybind string: '{}'", key_string);
@@ -344,6 +339,28 @@ impl AppCore {
         }
     }
 
+    /// Scroll the currently focused window to the top (oldest content)
+    pub fn scroll_current_window_home(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    content.scroll_to_top();
+                }
+            }
+        }
+    }
+
+    /// Scroll the currently focused window to the bottom (newest content)
+    pub fn scroll_current_window_end(&mut self) {
+        if let Some(window_name) = &self.ui_state.focused_window.clone() {
+            if let Some(window) = self.ui_state.windows.get_mut(window_name) {
+                if let crate::data::WindowContent::Text(ref mut content) = window.content {
+                    content.scroll_to_bottom();
+                }
+            }
+        }
+    }
+
     // ===========================================================================================
     // Keybind Action Execution
     // ===========================================================================================
@@ -394,10 +411,15 @@ impl AppCore {
             | KeyAction::CursorEnd
             | KeyAction::CursorBackspace
             | KeyAction::CursorDelete
+            | KeyAction::CursorDeleteWord
+            | KeyAction::CursorClearLine
             | KeyAction::PreviousCommand
             | KeyAction::NextCommand
             | KeyAction::SendLastCommand
-            | KeyAction::SendSecondLastCommand => {
+            | KeyAction::SendSecondLastCommand
+            | KeyAction::Copy
+            | KeyAction::Paste
+            | KeyAction::SelectAll => {
                 // These actions are now handled by the CommandInput widget
                 // via frontend.command_input_key() in main.rs
                 // If we get here, it means the routing logic in main.rs missed something
@@ -416,6 +438,8 @@ impl AppCore {
             KeyAction::ScrollCurrentWindowDownOne => self.scroll_current_window_down_one(),
             KeyAction::ScrollCurrentWindowUpPage => self.scroll_current_window_up_page(),
             KeyAction::ScrollCurrentWindowDownPage => self.scroll_current_window_down_page(),
+            KeyAction::ScrollCurrentWindowHome => self.scroll_current_window_home(),
+            KeyAction::ScrollCurrentWindowEnd => self.scroll_current_window_end(),
 
             // Search actions (already implemented elsewhere)
             KeyAction::StartSearch => {
@@ -435,10 +459,34 @@ impl AppCore {
                 tracing::debug!("ClearSearch not yet implemented");
             }
 
-            // Debug/Performance actions
+            // Tab navigation actions - need to be handled in main.rs (require frontend access)
+            KeyAction::NextTab | KeyAction::PrevTab | KeyAction::NextUnreadTab => {
+                // These actions must be routed to frontend in main.rs
+                // execute_key_action doesn't have frontend access
+                tracing::warn!(
+                    "Tab navigation action {:?} reached execute_key_action - should be routed to frontend",
+                    action
+                );
+            }
+
+            // System toggles
             KeyAction::TogglePerformanceStats => {
-                // TODO: Toggle performance stats overlay
-                tracing::debug!("TogglePerformanceStats not yet implemented");
+                self.config.ui.performance_stats_enabled = !self.config.ui.performance_stats_enabled;
+                let status = if self.config.ui.performance_stats_enabled { "enabled" } else { "disabled" };
+                self.add_system_message(&format!("Performance overlay {}", status));
+                tracing::info!("Performance stats overlay toggled: {}", status);
+            }
+            KeyAction::ToggleIgnores => {
+                self.config.ui.ignores_enabled = !self.config.ui.ignores_enabled;
+                let status = if self.config.ui.ignores_enabled { "enabled" } else { "disabled" };
+                self.add_system_message(&format!("Squelch patterns {}", status));
+                tracing::info!("Squelch patterns toggled: {}", status);
+            }
+            KeyAction::ToggleSounds => {
+                self.config.sound.enabled = !self.config.sound.enabled;
+                let status = if self.config.sound.enabled { "enabled" } else { "disabled" };
+                self.add_system_message(&format!("Sound system {}", status));
+                tracing::info!("Sound system toggled: {}", status);
             }
 
             // TTS (Text-to-Speech) actions - Accessibility
@@ -762,7 +810,7 @@ impl AppCore {
                         .iter()
                         .map(|tab| {
                             // Each tab can have multiple streams - join them with comma for now
-                            let stream = tab.streams.join(",");
+                            let stream = tab.get_streams().join(",");
                             (tab.name.clone(), stream)
                         })
                         .collect();
@@ -1168,6 +1216,17 @@ impl AppCore {
                 }
             }
 
+            // Test command for highlights/squelch
+            "testline" => {
+                if parts.len() >= 2 {
+                    let test_text = parts[1..].join(" ");
+                    self.inject_test_line(&test_text);
+                } else {
+                    self.add_system_message("Usage: .testline <text to test>");
+                    self.add_system_message("Example: .testline Jimmy jams another jingle!");
+                }
+            }
+
             // Keybind commands
             "keybinds" | "kb" => {
                 return Ok("action:keybinds".to_string());
@@ -1323,6 +1382,7 @@ impl AppCore {
             ".addhl".to_string(),
             ".edithighlight".to_string(),
             ".edithl".to_string(),
+            ".testline".to_string(),
             // Keybind commands
             ".keybinds".to_string(),
             ".kb".to_string(),
@@ -1439,24 +1499,110 @@ impl AppCore {
         }
     }
 
+    /// Inject a test line through the complete pipeline (parser → message processor → UI)
+    /// This simulates receiving a line from the game server for testing highlights and squelch
+    fn inject_test_line(&mut self, text: &str) {
+        // Parse the line as if it came from the game
+        let elements = self.parser.parse_line(text);
+
+        tracing::info!("[TESTLINE] Injecting test line: '{}'", text);
+        tracing::debug!("[TESTLINE] Parsed {} elements", elements.len());
+
+        // Process each element through the message processor
+        for element in elements {
+            if let Err(e) = self.process_element(&element) {
+                tracing::error!("[TESTLINE] Failed to process element: {}", e);
+            }
+        }
+
+        // Flush any accumulated segments to ensure the line is rendered
+        self.message_processor.flush_current_stream(&mut self.ui_state);
+
+        self.add_system_message(&format!("[TEST] Injected: {}", text));
+        self.needs_render = true;
+    }
+
     /// Show help for dot commands
     fn show_help(&mut self) {
         self.add_system_message("=== Two-Face Dot Commands ===");
-        self.add_system_message("Application: .quit/.q, .help/.h/.?, .menu, .settings");
-        self.add_system_message(
-            "Layouts: .savelayout [name], .loadlayout [name], .layouts, .resize",
-        );
-        self.add_system_message("Windows: .windows, .addwindow <name> <type> <x> <y> <w> [h]");
-        self.add_system_message(
-            "         .deletewindow <name>, .rename <win> <title>, .editwindow [name]",
-        );
-        self.add_system_message("         .border <win> <style> [color]");
-        self.add_system_message("Highlights: .highlights, .addhighlight, .edithighlight <name>");
-        self.add_system_message("Keybinds: .keybinds, .addkeybind");
-        self.add_system_message(
-            "Colors: .colors, .addcolor, .uicolors, .spellcolors, .addspellcolor",
-        );
-        self.add_system_message("Themes: .themes, .settheme <name>");
+        self.add_system_message("");
+
+        // Application commands
+        self.add_system_message("APPLICATION:");
+        self.add_system_message("  .quit / .q              - Exit Two-Face");
+        self.add_system_message("  .help / .h / .?         - Show this help");
+        self.add_system_message("  .menu                   - Open main menu");
+        self.add_system_message("  .settings               - Open settings editor");
+        self.add_system_message("");
+
+        // Layout commands
+        self.add_system_message("LAYOUTS:");
+        self.add_system_message("  .savelayout [name]      - Save current layout (default: 'default')");
+        self.add_system_message("  .loadlayout [name]      - Load a saved layout");
+        self.add_system_message("  .layouts                - List available layouts");
+        self.add_system_message("  .resize                 - Resize layout to current terminal");
+        self.add_system_message("");
+
+        // Window management
+        self.add_system_message("WINDOWS:");
+        self.add_system_message("  .windows                - List all windows");
+        self.add_system_message("  .addwindow              - Open widget type picker");
+        self.add_system_message("  .addwindow <name> <type> <x> <y> <w> [h] - Add window manually");
+        self.add_system_message("  .deletewindow <name>    - Delete a window");
+        self.add_system_message("  .delwindow <name>       - Alias for .deletewindow");
+        self.add_system_message("  .hidewindow [name]      - Hide window (or open picker)");
+        self.add_system_message("  .editwindow [name]      - Edit window (or open picker)");
+        self.add_system_message("  .editwin [name]         - Alias for .editwindow");
+        self.add_system_message("  .rename <win> <title>   - Rename window title");
+        self.add_system_message("  .border <win> <style> [color] - Set window border");
+        self.add_system_message("    Styles: all, none, top, bottom, left, right");
+        self.add_system_message("");
+
+        // Highlights
+        self.add_system_message("HIGHLIGHTS:");
+        self.add_system_message("  .highlights / .hl       - Open highlights browser");
+        self.add_system_message("  .addhighlight / .addhl  - Create new highlight");
+        self.add_system_message("  .edithighlight <name>   - Edit existing highlight");
+        self.add_system_message("  .edithl <name>          - Alias for .edithighlight");
+        self.add_system_message("");
+
+        // Testing
+        self.add_system_message("TESTING:");
+        self.add_system_message("  .testline <text>        - Test highlights/squelch with fake game line");
+        self.add_system_message("");
+
+        // Keybinds
+        self.add_system_message("KEYBINDS:");
+        self.add_system_message("  .keybinds / .kb         - Open keybinds browser");
+        self.add_system_message("  .addkeybind / .addkey   - Create new keybind");
+        self.add_system_message("");
+
+        // Colors
+        self.add_system_message("COLORS:");
+        self.add_system_message("  .colors / .colorpalette - Open color palette browser");
+        self.add_system_message("  .addcolor / .createcolor - Create new palette color");
+        self.add_system_message("  .uicolors               - Open UI colors browser");
+        self.add_system_message("  .spellcolors            - Open spell colors browser");
+        self.add_system_message("  .addspellcolor          - Create new spell color");
+        self.add_system_message("  .newspellcolor          - Alias for .addspellcolor");
+        self.add_system_message("");
+
+        // Themes
+        self.add_system_message("THEMES:");
+        self.add_system_message("  .themes                 - Open themes browser");
+        self.add_system_message("  .settheme <name>        - Switch to a theme");
+        self.add_system_message("  .theme <name>           - Alias for .settheme");
+        self.add_system_message("  .edittheme              - Edit current theme");
+        self.add_system_message("");
+
+        // Tab navigation
+        self.add_system_message("TAB NAVIGATION:");
+        self.add_system_message("  .nexttab                - Switch to next tab");
+        self.add_system_message("  .prevtab                - Switch to previous tab");
+        self.add_system_message("  .gonew / .nextunread    - Jump to next tab with unread messages");
+        self.add_system_message("");
+
+        self.add_system_message("Type the command name for more details. Example: .help windows");
     }
 
     /// Save current layout
@@ -3722,6 +3868,8 @@ impl AppCore {
         self.config.save(self.config.character.as_deref())?;
         // Update squelch patterns after config save (in case highlights changed)
         self.message_processor.update_squelch_patterns();
+        // Update redirect cache after config save (in case highlights changed)
+        self.message_processor.update_redirect_cache();
         Ok(())
     }
 

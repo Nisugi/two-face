@@ -158,3 +158,5 @@ pub trait ListManageable {
     /// Delete the selected item
     fn delete_item(&mut self) -> Option<String>;
 }
+
+// BrowserNavigable trait removed - browsers now implement Navigable + Selectable directly

@@ -3,6 +3,7 @@
 //! Shows color previews, associated spell IDs, and integrates with the shared
 //! widget traits for navigation/deletion.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::SpellColorRange;
 use ratatui::{
     buffer::Buffer,
@@ -55,7 +56,7 @@ impl SpellColorBrowser {
         }
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
             // Scroll up if needed
@@ -65,7 +66,7 @@ impl SpellColorBrowser {
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         if self.selected_index < self.entries.len().saturating_sub(1) {
             self.selected_index += 1;
             // Scroll down if needed
@@ -132,13 +133,13 @@ impl SpellColorBrowser {
         for row in popup_row..popup_row + popup_height {
             for col in popup_col..popup_col + popup_width {
                 if col < area.width && row < area.height {
-                    buf.set_string(col, row, " ", Style::default().bg(theme.browser_background));
+                    buf.set_string(col, row, " ", Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                 }
             }
         }
 
         // Draw border
-        let border_style = Style::default().fg(theme.browser_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.browser_border));
 
         // Top border
         let top = format!("┌{}┐", "─".repeat(popup_width as usize - 2));
@@ -211,7 +212,7 @@ impl SpellColorBrowser {
             popup_col + 2,
             popup_row + popup_height - 2,
             &status,
-            Style::default().fg(theme.menu_separator),
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.menu_separator)),
         );
     }
 
@@ -227,13 +228,13 @@ impl SpellColorBrowser {
     ) {
         let base_style = if is_selected {
             Style::default()
-                .fg(theme.browser_item_focused)
-                .bg(theme.browser_background)
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(Color::Rgb(100, 149, 237))
-                .bg(theme.browser_background)
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
         };
 
         // Format: bar(3) + 2 spaces + bg(3) + 2 spaces + details
@@ -248,7 +249,7 @@ impl SpellColorBrowser {
                 col,
                 y,
                 "███",
-                Style::default().fg(color).bg(theme.browser_background),
+                Style::default().fg(color).bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
             );
         } else {
             buf.set_string(col, y, " - ", base_style);
@@ -266,7 +267,7 @@ impl SpellColorBrowser {
                 col,
                 y,
                 "███",
-                Style::default().fg(color).bg(theme.browser_background),
+                Style::default().fg(color).bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
             );
         } else {
             buf.set_string(col, y, " - ", base_style);
@@ -307,6 +308,40 @@ impl SpellColorBrowser {
         let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
         Some(Color::Rgb(r, g, b))
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
+
+    /// Update the list of spell color entries
+    pub fn update_items(&mut self, spell_colors: &[SpellColorRange]) {
+        self.entries = spell_colors
+            .iter()
+            .enumerate()
+            .map(|(index, sc)| SpellColorEntry {
+                index,
+                spells: sc.spells.clone(),
+                bar_color: sc.bar_color.clone().unwrap_or_else(|| sc.color.clone()),
+                text_color: sc
+                    .text_color
+                    .clone()
+                    .unwrap_or_else(|| "#ffffff".to_string()),
+                bg_color: sc.bg_color.clone().unwrap_or_else(String::new),
+            })
+            .collect();
+
+        // Reset selection if out of bounds
+        let len = self.entries.len();
+        if self.selected_index >= len && len > 0 {
+            self.selected_index = len - 1;
+        }
+    }
 }
 
 // Trait implementations for SpellColorBrowser
@@ -314,11 +349,11 @@ use super::widget_traits::{Navigable, Selectable};
 
 impl Navigable for SpellColorBrowser {
     fn navigate_up(&mut self) {
-        self.previous();
+        self.navigate_up();
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        self.navigate_down();
     }
 
     fn page_up(&mut self) {

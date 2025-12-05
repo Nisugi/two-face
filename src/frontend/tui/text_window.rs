@@ -3,6 +3,7 @@
 //! Responsible for buffering, wrapping, highlighting, search, and selection
 //! logic in a way that mirrors Profanity/Vellum's behavior.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::HighlightPattern;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use ratatui::{
@@ -1607,7 +1608,7 @@ impl TextWindow {
 
         // Configure block (border style/color) before rendering any content so empty windows update
         let mut block = if self.show_border {
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             Block::default().title(title.as_str()).borders(borders)
         } else {
             Block::default()
@@ -1634,7 +1635,7 @@ impl TextWindow {
 
         if focused {
             border_style = border_style
-                .fg(theme.window_border_focused)
+                .fg(crossterm_bridge::to_ratatui_color(theme.window_border_focused))
                 .add_modifier(Modifier::BOLD);
         }
 

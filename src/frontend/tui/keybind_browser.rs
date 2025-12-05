@@ -4,6 +4,7 @@
 //! quickly audit key combos, differentiate actions vs macros, and pick entries
 //! to edit/delete.
 
+use crate::frontend::tui::crossterm_bridge;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -90,14 +91,14 @@ impl KeybindBrowser {
         }
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         if !self.entries.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         if self.selected_index + 1 < self.entries.len() {
             self.selected_index += 1;
             self.adjust_scroll();
@@ -157,6 +158,11 @@ impl KeybindBrowser {
         self.entries
             .get(self.selected_index)
             .map(|e| e.key_combo.clone())
+    }
+
+    /// Get the selected entry (full data)
+    pub fn get_selected_entry(&self) -> Option<&KeybindEntry> {
+        self.entries.get(self.selected_index)
     }
 
     /// Handle mouse events for dragging the popup
@@ -230,7 +236,7 @@ impl KeybindBrowser {
         for row in 0..height {
             for col in 0..width {
                 if x + col < area.width && y + row < area.height {
-                    buf[(x + col, y + row)].set_bg(theme.browser_background);
+                    buf[(x + col, y + row)].set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -244,8 +250,8 @@ impl KeybindBrowser {
             if (x + 1 + i as u16) < (x + width) {
                 buf[(x + 1 + i as u16, y)]
                     .set_char(ch)
-                    .set_fg(theme.browser_item_normal)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.browser_item_normal))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -257,8 +263,8 @@ impl KeybindBrowser {
             if (footer_x + i as u16) < (x + width - 2) {
                 buf[(footer_x + i as u16, footer_y)]
                     .set_char(ch)
-                    .set_fg(theme.text_primary)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -270,8 +276,8 @@ impl KeybindBrowser {
             for (i, ch) in msg.chars().enumerate() {
                 buf[(msg_x + i as u16, msg_y)]
                     .set_char(ch)
-                    .set_fg(theme.text_disabled)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.text_disabled))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
             return;
         }
@@ -301,8 +307,8 @@ impl KeybindBrowser {
                             " ═══ MACROS ═══"
                         };
                         let header_style = Style::default()
-                            .fg(theme.browser_item_focused)
-                            .bg(theme.browser_background)
+                            .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                             .add_modifier(Modifier::BOLD);
                         for (i, ch) in header_text.chars().enumerate() {
                             if (x + 1 + i as u16) < (x + width - 1) {
@@ -334,8 +340,8 @@ impl KeybindBrowser {
                     " ═══ MACROS ═══"
                 };
                 let header_style = Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD);
                 for (i, ch) in header_text.chars().enumerate() {
                     if (x + 1 + i as u16) < (x + width - 1) {
@@ -382,11 +388,11 @@ impl KeybindBrowser {
                 entry.action_value.clone()
             };
 
-            let entry_color = if is_selected {
-                theme.browser_item_focused
-            } else {
-                theme.browser_item_normal
-            };
+            let entry_color = crossterm_bridge::to_ratatui_color(if is_selected  {
+            theme.browser_item_focused
+        } else {
+            theme.browser_item_normal
+        });
 
             // Render key combo column
             let key_x = x + 2;
@@ -395,7 +401,7 @@ impl KeybindBrowser {
                     buf[(key_x + i as u16, current_y)]
                         .set_char(ch)
                         .set_fg(entry_color)
-                        .set_bg(theme.browser_background);
+                        .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
 
@@ -406,7 +412,7 @@ impl KeybindBrowser {
                     buf[(type_x + i as u16, current_y)]
                         .set_char(ch)
                         .set_fg(entry_color)
-                        .set_bg(theme.browser_background);
+                        .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
 
@@ -417,7 +423,7 @@ impl KeybindBrowser {
                     buf[(value_x + i as u16, current_y)]
                         .set_char(ch)
                         .set_fg(entry_color)
-                        .set_bg(theme.browser_background);
+                        .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
 
@@ -435,7 +441,7 @@ impl KeybindBrowser {
         buf: &mut Buffer,
         theme: &crate::theme::AppTheme,
     ) {
-        let border_style = Style::default().fg(theme.browser_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.browser_border));
 
         // Top border
         buf[(x, y)].set_char('┌').set_style(border_style);
@@ -467,6 +473,45 @@ impl KeybindBrowser {
             .set_char('┘')
             .set_style(border_style);
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
+
+    /// Toggle the filter state
+    pub fn toggle_filter(&mut self) {
+        // Placeholder for filter toggle functionality
+        // Would need to be implemented based on browser's filter requirements
+    }
+
+    /// Update the list of keybind entries
+    pub fn update_items(&mut self, keybinds: &std::collections::HashMap<String, crate::config::KeyBindAction>) {
+        self.entries.clear();
+        for (key, action) in keybinds {
+            let (action_type, value) = match action {
+                crate::config::KeyBindAction::Action(a) => ("Action".to_string(), a.clone()),
+                crate::config::KeyBindAction::Macro(m) => ("Macro".to_string(), m.macro_text.clone()),
+            };
+            self.entries.push(KeybindEntry {
+                key_combo: key.clone(),
+                action_type,
+                action_value: value,
+            });
+        }
+        // Sort by key combo
+        self.entries.sort_by(|a, b| a.key_combo.cmp(&b.key_combo));
+
+        // Reset selection if out of bounds
+        if self.selected_index >= self.entries.len() && !self.entries.is_empty() {
+            self.selected_index = self.entries.len() - 1;
+        }
+    }
 }
 
 // Trait implementations for KeybindBrowser
@@ -474,11 +519,11 @@ use super::widget_traits::{Navigable, Selectable};
 
 impl Navigable for KeybindBrowser {
     fn navigate_up(&mut self) {
-        self.previous();
+        self.navigate_up();
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        self.navigate_down();
     }
 
     fn page_up(&mut self) {

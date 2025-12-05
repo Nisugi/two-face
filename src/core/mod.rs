@@ -5,7 +5,6 @@
 //! Core updates data structures in the data layer, frontends read and render.
 
 pub mod app_core;
-pub mod event_bridge;
 pub mod input_router;
 pub mod menu_actions;
 pub mod messages;

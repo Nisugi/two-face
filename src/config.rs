@@ -5,7 +5,7 @@
 //! overrides, and persists edits that come from the UI.
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::frontend::common::{KeyCode, KeyModifiers};
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -73,6 +73,8 @@ pub struct Config {
     pub highlights: HashMap<String, HighlightPattern>,
     #[serde(skip)] // Loaded from separate keybinds.toml file
     pub keybinds: HashMap<String, KeyBindAction>,
+    #[serde(skip)] // Loaded from [global] section of keybinds.toml
+    pub global_keybinds: GlobalKeybinds,
     #[serde(default)]
     pub sound: SoundConfig,
     #[serde(default)]
@@ -296,20 +298,71 @@ impl ColorConfig {
 
 /// Helper functions for loading/saving highlights and keybinds
 impl Config {
-    /// Load highlights from highlights.toml for a character
+    /// Resolve a color name from the palette, or return the original string if it's already a hex code
+    ///
+    /// # Examples
+    /// - Input: "Primary Blue" (if in palette) → Output: "#0066cc"
+    /// - Input: "#ff0000" → Output: "#ff0000" (pass-through)
+    /// - Input: "Unknown Name" → Output: "Unknown Name" (pass-through)
+    pub fn resolve_palette_color(&self, input: &str) -> String {
+        let trimmed = input.trim();
+
+        // If it's already a hex code (starts with #), return as-is
+        if trimmed.starts_with('#') {
+            return trimmed.to_string();
+        }
+
+        // Try to find matching color in palette (case-insensitive)
+        let input_lower = trimmed.to_lowercase();
+        for palette_color in &self.colors.color_palette {
+            if palette_color.name.to_lowercase() == input_lower {
+                return palette_color.color.clone();
+            }
+        }
+
+        // Not found in palette - return original input
+        trimmed.to_string()
+    }
+
+    /// Load common (global) highlights that apply to all characters
+    /// Returns: HashMap of global highlights, or empty if file doesn't exist
+    pub fn load_common_highlights() -> Result<HashMap<String, HighlightPattern>> {
+        let path = Self::common_highlights_path()?;
+
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read common highlights: {:?}", path))?;
+
+        let highlights: HashMap<String, HighlightPattern> = toml::from_str(&contents)
+            .context("Failed to parse common highlights TOML")?;
+
+        Ok(highlights)
+    }
+
+    /// Load highlights for a character, merging global + character-specific
+    /// Character-specific highlights override global ones with the same name
     pub fn load_highlights(character: Option<&str>) -> Result<HashMap<String, HighlightPattern>> {
+        // Start with global/common highlights
+        let mut highlights = Self::load_common_highlights()?;
+
+        // Load character-specific highlights
         let highlights_path = Self::highlights_path(character)?;
 
-        let mut highlights = if highlights_path.exists() {
+        if highlights_path.exists() {
             let contents =
                 fs::read_to_string(&highlights_path).context("Failed to read highlights.toml")?;
-            let highlights: HashMap<String, HighlightPattern> =
+            let character_highlights: HashMap<String, HighlightPattern> =
                 toml::from_str(&contents).context("Failed to parse highlights.toml")?;
-            highlights
-        } else {
-            // Return defaults from embedded file
-            toml::from_str(DEFAULT_HIGHLIGHTS).unwrap_or_default()
-        };
+
+            // Character highlights override global (HashMap::extend)
+            highlights.extend(character_highlights);
+        } else if highlights.is_empty() {
+            // No global and no character highlights - use embedded defaults
+            highlights = toml::from_str(DEFAULT_HIGHLIGHTS).unwrap_or_default();
+        }
 
         // Compile all regex patterns for performance
         Self::compile_highlight_patterns(&mut highlights);
@@ -344,16 +397,67 @@ impl Config {
         Ok(())
     }
 
-    /// Load keybinds from keybinds.toml for a character
+    /// Save a highlight to common (global) highlights file
+    /// This makes the highlight available to all characters
+    pub fn save_common_highlight(name: &str, pattern: &HighlightPattern) -> Result<()> {
+        // Ensure global directory exists
+        let global_dir = Self::global_dir()?;
+        fs::create_dir_all(&global_dir)
+            .with_context(|| format!("Failed to create global directory: {:?}", global_dir))?;
+
+        // Load existing common highlights
+        let mut highlights = Self::load_common_highlights()?;
+
+        // Add or update the pattern
+        highlights.insert(name.to_string(), pattern.clone());
+
+        // Write back to file
+        let path = Self::common_highlights_path()?;
+        let toml = toml::to_string_pretty(&highlights)
+            .context("Failed to serialize common highlights")?;
+
+        fs::write(&path, toml)
+            .with_context(|| format!("Failed to write common highlights: {:?}", path))?;
+
+        Ok(())
+    }
+
+    /// Delete a highlight from common (global) highlights file
+    pub fn delete_common_highlight(name: &str) -> Result<()> {
+        let mut highlights = Self::load_common_highlights()?;
+        highlights.remove(name);
+
+        let path = Self::common_highlights_path()?;
+        let toml = toml::to_string_pretty(&highlights)
+            .context("Failed to serialize common highlights")?;
+
+        fs::write(&path, toml)
+            .with_context(|| format!("Failed to write common highlights: {:?}", path))?;
+
+        Ok(())
+    }
+
+    /// Load keybinds from [user] section of keybinds.toml for a character
     pub fn load_keybinds(character: Option<&str>) -> Result<HashMap<String, KeyBindAction>> {
         let keybinds_path = Self::keybinds_path(character)?;
 
         if keybinds_path.exists() {
             let contents =
                 fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
-            let keybinds: HashMap<String, KeyBindAction> =
-                toml::from_str(&contents).context("Failed to parse keybinds.toml")?;
-            Ok(keybinds)
+
+            // Parse the entire TOML file to get the [user] section
+            let toml_value: toml::Value = toml::from_str(&contents)
+                .context("Failed to parse keybinds.toml")?;
+
+            // Extract [user] section if it exists
+            if let Some(user_section) = toml_value.get("user") {
+                let keybinds: HashMap<String, KeyBindAction> = user_section.clone().try_into()
+                    .context("Failed to parse [user] section")?;
+                Ok(keybinds)
+            } else {
+                // No [user] section - return defaults
+                Ok(default_keybinds())
+            }
         } else {
             // Return defaults from embedded file
             Ok(toml::from_str(DEFAULT_KEYBINDS).unwrap_or_else(|_| default_keybinds()))
@@ -367,6 +471,115 @@ impl Config {
             toml::to_string_pretty(&self.keybinds).context("Failed to serialize keybinds")?;
         fs::write(&keybinds_path, contents).context("Failed to write keybinds.toml")?;
         Ok(())
+    }
+
+    /// Validate global keybinds and log warnings for any issues
+    fn validate_global_keybinds(keybinds: &GlobalKeybinds) {
+        // Check each critical global keybind
+        if keybinds.quit.is_empty() {
+            tracing::warn!("Global keybind 'quit' is empty - application may be difficult to exit");
+        } else if parse_key_string(&keybinds.quit).is_none() {
+            tracing::warn!("Global keybind 'quit' has invalid value: '{}' - using default 'ctrl+c'", keybinds.quit);
+        }
+
+        if keybinds.start_search.is_empty() {
+            tracing::warn!("Global keybind 'start_search' is empty - search feature disabled");
+        } else if parse_key_string(&keybinds.start_search).is_none() {
+            tracing::warn!("Global keybind 'start_search' has invalid value: '{}'", keybinds.start_search);
+        }
+
+        if keybinds.close_window.is_empty() {
+            tracing::warn!("Global keybind 'close_window' is empty - may not be able to close dialogs");
+        } else if parse_key_string(&keybinds.close_window).is_none() {
+            tracing::warn!("Global keybind 'close_window' has invalid value: '{}'", keybinds.close_window);
+        }
+
+        if keybinds.next_search_match.is_empty() {
+            tracing::debug!("Global keybind 'next_search_match' is empty");
+        } else if parse_key_string(&keybinds.next_search_match).is_none() {
+            tracing::warn!("Global keybind 'next_search_match' has invalid value: '{}'", keybinds.next_search_match);
+        }
+
+        if keybinds.prev_search_match.is_empty() {
+            tracing::debug!("Global keybind 'prev_search_match' is empty");
+        } else if parse_key_string(&keybinds.prev_search_match).is_none() {
+            tracing::warn!("Global keybind 'prev_search_match' has invalid value: '{}'", keybinds.prev_search_match);
+        }
+    }
+
+    /// Load global keybinds from [global] section of keybinds.toml
+    pub fn load_global_keybinds(character: Option<&str>) -> Result<GlobalKeybinds> {
+        let keybinds_path = Self::keybinds_path(character)?;
+
+        if keybinds_path.exists() {
+            let contents =
+                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
+
+            // Parse the entire TOML file to get the [global] section
+            let toml_value: toml::Value = toml::from_str(&contents)
+                .context("Failed to parse keybinds.toml")?;
+
+            // Extract [global] section if it exists
+            if let Some(global_section) = toml_value.get("global") {
+                let global_keybinds: GlobalKeybinds = global_section.clone().try_into()
+                    .context("Failed to parse [global] section")?;
+
+                // Validate global keybinds and warn about any issues
+                Self::validate_global_keybinds(&global_keybinds);
+
+                Ok(global_keybinds)
+            } else {
+                // No [global] section - use defaults
+                tracing::warn!("No [global] section in keybinds.toml, using default global keybinds");
+                Ok(GlobalKeybinds::default())
+            }
+        } else {
+            // No keybinds file - use defaults
+            Ok(GlobalKeybinds::default())
+        }
+    }
+
+    /// Load menu keybinds from [menu] section of keybinds.toml
+    pub fn load_menu_keybinds(character: Option<&str>) -> Result<MenuKeybinds> {
+        tracing::info!("🔑 load_menu_keybinds() called for character: {:?}", character);
+        let keybinds_path = Self::keybinds_path(character)?;
+        tracing::info!("   Keybinds path: {}", keybinds_path.display());
+
+        if keybinds_path.exists() {
+            let contents =
+                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
+
+            // Parse the entire TOML file to get the [menu] section
+            let toml_value: toml::Value = toml::from_str(&contents)
+                .context("Failed to parse keybinds.toml")?;
+
+            // Extract [menu] section if it exists
+            if let Some(menu_section) = toml_value.get("menu") {
+                tracing::info!("   Found [menu] section, parsing...");
+                let menu_keybinds: MenuKeybinds = menu_section.clone().try_into()
+                    .context("Failed to parse [menu] section")?;
+
+                // Log loaded values
+                tracing::info!("   ✓ Loaded menu keybinds:");
+                tracing::info!("     - navigate_up: {}", menu_keybinds.navigate_up);
+                tracing::info!("     - navigate_down: {}", menu_keybinds.navigate_down);
+                tracing::info!("     - next_field: {}", menu_keybinds.next_field);
+                tracing::info!("     - previous_field: {}", menu_keybinds.previous_field);
+                tracing::info!("     - select: {}", menu_keybinds.select);
+                tracing::info!("     - cancel: {}", menu_keybinds.cancel);
+                tracing::info!("     - save: {}", menu_keybinds.save);
+
+                Ok(menu_keybinds)
+            } else {
+                // No [menu] section - use defaults
+                tracing::warn!("   ⚠ No [menu] section in keybinds.toml, using default menu keybinds");
+                Ok(MenuKeybinds::default())
+            }
+        } else {
+            // No keybinds file - use defaults
+            tracing::warn!("   ⚠ No keybinds file found, using default menu keybinds");
+            Ok(MenuKeybinds::default())
+        }
     }
 }
 
@@ -638,16 +851,40 @@ pub struct TabbedTextWidgetData {
     pub tabs: Vec<TabbedTextTab>,
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
+    #[serde(default = "default_tab_bar_position")]
+    pub tab_bar_position: String,
+}
+
+fn default_tab_bar_position() -> String {
+    "top".to_string()
 }
 
 /// Tab configuration for TabbedText widget
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabbedTextTab {
     pub name: String,
+    /// Single stream (for compatibility) - converts to streams array
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
+    /// Multiple streams (preferred) - if both set, this takes precedence
     #[serde(default)]
     pub streams: Vec<String>,
     #[serde(default)]
     pub show_timestamps: Option<bool>,
+}
+
+impl TabbedTextTab {
+    /// Get the list of streams for this tab
+    /// Handles both `stream` (singular) and `streams` (plural) fields
+    pub fn get_streams(&self) -> Vec<String> {
+        if !self.streams.is_empty() {
+            self.streams.clone()
+        } else if let Some(stream) = &self.stream {
+            vec![stream.clone()]
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// Progress bar widget specific data
@@ -657,6 +894,8 @@ pub struct ProgressWidgetData {
     pub label: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(default)]
+    pub numbers_only: bool,
 }
 
 /// Countdown timer widget specific data
@@ -1018,31 +1257,6 @@ impl WindowDef {
     }
 }
 
-/// Parse border sides configuration into ratatui Borders bitflags
-pub fn parse_border_sides(sides: &BorderSides) -> ratatui::widgets::Borders {
-    use ratatui::widgets::Borders;
-
-    let mut borders = Borders::empty();
-    if sides.top {
-        borders |= Borders::TOP;
-    }
-    if sides.bottom {
-        borders |= Borders::BOTTOM;
-    }
-    if sides.left {
-        borders |= Borders::LEFT;
-    }
-    if sides.right {
-        borders |= Borders::RIGHT;
-    }
-
-    if borders.is_empty() {
-        Borders::ALL // Fallback if somehow all are false
-    } else {
-        borders
-    }
-}
-
 fn default_widget_type() -> String {
     "text".to_string()
 }
@@ -1107,6 +1321,8 @@ pub struct UiConfig {
     #[serde(default = "default_min_command_length")]
     pub min_command_length: usize, // Minimum command length to save to history (commands shorter than this are not saved)
     // Performance stats settings
+    #[serde(default = "default_performance_stats_enabled")]
+    pub performance_stats_enabled: bool, // Global toggle for performance overlay
     #[serde(default = "default_perf_stats_x")]
     pub perf_stats_x: u16,
     #[serde(default = "default_perf_stats_y")]
@@ -1205,6 +1421,24 @@ impl ContentAlign {
     }
 }
 
+/// Redirect mode for highlight patterns
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RedirectMode {
+    /// Send only to redirect window (remove from original)
+    #[serde(rename = "redirect_only")]
+    RedirectOnly,
+    /// Send to both original window and redirect window (duplicate)
+    #[serde(rename = "redirect_copy")]
+    RedirectCopy,
+}
+
+impl Default for RedirectMode {
+    fn default() -> Self {
+        RedirectMode::RedirectOnly
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HighlightPattern {
     pub pattern: String,
@@ -1226,6 +1460,10 @@ pub struct HighlightPattern {
     pub category: Option<String>, // Category for grouping highlights (e.g., "Combat", "Healing", "Death")
     #[serde(default, skip_serializing_if = "is_false")]
     pub squelch: bool, // If true, completely hide lines matching this pattern (ignore/filter)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_to: Option<String>, // Window name to redirect matching lines to
+    #[serde(default)]
+    pub redirect_mode: RedirectMode, // How to handle redirect: only or copy
 
     // Performance optimization: cache compiled regex (not serialized)
     #[serde(skip)]
@@ -1378,6 +1616,63 @@ pub struct MacroAction {
     pub macro_text: String, // e.g., "sw\r" for southwest movement
 }
 
+/// Global keybinds that work across all modes or are mode-specific
+/// These are checked in Layer 1 of the keybind dispatch system (before menu and game keybinds)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalKeybinds {
+    /// Quit the application (default: "ctrl+c")
+    #[serde(default = "default_quit_keybind")]
+    pub quit: String,
+
+    /// Start search mode (default: "ctrl+f")
+    #[serde(default = "default_start_search_keybind")]
+    pub start_search: String,
+
+    /// Next search match - only works in Search mode (default: "ctrl+pagedown")
+    #[serde(default = "default_next_search_match_keybind")]
+    pub next_search_match: String,
+
+    /// Previous search match - only works in Search mode (default: "ctrl+pageup")
+    #[serde(default = "default_prev_search_match_keybind")]
+    pub prev_search_match: String,
+
+    /// Close priority windows (menus, browsers, forms) and exit modes (default: "esc")
+    #[serde(default = "default_close_window_keybind")]
+    pub close_window: String,
+}
+
+fn default_quit_keybind() -> String {
+    "ctrl+c".to_string()
+}
+
+fn default_start_search_keybind() -> String {
+    "ctrl+f".to_string()
+}
+
+fn default_next_search_match_keybind() -> String {
+    "ctrl+pagedown".to_string()
+}
+
+fn default_prev_search_match_keybind() -> String {
+    "ctrl+pageup".to_string()
+}
+
+fn default_close_window_keybind() -> String {
+    "esc".to_string()
+}
+
+impl Default for GlobalKeybinds {
+    fn default() -> Self {
+        Self {
+            quit: default_quit_keybind(),
+            start_search: default_start_search_keybind(),
+            next_search_match: default_next_search_match_keybind(),
+            prev_search_match: default_prev_search_match_keybind(),
+            close_window: default_close_window_keybind(),
+        }
+    }
+}
+
 /// Actions that can be bound to keys
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyAction {
@@ -1391,6 +1686,8 @@ pub enum KeyAction {
     CursorEnd,
     CursorBackspace,
     CursorDelete,
+    CursorDeleteWord,  // Delete from cursor to end of word
+    CursorClearLine,   // Clear entire command line
 
     // History actions
     PreviousCommand,
@@ -1404,6 +1701,8 @@ pub enum KeyAction {
     ScrollCurrentWindowDownOne,
     ScrollCurrentWindowUpPage,
     ScrollCurrentWindowDownPage,
+    ScrollCurrentWindowHome,  // Scroll to top of window
+    ScrollCurrentWindowEnd,   // Scroll to bottom of window
 
     // Search actions (already implemented)
     StartSearch,
@@ -1411,8 +1710,20 @@ pub enum KeyAction {
     PrevSearchMatch,
     ClearSearch,
 
-    // Debug/Performance actions
-    TogglePerformanceStats,
+    // Tab navigation (for TabbedText widgets)
+    NextTab,           // Switch to next tab
+    PrevTab,           // Switch to previous tab
+    NextUnreadTab,     // Jump to next tab with unread messages
+
+    // Clipboard actions
+    Copy,              // Copy selected text to clipboard
+    Paste,             // Paste from clipboard
+    SelectAll,         // Select all text in command input
+
+    // System toggles
+    TogglePerformanceStats,  // Show/hide performance overlay
+    ToggleIgnores,           // Enable/disable squelch patterns globally
+    ToggleSounds,            // Enable/disable sound system
 
     // TTS (Text-to-Speech) actions - Accessibility
     TtsNext,           // Next message (sequential, includes read)
@@ -1480,6 +1791,12 @@ pub struct MenuKeybinds {
     // Toggles/Cycling
     #[serde(default = "default_toggle")]
     pub toggle: String,
+    #[serde(default = "default_toggle_filter")]
+    pub toggle_filter: String,
+    #[serde(default = "default_cycle_forward")]
+    pub cycle_forward: String,
+    #[serde(default = "default_cycle_backward")]
+    pub cycle_backward: String,
 
     // Reordering (WindowEditor)
     #[serde(default = "default_move_up")]
@@ -1552,6 +1869,15 @@ fn default_paste() -> String {
 fn default_toggle() -> String {
     "Space".to_string()
 }
+fn default_toggle_filter() -> String {
+    "F".to_string()
+}
+fn default_cycle_forward() -> String {
+    "Right".to_string()
+}
+fn default_cycle_backward() -> String {
+    "Left".to_string()
+}
 fn default_move_up() -> String {
     "Shift+Up".to_string()
 }
@@ -1587,6 +1913,9 @@ impl Default for MenuKeybinds {
             cut: default_cut(),
             paste: default_paste(),
             toggle: default_toggle(),
+            toggle_filter: default_toggle_filter(),
+            cycle_forward: default_cycle_forward(),
+            cycle_backward: default_cycle_backward(),
             move_up: default_move_up(),
             move_down: default_move_down(),
             add: default_add(),
@@ -1599,16 +1928,22 @@ impl MenuKeybinds {
     /// Resolve a KeyEvent to a MenuAction based on the current context
     pub fn resolve_action(
         &self,
-        key: crossterm::event::KeyEvent,
+        key: &crate::frontend::common::KeyEvent,
         context: crate::core::menu_actions::ActionContext,
     ) -> crate::core::menu_actions::MenuAction {
         use crate::core::menu_actions::{key_event_to_string, ActionContext, MenuAction};
 
-        let key_str = key_event_to_string(key);
+        let key_str = key_event_to_string(*key);
+        let key_lower = key_str.to_lowercase();
+
+        // DEBUG: Log what we're resolving
+        tracing::debug!("🔍 resolve_action: key_str='{}', context={:?}", key_str, context);
+        tracing::debug!("   Config values: navigate_up='{}', navigate_down='{}', select='{}', cancel='{}'",
+                       self.navigate_up, self.navigate_down, self.select, self.cancel);
 
         // Special handling for BackTab (Shift+Tab)
-        if matches!(key.code, crossterm::event::KeyCode::BackTab)
-            && (key_str == self.previous_field || "Shift+Tab" == self.previous_field) {
+        if matches!(key.code, KeyCode::BackTab)
+            && (key_lower == self.previous_field.to_lowercase() || key_lower == "shift+tab") {
                 return MenuAction::PreviousField;
             }
 
@@ -1616,25 +1951,25 @@ impl MenuKeybinds {
         match context {
             ActionContext::Dropdown => {
                 // In dropdown, Up/Down cycle through options instead of navigating
-                if key_str == self.navigate_up {
+                if key_lower == self.navigate_up.to_lowercase() {
                     return MenuAction::NavigateUp; // Will be interpreted as cycle prev
                 }
-                if key_str == self.navigate_down {
+                if key_lower == self.navigate_down.to_lowercase() {
                     return MenuAction::NavigateDown; // Will be interpreted as cycle next
                 }
             }
             ActionContext::TextInput => {
                 // Clipboard operations only valid in text input
-                if key_str == self.select_all {
+                if key_lower == self.select_all.to_lowercase() {
                     return MenuAction::SelectAll;
                 }
-                if key_str == self.copy {
+                if key_lower == self.copy.to_lowercase() {
                     return MenuAction::Copy;
                 }
-                if key_str == self.cut {
+                if key_lower == self.cut.to_lowercase() {
                     return MenuAction::Cut;
                 }
-                if key_str == self.paste {
+                if key_lower == self.paste.to_lowercase() {
                     return MenuAction::Paste;
                 }
             }
@@ -1642,67 +1977,80 @@ impl MenuKeybinds {
         }
 
         // Global menu keybindings
-        if key_str == self.cancel {
+        if key_lower == self.cancel.to_lowercase() {
             return MenuAction::Cancel;
         }
-        if key_str == self.save {
+        if key_lower == self.save.to_lowercase() {
             return MenuAction::Save;
         }
-        if key_str == self.select {
+        if key_lower == self.select.to_lowercase() {
             return MenuAction::Select;
         }
-        if key_str == self.delete {
+        if key_lower == self.delete.to_lowercase() {
             return MenuAction::Delete;
         }
 
-        if key_str == self.navigate_up {
+        if key_lower == self.navigate_up.to_lowercase() {
             return MenuAction::NavigateUp;
         }
-        if key_str == self.navigate_down {
+        if key_lower == self.navigate_down.to_lowercase() {
             return MenuAction::NavigateDown;
         }
-        if key_str == self.navigate_left {
+        if key_lower == self.navigate_left.to_lowercase() {
             return MenuAction::NavigateLeft;
         }
-        if key_str == self.navigate_right {
+        if key_lower == self.navigate_right.to_lowercase() {
             return MenuAction::NavigateRight;
         }
-        if key_str == self.page_up {
+        if key_lower == self.page_up.to_lowercase() {
             return MenuAction::PageUp;
         }
-        if key_str == self.page_down {
+        if key_lower == self.page_down.to_lowercase() {
             return MenuAction::PageDown;
         }
-        if key_str == self.home {
+        if key_lower == self.home.to_lowercase() {
             return MenuAction::Home;
         }
-        if key_str == self.end {
+        if key_lower == self.end.to_lowercase() {
             return MenuAction::End;
         }
 
-        if key_str == self.next_field {
+        if key_lower == self.next_field.to_lowercase() {
             return MenuAction::NextField;
         }
-        if key_str == self.previous_field {
+        if key_lower == self.previous_field.to_lowercase() {
             return MenuAction::PreviousField;
         }
 
-        if key_str == self.toggle {
+        if key_lower == self.toggle.to_lowercase() {
             return MenuAction::Toggle;
         }
 
-        if key_str == self.move_up {
+        if key_lower == self.move_up.to_lowercase() {
             return MenuAction::MoveUp;
         }
-        if key_str == self.move_down {
+        if key_lower == self.move_down.to_lowercase() {
             return MenuAction::MoveDown;
         }
 
-        if key_str == self.add {
-            return MenuAction::Add;
+        // Browser-only actions (don't trigger in forms where text input is needed)
+        if matches!(context, ActionContext::Browser) {
+            if key_lower == self.add.to_lowercase() {
+                return MenuAction::Add;
+            }
+            if key_lower == self.edit.to_lowercase() {
+                return MenuAction::Edit;
+            }
+            if key_lower == self.toggle_filter.to_lowercase() {
+                return MenuAction::ToggleFilter;
+            }
         }
-        if key_str == self.edit {
-            return MenuAction::Edit;
+
+        if key_lower == self.cycle_forward.to_lowercase() {
+            return MenuAction::CycleForward;
+        }
+        if key_lower == self.cycle_backward.to_lowercase() {
+            return MenuAction::CycleBackward;
         }
 
         // No matching keybind
@@ -1722,6 +2070,8 @@ impl KeyAction {
             "cursor_end" => Some(Self::CursorEnd),
             "cursor_backspace" => Some(Self::CursorBackspace),
             "cursor_delete" => Some(Self::CursorDelete),
+            "cursor_delete_word" => Some(Self::CursorDeleteWord),
+            "cursor_clear_line" => Some(Self::CursorClearLine),
             "previous_command" => Some(Self::PreviousCommand),
             "next_command" => Some(Self::NextCommand),
             "send_last_command" => Some(Self::SendLastCommand),
@@ -1731,11 +2081,21 @@ impl KeyAction {
             "scroll_current_window_down_one" => Some(Self::ScrollCurrentWindowDownOne),
             "scroll_current_window_up_page" => Some(Self::ScrollCurrentWindowUpPage),
             "scroll_current_window_down_page" => Some(Self::ScrollCurrentWindowDownPage),
+            "scroll_current_window_home" => Some(Self::ScrollCurrentWindowHome),
+            "scroll_current_window_end" => Some(Self::ScrollCurrentWindowEnd),
             "start_search" => Some(Self::StartSearch),
             "next_search_match" => Some(Self::NextSearchMatch),
             "prev_search_match" => Some(Self::PrevSearchMatch),
             "clear_search" => Some(Self::ClearSearch),
+            "next_tab" => Some(Self::NextTab),
+            "prev_tab" => Some(Self::PrevTab),
+            "next_unread_tab" => Some(Self::NextUnreadTab),
+            "copy" => Some(Self::Copy),
+            "paste" => Some(Self::Paste),
+            "select_all" => Some(Self::SelectAll),
             "toggle_performance_stats" => Some(Self::TogglePerformanceStats),
+            "toggle_ignores" => Some(Self::ToggleIgnores),
+            "toggle_sounds" => Some(Self::ToggleSounds),
             "tts_next" => Some(Self::TtsNext),
             "tts_previous" => Some(Self::TtsPrevious),
             "tts_next_unread" => Some(Self::TtsNextUnread),
@@ -1753,6 +2113,10 @@ impl KeyAction {
 
 /// Parse a key string like "ctrl+f" or "num_1" into KeyCode and KeyModifiers
 pub fn parse_key_string(key_str: &str) -> Option<(KeyCode, KeyModifiers)> {
+    // Normalize to lowercase for consistent comparisons
+    let key_str_lower = key_str.to_lowercase();
+    let key_str = key_str_lower.as_str();
+
     // Special case: "num_+" contains a '+' but it's not a modifier separator
     // If the string is exactly a numpad key (no modifiers), handle it first
     if key_str.starts_with("num_")
@@ -1778,22 +2142,22 @@ pub fn parse_key_string(key_str: &str) -> Option<(KeyCode, KeyModifiers)> {
             "num_/" => KeyCode::KeypadDivide,
             _ => return None,
         };
-        return Some((key_code, KeyModifiers::empty()));
+        return Some((key_code, KeyModifiers::NONE));
     }
 
     // For keys with modifiers, we need to carefully parse
     // Split by + but be aware that num_+ contains a literal +
     let parts: Vec<&str> = key_str.split('+').collect();
-    let mut modifiers = KeyModifiers::empty();
+    let mut modifiers = KeyModifiers::NONE;
     let mut key_part = key_str;
 
     // Parse modifiers
     if parts.len() > 1 {
         for part in &parts[..parts.len() - 1] {
             match part.to_lowercase().as_str() {
-                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
-                "alt" => modifiers |= KeyModifiers::ALT,
-                "shift" => modifiers |= KeyModifiers::SHIFT,
+                "ctrl" | "control" => modifiers.ctrl = true,
+                "alt" => modifiers.alt = true,
+                "shift" => modifiers.shift = true,
                 _ => return None,
             }
         }
@@ -2144,6 +2508,10 @@ fn default_perf_stats_width() -> u16 {
 
 fn default_perf_stats_height() -> u16 {
     23
+}
+
+fn default_performance_stats_enabled() -> bool {
+    false // Start disabled by default
 }
 
 fn default_ignores_enabled() -> bool {
@@ -2524,6 +2892,65 @@ impl Layout {
         Ok(())
     }
 
+    /// Validate layout and print results to stdout
+    /// Returns Ok(()) if valid (with warnings OK), Err if fatal errors found
+    pub fn validate_and_print(&self) -> Result<()> {
+        println!("✓ Layout loaded successfully");
+        println!("  {} windows defined", self.windows.len());
+
+        // Basic validation checks
+        let mut errors = 0;
+        let mut warnings = 0;
+
+        for window in &self.windows {
+            let name = window.name();
+            let base = window.base();
+
+            // Check for zero dimensions
+            if base.rows == 0 {
+                eprintln!("✗ Error: Window '{}' has zero height", name);
+                errors += 1;
+            }
+            if base.cols == 0 {
+                eprintln!("✗ Error: Window '{}' has zero width", name);
+                errors += 1;
+            }
+
+            // Check for empty names
+            if name.is_empty() {
+                eprintln!("✗ Error: Window has empty name");
+                errors += 1;
+            }
+
+            // Warn about very small windows
+            if base.rows == 1 && base.cols < 10 {
+                eprintln!(
+                    "⚠ Warning: Window '{}' is very small ({}x{})",
+                    name, base.cols, base.rows
+                );
+                warnings += 1;
+            }
+        }
+
+        // Summary
+        if errors == 0 && warnings == 0 {
+            println!("✓ Layout is valid with no issues");
+        } else {
+            if errors > 0 {
+                eprintln!("\n✗ Found {} error(s)", errors);
+            }
+            if warnings > 0 {
+                println!("⚠ Found {} warning(s)", warnings);
+            }
+        }
+
+        if errors > 0 {
+            anyhow::bail!("Layout validation failed with {} error(s)", errors);
+        }
+
+        Ok(())
+    }
+
     /// Get a window from the layout by name
     pub fn get_window(&self, name: &str) -> Option<&WindowDef> {
         self.windows.iter().find(|w| w.name() == name)
@@ -2789,6 +3216,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Health".to_string()),
                     color: Some("#6e0202".to_string()), // Dark red
+                    numbers_only: false,
                 },
             }),
 
@@ -2808,6 +3236,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Mana".to_string()),
                     color: Some("#08086d".to_string()), // Dark blue
+                    numbers_only: false,
                 },
             }),
 
@@ -2827,6 +3256,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Stamina".to_string()),
                     color: Some("#bd7b00".to_string()), // Orange
+                    numbers_only: false,
                 },
             }),
 
@@ -2846,6 +3276,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Spirit".to_string()),
                     color: Some("#6e727c".to_string()), // Gray
+                    numbers_only: false,
                 },
             }),
 
@@ -2865,6 +3296,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Encumbrance".to_string()),
                     color: Some("#006400".to_string()), // Dark green
+                    numbers_only: false,
                 },
             }),
 
@@ -2884,6 +3316,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Stance".to_string()),
                     color: Some("#000080".to_string()), // Navy
+                    numbers_only: false,
                 },
             }),
 
@@ -2903,6 +3336,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Mind".to_string()),
                     color: Some("#008b8b".to_string()), // Cyan/teal
+                    numbers_only: false,
                 },
             }),
 
@@ -2922,6 +3356,7 @@ impl Config {
                 data: ProgressWidgetData {
                     label: Some("Blood Points".to_string()),
                     color: Some("#8B0000".to_string()), // Dark red
+                    numbers_only: false,
                 },
             }),
 
@@ -3351,31 +3786,37 @@ impl Config {
                     tabs: vec![
                         TabbedTextTab {
                             name: "Thoughts".to_string(),
+                            stream: None,
                             streams: vec!["thoughts".to_string()],
                             show_timestamps: None,
                         },
                         TabbedTextTab {
                             name: "Speech".to_string(),
+                            stream: None,
                             streams: vec!["speech".to_string()],
                             show_timestamps: None,
                         },
                         TabbedTextTab {
                             name: "Announcements".to_string(),
+                            stream: None,
                             streams: vec!["announcements".to_string()],
                             show_timestamps: None,
                         },
                         TabbedTextTab {
                             name: "Loot".to_string(),
+                            stream: None,
                             streams: vec!["loot".to_string()],
                             show_timestamps: None,
                         },
                         TabbedTextTab {
                             name: "Ambients".to_string(),
+                            stream: None,
                             streams: vec!["ambients".to_string()],
                             show_timestamps: None,
                         },
                     ],
                     buffer_size: 5000,
+                    tab_bar_position: "top".to_string(),
                 },
             }),
 
@@ -3568,6 +4009,7 @@ impl Config {
         config.colors = ColorConfig::load(character)?;
         config.highlights = Self::load_highlights(character)?;
         config.keybinds = Self::load_keybinds(character)?;
+        config.global_keybinds = Self::load_global_keybinds(character)?;
 
         // Validate and auto-fix menu keybinds
         let validation = menu_keybind_validator::validate_menu_keybinds(&config.menu_keybinds);
@@ -3607,17 +4049,19 @@ impl Config {
     /// Extract default files on first run
     /// Creates shared directories and profile-specific files
     ///
-    /// Shared:
+    /// Global resources:
+    /// - ~/.two-face/global/cmdlist1.xml
+    /// - ~/.two-face/global/sounds/wizard_music.mp3
+    /// - ~/.two-face/global/sounds/README.md
+    ///
+    /// Shared layouts:
     /// - ~/.two-face/layouts/layout.toml
     /// - ~/.two-face/layouts/none.toml
     /// - ~/.two-face/layouts/sidebar.toml
-    /// - ~/.two-face/sounds/wizard_music.mp3
-    /// - ~/.two-face/sounds/README.md
-    /// - ~/.two-face/cmdlist1.xml
     ///
     /// Profile-specific (default or character):
-    /// - ~/.two-face/{profile}/config.toml
-    /// - ~/.two-face/{profile}/history.txt (empty)
+    /// - ~/.two-face/profiles/{profile}/config.toml
+    /// - ~/.two-face/profiles/{profile}/history.txt (empty)
     fn extract_defaults(character: Option<&str>) -> Result<()> {
         // Create shared layouts directory and extract all embedded layouts
         let layouts_dir = Self::layouts_dir()?;
@@ -3663,7 +4107,10 @@ impl Config {
             }
         }
 
-        // Extract cmdlist1.xml to shared location (only once)
+        // Extract cmdlist1.xml to global directory (only once)
+        let global_dir = Self::global_dir()?;
+        fs::create_dir_all(&global_dir)?;
+
         let cmdlist_path = Self::cmdlist_path()?;
         if !cmdlist_path.exists() {
             fs::write(&cmdlist_path, DEFAULT_CMDLIST).context("Failed to write cmdlist1.xml")?;
@@ -3737,6 +4184,8 @@ impl Config {
         config.colors = ColorConfig::load(character)?;
         config.highlights = Self::load_highlights(character)?;
         config.keybinds = Self::load_keybinds(character)?;
+        config.global_keybinds = Self::load_global_keybinds(character)?;
+        config.menu_keybinds = Self::load_menu_keybinds(character)?;
 
         // Validate and auto-fix menu keybinds
         let validation = menu_keybind_validator::validate_menu_keybinds(&config.menu_keybinds);
@@ -3795,10 +4244,10 @@ impl Config {
     }
 
     /// Get the profile directory for a character (or "default" if none)
-    /// Returns: ~/.two-face/{character}/ or ~/.two-face/default/
+    /// Returns: ~/.two-face/profiles/{character}/ or ~/.two-face/profiles/default/
     fn profile_dir(character: Option<&str>) -> Result<PathBuf> {
         let profile_name = character.unwrap_or("default");
-        Ok(Self::config_dir()?.join(profile_name))
+        Ok(Self::config_dir()?.join("profiles").join(profile_name))
     }
 
     /// Get the base two-face directory (~/.two-face/)
@@ -3844,10 +4293,22 @@ impl Config {
         Ok(Self::config_dir()?.join("keybinds"))
     }
 
+    /// Get the global directory (for all shared resources)
+    /// Returns: ~/.two-face/global/
+    fn global_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("global"))
+    }
+
     /// Get the shared sounds directory
-    /// Returns: ~/.two-face/sounds/
+    /// Returns: ~/.two-face/global/sounds/
     pub fn sounds_dir() -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join("sounds"))
+        Ok(Self::global_dir()?.join("sounds"))
+    }
+
+    /// Get path to common (global) highlights file
+    /// Returns: ~/.two-face/global/highlights.toml
+    pub fn common_highlights_path() -> Result<PathBuf> {
+        Ok(Self::global_dir()?.join("highlights.toml"))
     }
 
     /// Get path to debug log for a character
@@ -3869,9 +4330,9 @@ impl Config {
     }
 
     /// Get path to cmdlist1.xml (single source of truth)
-    /// Returns: ~/.two-face/cmdlist1.xml
+    /// Returns: ~/.two-face/global/cmdlist1.xml
     pub fn cmdlist_path() -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join("cmdlist1.xml"))
+        Ok(Self::global_dir()?.join("cmdlist1.xml"))
     }
 
     /// Get path to highlights.toml for a character
@@ -4054,6 +4515,7 @@ impl Default for Config {
                 selection_respect_window_boundaries: default_selection_respect_window_boundaries(),
                 drag_modifier_key: default_drag_modifier_key(),
                 min_command_length: default_min_command_length(),
+                performance_stats_enabled: default_performance_stats_enabled(),
                 perf_stats_x: default_perf_stats_x(),
                 perf_stats_y: default_perf_stats_y(),
                 perf_stats_width: default_perf_stats_width(),
@@ -4062,6 +4524,7 @@ impl Default for Config {
             },
             highlights: HashMap::new(),     // Loaded from highlights.toml
             keybinds: HashMap::new(),       // Loaded from keybinds.toml
+            global_keybinds: GlobalKeybinds::default(), // Loaded from [global] section of keybinds.toml
             colors: ColorConfig::default(), // Loaded from colors.toml
             sound: SoundConfig::default(),
             tts: TtsConfig::default(),

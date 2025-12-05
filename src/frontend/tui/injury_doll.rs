@@ -11,6 +11,8 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+use super::crossterm_bridge;
+
 /// Injury doll widget showing body part injuries/scars
 /// Layout:
 ///  👁   👁
@@ -149,7 +151,7 @@ impl InjuryDoll {
         }
 
         if self.show_border {
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             block = block.borders(borders);
 
             if let Some(ref style) = self.border_style {

@@ -3,6 +3,7 @@
 //! Displays a numeric timer plus up to ten block glyphs so the user can gauge
 //! duration at a glance.
 
+use crate::frontend::tui::crossterm_bridge;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -150,7 +151,7 @@ impl Countdown {
 
         // Determine background color - use theme background if not transparent
         let bg_color = if !self.transparent_background {
-            Some(theme.window_background)
+            Some(crossterm_bridge::to_ratatui_color(theme.window_background))
         } else {
             None
         };

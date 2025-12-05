@@ -4,6 +4,7 @@
 //! validates combinations, and integrates with the shared widget traits so the
 //! broader UI can drive it uniformly.
 
+use crate::frontend::tui::crossterm_bridge;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -30,6 +31,20 @@ pub enum KeybindFormResult {
 pub enum KeybindActionType {
     Action, // Built-in action
     Macro,  // Macro text
+}
+
+/// Action sections for keybind browser navigation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionSection {
+    CommandInput,
+    CommandHistory,
+    WindowScrolling,
+    TabNavigation,
+    Search,
+    Clipboard,
+    TTS,
+    SystemToggles,
+    Meta,
 }
 
 /// Keybind management form widget
@@ -138,103 +153,84 @@ impl KeybindFormWidget {
         &mut self,
         key: crossterm::event::KeyEvent,
     ) -> Option<KeybindFormResult> {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        // Note: All navigation keys (Tab, Shift+Tab, Esc, Space, Up, Down, Ctrl+S, Ctrl+D, Ctrl+A)
+        // are now routed via MenuAction in mod.rs. This method only handles text input.
 
-        match key.code {
-            KeyCode::Tab => {
-                // Tab: go forwards with wraparound
-                let max_field = 3;
-                if self.focused_field >= max_field {
-                    self.focused_field = 0;
-                } else {
-                    self.focused_field += 1;
+        // Pass to text inputs
+        let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key);
+
+        let _handled = match self.focused_field {
+            2 => {
+                // Field 2: Key Combo
+                let result = self.key_combo.input(rt_key);
+                self.validate_key_combo();
+                result
+            }
+            3 if self.action_type == KeybindActionType::Macro => {
+                // Field 3: Macro text (only when macro type is selected)
+                self.macro_text.input(rt_key)
+            }
+            _ => false,
+        };
+        None
+    }
+
+    /// Handle MenuAction (called from mod.rs input routing)
+    pub fn handle_action(&mut self, action: crate::core::menu_actions::MenuAction) -> Option<KeybindFormResult> {
+        use crate::core::menu_actions::MenuAction;
+
+        match action {
+            MenuAction::NavigateUp => {
+                // Up arrow - navigate to previous field
+                self.previous_field();
+                None
+            }
+            MenuAction::NavigateDown => {
+                // Down arrow - navigate to next field
+                self.next_field();
+                None
+            }
+            MenuAction::CycleBackward => {
+                // Left arrow - cycle dropdown backward (when on action dropdown)
+                if self.focused_field == 3 && self.action_type == KeybindActionType::Action {
+                    self.action_dropdown_index = self.action_dropdown_index.saturating_sub(1);
                 }
                 None
             }
-            KeyCode::BackTab => {
-                // Shift+Tab sent as BackTab by some terminals
-                let max_field = 3;
-                if self.focused_field == 0 {
-                    self.focused_field = max_field;
-                } else {
-                    self.focused_field -= 1;
+            MenuAction::CycleForward => {
+                // Right arrow - cycle dropdown forward (when on action dropdown)
+                if self.focused_field == 3 && self.action_type == KeybindActionType::Action {
+                    self.action_dropdown_index =
+                        (self.action_dropdown_index + 1).min(AVAILABLE_ACTIONS.len() - 1);
                 }
                 None
             }
-            KeyCode::Esc => Some(KeybindFormResult::Cancel),
-            KeyCode::Char(' ') if self.focused_field == 0 => {
-                // Toggle to Action type (Field 0)
-                self.action_type = KeybindActionType::Action;
+            MenuAction::Select | MenuAction::Toggle => {
+                // Enter/Space - toggle radio buttons for action type selection
+                match self.focused_field {
+                    0 => {
+                        self.action_type = KeybindActionType::Action;
+                    }
+                    1 => {
+                        self.action_type = KeybindActionType::Macro;
+                    }
+                    _ => {}
+                }
                 None
             }
-            KeyCode::Char(' ') if self.focused_field == 1 => {
-                // Toggle to Macro type (Field 1)
-                self.action_type = KeybindActionType::Macro;
-                None
-            }
-            KeyCode::Up
-                if self.focused_field == 3 && self.action_type == KeybindActionType::Action =>
-            {
-                // Scroll action dropdown up
-                self.action_dropdown_index = self.action_dropdown_index.saturating_sub(1);
-                None
-            }
-            KeyCode::Down
-                if self.focused_field == 3 && self.action_type == KeybindActionType::Action =>
-            {
-                // Scroll action dropdown down
-                self.action_dropdown_index =
-                    (self.action_dropdown_index + 1).min(AVAILABLE_ACTIONS.len() - 1);
-                None
-            }
-            KeyCode::Char('s') | KeyCode::Char('S')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                // Ctrl+s to save
+            MenuAction::Save => {
+                // Ctrl+S - save the form
                 self.save_internal()
             }
-            KeyCode::Char('d') | KeyCode::Char('D')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                // Ctrl+D to delete (only in edit mode)
+            MenuAction::Delete => {
+                // Delete key or Ctrl+D - delete keybind (only in edit mode)
                 if matches!(self.mode, FormMode::Edit { .. }) {
                     self.try_delete()
                 } else {
                     None
                 }
             }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+A to select all in current text field
-                match self.focused_field {
-                    2 => {
-                        self.key_combo.select_all();
-                    }
-                    3 if self.action_type == KeybindActionType::Macro => {
-                        self.macro_text.select_all();
-                    }
-                    _ => {}
-                }
-                None
-            }
-            _ => {
-                // Pass to text inputs
-                let rt_key = crate::core::event_bridge::to_textarea_event(key);
-
-                let _handled = match self.focused_field {
-                    2 => {
-                        // Field 2: Key Combo
-                        let result = self.key_combo.input(rt_key);
-                        self.validate_key_combo();
-                        result
-                    }
-                    3 if self.action_type == KeybindActionType::Macro => {
-                        // Field 3: Macro text (only when macro type is selected)
-                        self.macro_text.input(rt_key)
-                    }
-                    _ => false,
-                };
-                None
-            }
+            _ => None
         }
     }
 
@@ -411,7 +407,7 @@ impl KeybindFormWidget {
         for row in 0..height {
             for col in 0..width {
                 if x + col < area.width && y + row < area.height {
-                    buf[(x + col, y + row)].set_bg(theme.browser_background);
+                    buf[(x + col, y + row)].set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -428,8 +424,8 @@ impl KeybindFormWidget {
             if (x + 1 + i as u16) < (x + width) {
                 buf[(x + 1 + i as u16, y)]
                     .set_char(ch)
-                    .set_fg(theme.form_label)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.form_label))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -444,8 +440,8 @@ impl KeybindFormWidget {
             if (footer_x + i as u16) < (x + width) {
                 buf[(footer_x + i as u16, footer_y)]
                     .set_char(ch)
-                    .set_fg(theme.text_primary)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
     }
@@ -459,7 +455,7 @@ impl KeybindFormWidget {
         buf: &mut Buffer,
         theme: &crate::theme::AppTheme,
     ) {
-        let border_style = Style::default().fg(theme.form_label);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label));
 
         // Top border
         buf[(x, y)].set_char('┌').set_style(border_style);
@@ -513,26 +509,26 @@ impl KeybindFormWidget {
         };
 
         // Row 2: Type (radio buttons) - Fields 0 and 1
-        let type_label_color = if self.focused_field == 0 || self.focused_field == 1 {
+        let type_label_color = crossterm_bridge::to_ratatui_color(if self.focused_field == 0 || self.focused_field == 1  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
         let type_label = "Type:";
         for (i, ch) in type_label.chars().enumerate() {
             buf[(x + 2 + i as u16, current_y)]
                 .set_char(ch)
                 .set_fg(type_label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Action radio button (Field 0)
         let action_selected = self.action_type == KeybindActionType::Action;
-        let action_color = if self.focused_field == 0 {
+        let action_color = crossterm_bridge::to_ratatui_color(if self.focused_field == 0  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
         let action_text = if action_selected {
             "[X] Action"
         } else {
@@ -542,16 +538,16 @@ impl KeybindFormWidget {
             buf[(x + 8 + i as u16, current_y)]
                 .set_char(ch)
                 .set_fg(action_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Macro radio button (Field 1)
         let macro_selected = self.action_type == KeybindActionType::Macro;
-        let macro_color = if self.focused_field == 1 {
+        let macro_color = crossterm_bridge::to_ratatui_color(if self.focused_field == 1  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
         let macro_text = if macro_selected {
             "[X] Macro"
         } else {
@@ -561,7 +557,7 @@ impl KeybindFormWidget {
             buf[(x + 23 + i as u16, current_y)]
                 .set_char(ch)
                 .set_fg(macro_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
         current_y += 1;
 
@@ -634,18 +630,18 @@ impl KeybindFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let focused = _focused_field == field_id;
-        let label_color = if focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if focused  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
 
         // Render label
         for (i, ch) in label.chars().enumerate() {
             buf[(x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Create rect for the TextArea widget
@@ -665,7 +661,7 @@ impl KeybindFormWidget {
         // Set text style
         textarea.set_style(
             ratatui::style::Style::default()
-                .fg(theme.text_primary)
+                .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
                 .bg(bg),
         );
 
@@ -684,11 +680,11 @@ impl KeybindFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let focused = self.focused_field == 3;
-        let label_color = if focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if focused  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
 
         // Render label
         let label = "Action:";
@@ -696,23 +692,23 @@ impl KeybindFormWidget {
             buf[(x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Get current value from dropdown index
         let current_value = AVAILABLE_ACTIONS[self.action_dropdown_index];
 
         // Render current value (highlight if focused, no background)
-        let value_color = if focused {
+        let value_color = crossterm_bridge::to_ratatui_color(if focused  {
             theme.form_label_focused
         } else {
             theme.text_disabled
-        };
+        });
         for (i, ch) in current_value.chars().enumerate().take(input_width as usize) {
             buf[(input_x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(value_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
     }
 
@@ -763,6 +759,28 @@ impl KeybindFormWidget {
         } else {
             None
         }
+    }
+
+    /// Navigate to a specific action section (for keybind browser integration)
+    /// This is a placeholder - actual section navigation would need to be implemented
+    /// based on how the keybind browser groups actions
+    pub fn go_to_section(&mut self, _section: ActionSection) {
+        // Placeholder: In a full implementation, this would:
+        // 1. Filter the action dropdown to only show actions in this section
+        // 2. Update focused_field to the action dropdown
+        // 3. Set action_dropdown_index to the first action in the section
+
+        // For now, just focus on the action dropdown
+        self.focused_field = 3;
+        self.action_type = KeybindActionType::Action;
+    }
+
+    /// Get the current action section
+    /// This is a placeholder that returns a default section
+    pub fn get_current_section(&self) -> ActionSection {
+        // Placeholder: In a full implementation, this would determine which section
+        // the currently selected action belongs to
+        ActionSection::CommandInput
     }
 }
 

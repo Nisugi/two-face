@@ -200,6 +200,11 @@ impl TextContent {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
     }
 
+    pub fn scroll_to_top(&mut self) {
+        let max_scroll = self.lines.len().saturating_sub(1);
+        self.scroll_offset = max_scroll;
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
     }

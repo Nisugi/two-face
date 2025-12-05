@@ -4,6 +4,7 @@
 //! wires into the `Navigable`/`Selectable` widget traits for consistent control
 //! hints.
 
+use crate::frontend::tui::crossterm_bridge;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -22,6 +23,8 @@ pub struct HighlightEntry {
     pub bg: Option<String>,
     pub has_sound: bool,
     pub is_squelched: bool,
+    pub redirect_to: Option<String>,
+    pub redirect_mode: Option<crate::config::RedirectMode>,
 }
 
 /// Popup list component used for browsing configured highlights.
@@ -51,6 +54,12 @@ impl HighlightBrowser {
                 bg: pattern.bg.clone(),
                 has_sound: pattern.sound.is_some(),
                 is_squelched: pattern.squelch,
+                redirect_to: pattern.redirect_to.clone(),
+                redirect_mode: if pattern.redirect_to.is_some() {
+                    Some(pattern.redirect_mode.clone())
+                } else {
+                    None
+                },
             })
             .collect();
 
@@ -92,7 +101,7 @@ impl HighlightBrowser {
         }
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         let filtered = self.filtered_entries();
         if !filtered.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
@@ -100,7 +109,7 @@ impl HighlightBrowser {
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         let filtered = self.filtered_entries();
         if self.selected_index + 1 < filtered.len() {
             self.selected_index += 1;
@@ -236,13 +245,13 @@ impl HighlightBrowser {
         for row in 0..height {
             for col in 0..width {
                 if x + col < area.width && y + row < area.height {
-                    buf[(x + col, y + row)].set_bg(theme.browser_background);
+                    buf[(x + col, y + row)].set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
 
         // Draw border
-        let border_color = theme.browser_border;
+        let border_color = crossterm_bridge::to_ratatui_color(theme.browser_border);
         self.draw_border(
             &Rect {
                 x,
@@ -252,7 +261,7 @@ impl HighlightBrowser {
             },
             buf,
             border_color,
-            theme.browser_background,
+            crossterm_bridge::to_ratatui_color(theme.browser_background),
         );
 
         // Title (left-aligned)
@@ -261,8 +270,8 @@ impl HighlightBrowser {
             if (x + 1 + i as u16) < (x + width) {
                 buf[(x + 1 + i as u16, y)]
                     .set_char(ch)
-                    .set_fg(theme.browser_title)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.browser_title))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -292,8 +301,8 @@ impl HighlightBrowser {
                         let current_y = list_y + render_row as u16;
                         let header_text = format!(" ═══ {} ═══", entry_category.to_uppercase());
                         let header_style = ratatui::style::Style::default()
-                            .fg(theme.browser_item_focused) // Gold
-                            .bg(theme.browser_background)
+                            .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused)) // Gold
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                             .add_modifier(Modifier::BOLD);
 
                         for (i, ch) in header_text.chars().enumerate() {
@@ -308,7 +317,7 @@ impl HighlightBrowser {
                         for i in header_text.len()..(width - 2) as usize {
                             buf[(x + 1 + i as u16, current_y)]
                                 .set_char(' ')
-                                .set_bg(theme.browser_background);
+                                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                         }
 
                         render_row += 1;
@@ -331,8 +340,8 @@ impl HighlightBrowser {
                 let current_y = list_y + render_row as u16;
                 let header_text = format!(" ═══ {} ═══", entry_category.to_uppercase());
                 let header_style = ratatui::style::Style::default()
-                    .fg(theme.browser_item_focused) // Gold
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused)) // Gold
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD);
 
                 for (i, ch) in header_text.chars().enumerate() {
@@ -347,7 +356,7 @@ impl HighlightBrowser {
                 for i in header_text.len()..(width - 2) as usize {
                     buf[(x + 1 + i as u16, current_y)]
                         .set_char(' ')
-                        .set_bg(theme.browser_background);
+                        .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
 
                 render_row += 1;
@@ -377,8 +386,8 @@ impl HighlightBrowser {
                 // No color: show [-]
                 buf[(x + 3, current_y)]
                     .set_char('-')
-                    .set_fg(theme.menu_separator)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
 
             // Col 7-9: BG color preview
@@ -394,32 +403,42 @@ impl HighlightBrowser {
             } else {
                 buf[(x + 7, current_y)]
                     .set_char('[')
-                    .set_fg(theme.menu_separator)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 buf[(x + 8, current_y)]
                     .set_char('-')
-                    .set_fg(theme.menu_separator)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 buf[(x + 9, current_y)]
                     .set_char(']')
-                    .set_fg(theme.menu_separator)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
 
             // Col 13+: Entry name (cyan normally, gold when selected)
             let name_style = if is_selected {
                 ratatui::style::Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background) // Gold when selected
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)) // Gold when selected
             } else {
                 ratatui::style::Style::default()
-                    .fg(theme.browser_item_normal)
-                    .bg(theme.browser_background) // Normal color otherwise
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_normal))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)) // Normal color otherwise
             };
 
             let sound_indicator = if entry.has_sound { " ♫" } else { "" };
             let squelch_indicator = if entry.is_squelched { " [SQUELCH]" } else { "" };
-            let name_with_indicators = format!("   {}{}{}", entry.name, sound_indicator, squelch_indicator);
+            let redirect_indicator = if let Some(ref stream) = entry.redirect_to {
+                let mode_str = match entry.redirect_mode {
+                    Some(crate::config::RedirectMode::RedirectOnly) => "→",
+                    Some(crate::config::RedirectMode::RedirectCopy) => "⇉",
+                    None => "→",
+                };
+                format!(" {}{}", mode_str, stream)
+            } else {
+                String::new()
+            };
+            let name_with_indicators = format!("   {}{}{}{}", entry.name, sound_indicator, redirect_indicator, squelch_indicator);
             for (i, ch) in name_with_indicators.chars().enumerate() {
                 let col = x + 13 + i as u16;
                 if col < x + width - 1 {
@@ -438,8 +457,8 @@ impl HighlightBrowser {
         for (i, ch) in footer.chars().enumerate() {
             buf[(footer_x + i as u16, footer_y)]
                 .set_char(ch)
-                .set_fg(theme.text_primary)
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
     }
 
@@ -522,6 +541,45 @@ impl HighlightBrowser {
         let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
         Some(Color::Rgb(r, g, b))
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
+
+    /// Update the list of highlight entries
+    pub fn update_items(&mut self, highlights: &std::collections::HashMap<String, crate::config::HighlightPattern>) {
+        self.entries.clear();
+        for (name, highlight) in highlights {
+            self.entries.push(HighlightEntry {
+                name: name.clone(),
+                pattern: highlight.pattern.clone(),
+                category: None,
+                fg: highlight.fg.clone(),
+                bg: highlight.bg.clone(),
+                has_sound: highlight.sound.is_some(),
+                is_squelched: false, // TODO: Add squelch support to HighlightPattern
+                redirect_to: highlight.redirect_to.clone(),
+                redirect_mode: if highlight.redirect_to.is_some() {
+                    Some(highlight.redirect_mode.clone())
+                } else {
+                    None
+                },
+            });
+        }
+        // Sort by name
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Reset selection if out of bounds
+        if self.selected_index >= self.entries.len() && !self.entries.is_empty() {
+            self.selected_index = self.entries.len() - 1;
+        }
+    }
 }
 
 // Trait implementations for HighlightBrowser
@@ -529,11 +587,11 @@ use super::widget_traits::{Navigable, Selectable};
 
 impl Navigable for HighlightBrowser {
     fn navigate_up(&mut self) {
-        self.previous();
+        self.navigate_up();
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        self.navigate_down();
     }
 
     fn page_up(&mut self) {

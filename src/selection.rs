@@ -4,7 +4,7 @@
 //! offers utilities for translating between screen coordinates and window
 //! rectangles.
 
-use ratatui::layout::Rect;
+use crate::frontend::common::Rect;
 
 /// Represents a position in the text (window, line, column)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

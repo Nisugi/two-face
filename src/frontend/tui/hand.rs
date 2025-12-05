@@ -10,6 +10,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Widget},
 };
 
+use super::crossterm_bridge;
+
 /// Individual hand widget for left/right/spell hand
 /// Shows icon + text for a single hand (e.g., "L: item name")
 pub struct Hand {
@@ -156,7 +158,7 @@ impl Hand {
 
         // Determine which borders to show
         let borders = if self.show_border {
-            crate::config::parse_border_sides(&self.border_sides)
+            crossterm_bridge::to_ratatui_borders(&self.border_sides)
         } else {
             Borders::NONE
         };

@@ -3,6 +3,7 @@
 //! Exposes inline swatches plus an embedded mini editor for tweaking fg/bg
 //! values inline without leaving the popup.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::ColorConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -139,7 +140,7 @@ impl UIColorEditor {
             }
             _ => {
                 // Pass to active TextArea (convert KeyEvent for tui-textarea compatibility)
-                let rt_key = crate::core::event_bridge::to_textarea_event(key);
+                let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key);
                 let active_field = if self.focused_field == 0 {
                     &mut self.color_fg
                 } else {
@@ -216,14 +217,14 @@ impl UIColorEditor {
                 if x + col < area.width && y + row < area.height {
                     if let Some(cell) = buf.cell_mut((x + col, y + row)) {
                         cell.set_char(' ');
-                        cell.set_style(Style::default().bg(theme.browser_background));
+                        cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                     }
                 }
             }
         }
 
         // Cyan border
-        let border_style = Style::default().fg(theme.browser_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.browser_border));
 
         // Top border
         if let Some(cell) = buf.cell_mut((x, y)) {
@@ -268,7 +269,7 @@ impl UIColorEditor {
                 cell.set_char(ch);
                 cell.set_style(
                     Style::default()
-                        .fg(theme.browser_border)
+                        .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -282,8 +283,8 @@ impl UIColorEditor {
                     cell.set_char(ch);
                     cell.set_style(
                         Style::default()
-                            .fg(theme.browser_border)
-                            .bg(theme.browser_background),
+                            .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
                     );
                 }
             }
@@ -293,12 +294,12 @@ impl UIColorEditor {
         let color_label = "  Color:";
         let color_label_style = if self.focused_field == 0 {
             Style::default()
-                .fg(theme.browser_item_focused)
-                .bg(theme.browser_background) // Gold when focused
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)) // Gold when focused
         } else {
             Style::default()
-                .fg(theme.browser_border)
-                .bg(theme.browser_background)
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
         };
         for (i, ch) in color_label.chars().enumerate() {
             if let Some(cell) = buf.cell_mut((x + 1 + i as u16, y + 4)) {
@@ -311,7 +312,7 @@ impl UIColorEditor {
 
         // Color FG textarea (10 chars)
         let fg_style = Style::default()
-            .fg(theme.text_primary)
+            .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
             .bg(self.textarea_bg_color);
         let fg_text = self.color_fg.lines()[0].clone();
         for i in 0..10 {
@@ -325,7 +326,7 @@ impl UIColorEditor {
         // 1 space gap
         if let Some(cell) = buf.cell_mut((textarea_start + 10, y + 4)) {
             cell.set_char(' ');
-            cell.set_style(Style::default().bg(theme.browser_background));
+            cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
         }
 
         // FG color preview (2 chars)
@@ -341,12 +342,12 @@ impl UIColorEditor {
         let bg_label = "  Background:";
         let bg_label_style = if self.focused_field == 1 {
             Style::default()
-                .fg(theme.browser_item_focused)
-                .bg(theme.browser_background)
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
         } else {
             Style::default()
-                .fg(theme.browser_border)
-                .bg(theme.browser_background)
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
         };
         for (i, ch) in bg_label.chars().enumerate() {
             if let Some(cell) = buf.cell_mut((x + 1 + i as u16, y + 5)) {
@@ -359,7 +360,7 @@ impl UIColorEditor {
 
         // Color BG textarea (10 chars)
         let bg_style = Style::default()
-            .fg(theme.text_primary)
+            .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
             .bg(self.textarea_bg_color);
         let bg_text = self.color_bg.lines()[0].clone();
         for i in 0..10 {
@@ -373,7 +374,7 @@ impl UIColorEditor {
         // 1 space gap
         if let Some(cell) = buf.cell_mut((bg_textarea_start + 10, y + 5)) {
             cell.set_char(' ');
-            cell.set_style(Style::default().bg(theme.browser_background));
+            cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
         }
 
         // BG color preview (2 chars)
@@ -393,8 +394,8 @@ impl UIColorEditor {
                 cell.set_char(ch);
                 cell.set_style(
                     Style::default()
-                        .fg(theme.text_primary)
-                        .bg(theme.browser_background),
+                        .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                        .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
                 );
             }
         }
@@ -535,14 +536,14 @@ impl UIColorsBrowser {
         }
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         if self.selected_index + 1 < self.entries.len() {
             self.selected_index += 1;
             self.adjust_scroll();
@@ -682,14 +683,14 @@ impl UIColorsBrowser {
                 if x + col < area.width && y + row < area.height {
                     if let Some(cell) = buf.cell_mut((x + col, y + row)) {
                         cell.set_char(' ');
-                        cell.set_style(Style::default().bg(theme.browser_background));
+                        cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                     }
                 }
             }
         }
 
         // Draw cyan border
-        let border_style = Style::default().fg(theme.browser_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.browser_border));
 
         // Top border
         if let Some(cell) = buf.cell_mut((x, y)) {
@@ -711,7 +712,7 @@ impl UIColorsBrowser {
                 cell.set_char(ch);
                 cell.set_style(
                     Style::default()
-                        .fg(theme.browser_border)
+                        .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -759,8 +760,8 @@ impl UIColorsBrowser {
                         let current_y = list_y + render_row as u16;
                         let header_text = format!(" ═══ {} ═══", entry.category);
                         let header_style = Style::default()
-                            .fg(theme.browser_item_focused)
-                            .bg(theme.browser_background)
+                            .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                             .add_modifier(Modifier::BOLD);
 
                         for (i, ch) in header_text.chars().enumerate() {
@@ -776,7 +777,7 @@ impl UIColorsBrowser {
                         for i in header_text.len()..(self.width - 2) as usize {
                             if let Some(cell) = buf.cell_mut((x + 1 + i as u16, current_y)) {
                                 cell.set_char(' ');
-                                cell.set_style(Style::default().bg(theme.browser_background));
+                                cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                             }
                         }
 
@@ -798,8 +799,8 @@ impl UIColorsBrowser {
                 let current_y = list_y + render_row as u16;
                 let header_text = format!(" ═══ {} ═══", entry.category);
                 let header_style = Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD);
 
                 for (i, ch) in header_text.chars().enumerate() {
@@ -814,7 +815,7 @@ impl UIColorsBrowser {
                 for i in header_text.len()..(self.width - 2) as usize {
                     if let Some(cell) = buf.cell_mut((x + 1 + i as u16, current_y)) {
                         cell.set_char(' ');
-                        cell.set_style(Style::default().bg(theme.browser_background));
+                        cell.set_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                     }
                 }
 
@@ -843,8 +844,8 @@ impl UIColorsBrowser {
             } else if let Some(cell) = buf.cell_mut((x + 3, current_y)) {
                 cell.set_char('-').set_style(
                     Style::default()
-                        .fg(theme.menu_separator)
-                        .bg(theme.browser_background),
+                        .fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                        .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
                 );
             }
 
@@ -860,20 +861,20 @@ impl UIColorsBrowser {
             } else if let Some(cell) = buf.cell_mut((x + 8, current_y)) {
                 cell.set_char('-').set_style(
                     Style::default()
-                        .fg(theme.menu_separator)
-                        .bg(theme.browser_background),
+                        .fg(crossterm_bridge::to_ratatui_color(theme.menu_separator))
+                        .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
                 );
             }
 
             // Col 13+: Entry name
             let name_style = if is_selected {
                 Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
             } else {
                 Style::default()
-                    .fg(theme.browser_border)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_border))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
             };
 
             let name_with_space = format!("   {}", entry.name);
@@ -900,8 +901,8 @@ impl UIColorsBrowser {
                 cell.set_char(ch);
                 cell.set_style(
                     Style::default()
-                        .fg(theme.text_primary)
-                        .bg(theme.browser_background),
+                        .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                        .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
                 );
             }
         }
@@ -922,6 +923,16 @@ impl UIColorsBrowser {
         }
         Color::Black
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
 }
 
 // Trait implementations for UIColorsBrowser
@@ -929,11 +940,11 @@ use super::widget_traits::{Navigable, Selectable};
 
 impl Navigable for UIColorsBrowser {
     fn navigate_up(&mut self) {
-        self.previous();
+        self.navigate_up();
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        self.navigate_down();
     }
 
     fn page_up(&mut self) {

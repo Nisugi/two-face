@@ -3,7 +3,7 @@
 //! Individual frontends translate their native event streams (crossterm, egui,
 //! etc.) into this enum so the core logic only handles one event shape.
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
+use super::common::{KeyCode, KeyModifiers, MouseEvent};
 
 /// Frontend-agnostic event system
 /// Events emitted by frontends (TUI, GUI) are converted to this unified format
@@ -15,12 +15,7 @@ pub enum FrontendEvent {
         modifiers: KeyModifiers,
     },
     /// Mouse input
-    Mouse {
-        kind: MouseEventKind,
-        x: u16,
-        y: u16,
-        modifiers: KeyModifiers,
-    },
+    Mouse(MouseEvent),
     /// Terminal/window resize
     Resize { width: u16, height: u16 },
     /// Paste event (text from clipboard)
@@ -36,13 +31,8 @@ impl FrontendEvent {
     }
 
     /// Create a mouse event
-    pub fn mouse(kind: MouseEventKind, x: u16, y: u16, modifiers: KeyModifiers) -> Self {
-        Self::Mouse {
-            kind,
-            x,
-            y,
-            modifiers,
-        }
+    pub fn mouse(event: MouseEvent) -> Self {
+        Self::Mouse(event)
     }
 
     /// Create a resize event
@@ -64,11 +54,20 @@ impl FrontendEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend::common::{MouseEventKind, MouseButton};
 
     #[test]
     fn test_event_creation() {
         let key_event = FrontendEvent::key(KeyCode::Char('a'), KeyModifiers::NONE);
         assert!(matches!(key_event, FrontendEvent::Key { .. }));
+
+        let mouse_event = FrontendEvent::mouse(MouseEvent::new(
+            MouseEventKind::Down(MouseButton::Left),
+            10,
+            20,
+            KeyModifiers::NONE,
+        ));
+        assert!(matches!(mouse_event, FrontendEvent::Mouse(_)));
 
         let resize_event = FrontendEvent::resize(120, 40);
         assert!(matches!(

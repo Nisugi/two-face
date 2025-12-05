@@ -3,6 +3,7 @@
 //! Provides filtering, scrolling, and drag handling so it behaves like the
 //! other management popups.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::PaletteColor;
 use ratatui::{
     buffer::Buffer,
@@ -73,7 +74,7 @@ impl ColorPaletteBrowser {
         &self.colors
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         let filtered = self.filtered_colors();
         if !filtered.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
@@ -81,7 +82,7 @@ impl ColorPaletteBrowser {
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         let filtered = self.filtered_colors();
         if self.selected_index + 1 < filtered.len() {
             self.selected_index += 1;
@@ -229,13 +230,13 @@ impl ColorPaletteBrowser {
             for x in popup_area.x..popup_area.x + popup_area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(' ');
-                    cell.set_bg(theme.browser_background);
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
 
         // Draw border
-        let border_style = Style::default().fg(theme.browser_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.browser_border));
         self.draw_border(popup_area, buf, border_style);
 
         // Draw title
@@ -259,7 +260,7 @@ impl ColorPaletteBrowser {
                 if let Some(cell) = buf.cell_mut((x, popup_area.y)) {
                     cell.set_char(ch);
                     cell.set_fg(Color::Rgb(100, 149, 237));
-                    cell.set_bg(theme.browser_background);
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -290,8 +291,8 @@ impl ColorPaletteBrowser {
                 }
                 if let Some(cell) = buf.cell_mut((x, help_y)) {
                     cell.set_char(ch);
-                    cell.set_fg(theme.menu_separator);
-                    cell.set_bg(theme.browser_background);
+                    cell.set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator));
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -317,8 +318,8 @@ impl ColorPaletteBrowser {
             for (i, ch) in msg.chars().enumerate() {
                 if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
                     cell.set_char(ch);
-                    cell.set_fg(theme.menu_separator);
-                    cell.set_bg(theme.browser_background);
+                    cell.set_fg(crossterm_bridge::to_ratatui_color(theme.menu_separator));
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
             return;
@@ -343,8 +344,8 @@ impl ColorPaletteBrowser {
                         let y = list_area.y + render_row as u16;
                         let header = format!("═══ {} ═══", color.category.to_uppercase());
                         let header_style = Style::default()
-                            .fg(theme.browser_item_focused)
-                            .bg(theme.browser_background)
+                            .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                             .add_modifier(Modifier::BOLD);
 
                         for (i, ch) in header.chars().enumerate() {
@@ -379,8 +380,8 @@ impl ColorPaletteBrowser {
                 let y = list_area.y + render_row as u16;
                 let header = format!("═══ {} ═══", color.category.to_uppercase());
                 let header_style = Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD);
 
                 for (i, ch) in header.chars().enumerate() {
@@ -415,13 +416,13 @@ impl ColorPaletteBrowser {
 
             let style = if is_selected {
                 Style::default()
-                    .fg(theme.browser_item_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_item_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
                     .fg(Color::Rgb(100, 149, 237))
-                    .bg(theme.browser_background)
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
             };
 
             // Render color preview with actual color
@@ -430,7 +431,7 @@ impl ColorPaletteBrowser {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     cell.set_fg(preview_color);
-                    cell.set_bg(theme.browser_background);
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
 
@@ -509,6 +510,35 @@ impl ColorPaletteBrowser {
             None
         }
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        if self.colors.is_empty() {
+            return;
+        }
+        let max_index = self.colors.len() - 1;
+        self.selected_index = (self.selected_index + 10).min(max_index);
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        if self.colors.is_empty() {
+            return;
+        }
+        self.selected_index = self.selected_index.saturating_sub(10);
+    }
+
+    /// Update the list of color palette entries
+    pub fn update_items(&mut self, palette: Vec<crate::config::PaletteColor>) {
+        self.colors = palette;
+        // Sort by name
+        self.colors.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Reset selection if out of bounds
+        if self.selected_index >= self.colors.len() && !self.colors.is_empty() {
+            self.selected_index = self.colors.len() - 1;
+        }
+    }
 }
 
 // Trait implementations for ColorPaletteBrowser
@@ -516,11 +546,11 @@ use super::widget_traits::{Navigable, Selectable};
 
 impl Navigable for ColorPaletteBrowser {
     fn navigate_up(&mut self) {
-        self.previous();
+        self.navigate_up();
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        self.navigate_down();
     }
 
     fn page_up(&mut self) {

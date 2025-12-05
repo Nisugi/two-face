@@ -3,7 +3,8 @@
 //! Handles multi-byte cursoring, cut/copy selection, history persistence, and
 //! autocomplete for both dot-commands and window names.
 
-use crate::config::{self, BorderSides};
+use crate::frontend::tui::crossterm_bridge;
+use crate::config::BorderSides;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -370,7 +371,7 @@ impl CommandInput {
         let border_is_none = self.border_style.as_ref().is_some_and(|s| s == "none");
 
         if self.show_border && !border_is_none {
-            let borders = config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             block = block.borders(borders);
 
             // Apply border style if specified

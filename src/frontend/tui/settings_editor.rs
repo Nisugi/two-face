@@ -3,6 +3,7 @@
 //! Provides table-style navigation, inline editing, and trait-based controls so
 //! it matches the ergonomic expectations set by other popups.
 
+use crate::frontend::tui::crossterm_bridge;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -124,22 +125,6 @@ impl SettingsEditor {
                 }
             })
             .collect()
-    }
-
-    pub fn previous(&mut self) {
-        let filtered = self.filtered_items();
-        if !filtered.is_empty() && self.selected_index > 0 {
-            self.selected_index -= 1;
-            self.adjust_scroll();
-        }
-    }
-
-    pub fn next(&mut self) {
-        let filtered = self.filtered_items();
-        if self.selected_index + 1 < filtered.len() {
-            self.selected_index += 1;
-            self.adjust_scroll();
-        }
     }
 
     pub fn page_up(&mut self) {
@@ -326,11 +311,11 @@ impl SettingsEditor {
             // Not editing - handle navigation and actions
             match key.code {
                 KeyCode::Up => {
-                    self.previous();
+                    self.navigate_up();
                     true
                 }
                 KeyCode::Down => {
-                    self.next();
+                    self.navigate_down();
                     true
                 }
                 KeyCode::PageUp => {
@@ -459,13 +444,13 @@ impl SettingsEditor {
             for x in popup_area.x..popup_area.x + popup_area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(' ');
-                    cell.set_bg(theme.browser_background);
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
 
         // Draw border
-        let border_style = Style::default().fg(theme.form_label);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label));
         self.draw_border(popup_area, buf, border_style);
 
         // Draw title
@@ -484,7 +469,7 @@ impl SettingsEditor {
                 if let Some(cell) = buf.cell_mut((x, popup_area.y)) {
                     cell.set_char(ch);
                     cell.set_fg(Color::Rgb(100, 149, 237));
-                    cell.set_bg(theme.browser_background);
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -516,8 +501,8 @@ impl SettingsEditor {
                 }
                 if let Some(cell) = buf.cell_mut((x, help_y)) {
                     cell.set_char(ch);
-                    cell.set_fg(theme.text_disabled);
-                    cell.set_bg(theme.browser_background);
+                    cell.set_fg(crossterm_bridge::to_ratatui_color(theme.text_disabled));
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -538,8 +523,8 @@ impl SettingsEditor {
             for (i, ch) in msg.chars().enumerate() {
                 if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
                     cell.set_char(ch);
-                    cell.set_fg(theme.text_disabled);
-                    cell.set_bg(theme.browser_background);
+                    cell.set_fg(crossterm_bridge::to_ratatui_color(theme.text_disabled));
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
             return;
@@ -564,8 +549,8 @@ impl SettingsEditor {
                         let y = list_area.y + render_row as u16;
                         let header = format!("═══ {} ═══", item.category.to_uppercase());
                         let header_style = Style::default()
-                            .fg(theme.form_label_focused)
-                            .bg(theme.browser_background)
+                            .fg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
+                            .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                             .add_modifier(Modifier::BOLD);
 
                         for (i, ch) in header.chars().enumerate() {
@@ -600,8 +585,8 @@ impl SettingsEditor {
                 let y = list_area.y + render_row as u16;
                 let header = format!("═══ {} ═══", item.category.to_uppercase());
                 let header_style = Style::default()
-                    .fg(theme.form_label_focused)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                     .add_modifier(Modifier::BOLD);
 
                 for (i, ch) in header.chars().enumerate() {
@@ -662,13 +647,13 @@ impl SettingsEditor {
         // Render name
         let name_style = if is_selected {
             Style::default()
-                .fg(theme.form_label_focused)
-                .bg(theme.browser_background)
+                .fg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(Color::Rgb(100, 149, 237))
-                .bg(theme.browser_background)
+                .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
         };
 
         for (i, ch) in item
@@ -689,7 +674,7 @@ impl SettingsEditor {
             let px = x + i as u16;
             if let Some(cell) = buf.cell_mut((px, y)) {
                 cell.set_char(' ');
-                cell.set_bg(theme.browser_background);
+                cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -697,12 +682,12 @@ impl SettingsEditor {
         let sep_x = x + name_width;
         if let Some(cell) = buf.cell_mut((sep_x, y)) {
             cell.set_char(':');
-            cell.set_fg(theme.text_disabled);
-            cell.set_bg(theme.browser_background);
+            cell.set_fg(crossterm_bridge::to_ratatui_color(theme.text_disabled));
+            cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
         if let Some(cell) = buf.cell_mut((sep_x + 1, y)) {
             cell.set_char(' ');
-            cell.set_bg(theme.browser_background);
+            cell.set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Render value
@@ -716,15 +701,15 @@ impl SettingsEditor {
         let value_bg = if is_editing {
             textarea_bg
         } else {
-            theme.browser_background
+            crossterm_bridge::to_ratatui_color(theme.browser_background)
         };
-        let value_fg = if is_editing {
+        let value_fg = crossterm_bridge::to_ratatui_color(if is_editing {
             theme.form_label
         } else if is_selected {
             theme.form_label_focused
         } else {
             theme.text_primary
-        };
+        });
 
         let value_style = Style::default().fg(value_fg).bg(value_bg);
 
@@ -756,8 +741,8 @@ impl SettingsEditor {
             let cursor_x = value_x + self.edit_buffer.len() as u16;
             if cursor_x < x + width {
                 if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-                    cell.set_fg(theme.browser_background);
-                    cell.set_bg(theme.text_primary);
+                    cell.set_fg(crossterm_bridge::to_ratatui_color(theme.browser_background));
+                    cell.set_bg(crossterm_bridge::to_ratatui_color(theme.text_primary));
                 }
             }
         }
@@ -818,6 +803,16 @@ impl SettingsEditor {
         let b = u8::from_str_radix(&hex[5..7], 16).map_err(|_| ())?;
         Ok(Color::Rgb(r, g, b))
     }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
 }
 
 // Trait implementations for SettingsEditor
@@ -825,11 +820,19 @@ use super::widget_traits::{Cyclable, Navigable, Toggleable};
 
 impl Navigable for SettingsEditor {
     fn navigate_up(&mut self) {
-        self.previous();
+        let filtered = self.filtered_items();
+        if !filtered.is_empty() && self.selected_index > 0 {
+            self.selected_index -= 1;
+            self.adjust_scroll();
+        }
     }
 
     fn navigate_down(&mut self) {
-        self.next();
+        let filtered = self.filtered_items();
+        if self.selected_index + 1 < filtered.len() {
+            self.selected_index += 1;
+            self.adjust_scroll();
+        }
     }
 
     fn page_up(&mut self) {

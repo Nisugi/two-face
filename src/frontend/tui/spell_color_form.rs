@@ -3,8 +3,9 @@
 //! Used by the spell color browser/editor to input ranges, preview swatches,
 //! and persist the chosen palette.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::SpellColorRange;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -114,60 +115,64 @@ impl SpellColorFormWidget {
     }
 
     pub fn input(&mut self, key: KeyEvent) -> Option<SpellColorFormResult> {
-        match key.code {
-            KeyCode::Esc => {
-                return Some(SpellColorFormResult::Cancel);
+        // Note: All navigation keys (Tab, Shift+Tab, Esc, Enter, Up, Down, Ctrl+S, Ctrl+A)
+        // are now routed via MenuAction in mod.rs. This method only handles text input.
+
+        // Pass to the focused textarea (convert KeyEvent for tui-textarea compatibility)
+        let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key);
+        match self.focused_field {
+            0 => {
+                self.spell_ids.input(rt_key);
             }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+A to select all in current text field
-                let textarea = match self.focused_field {
-                    0 => &mut self.spell_ids,
-                    1 => &mut self.bar_color,
-                    2 => &mut self.text_color,
-                    3 => &mut self.bg_color,
-                    _ => return None,
-                };
-                textarea.select_all();
-                return None;
+            1 => {
+                self.bar_color.input(rt_key);
             }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.save_internal();
+            2 => {
+                self.text_color.input(rt_key);
             }
-            KeyCode::BackTab => {
-                self.previous_field();
-                return None;
+            3 => {
+                self.bg_color.input(rt_key);
             }
-            KeyCode::Tab => {
-                self.next_field();
-                return None;
-            }
-            KeyCode::Enter => {
-                // Move to next field
-                self.next_field();
-                return None;
-            }
-            _ => {
-                // Pass to the focused textarea (convert KeyEvent for tui-textarea compatibility)
-                let rt_key = crate::core::event_bridge::to_textarea_event(key);
-                match self.focused_field {
-                    0 => {
-                        self.spell_ids.input(rt_key);
-                    }
-                    1 => {
-                        self.bar_color.input(rt_key);
-                    }
-                    2 => {
-                        self.text_color.input(rt_key);
-                    }
-                    3 => {
-                        self.bg_color.input(rt_key);
-                    }
-                    _ => {}
-                }
-            }
+            _ => {}
         }
 
         None
+    }
+
+    /// Handle MenuAction (called from mod.rs input routing)
+    pub fn handle_action(&mut self, action: crate::core::menu_actions::MenuAction) -> Option<SpellColorFormResult> {
+        use crate::core::menu_actions::MenuAction;
+
+        match action {
+            MenuAction::NavigateUp => {
+                // Up arrow - navigate to previous field
+                self.previous_field();
+                None
+            }
+            MenuAction::NavigateDown => {
+                // Down arrow - navigate to next field
+                self.next_field();
+                None
+            }
+            MenuAction::Select => {
+                // Enter key - move to next field
+                self.next_field();
+                None
+            }
+            MenuAction::Save => {
+                // Ctrl+S - save the form
+                self.save_internal()
+            }
+            MenuAction::Delete => {
+                // Delete key - delete spell color range (only in edit mode)
+                if let FormMode::Edit(index) = self.mode {
+                    Some(SpellColorFormResult::Delete(index))
+                } else {
+                    None
+                }
+            }
+            _ => None
+        }
     }
 
     fn next_field(&mut self) {
@@ -263,7 +268,7 @@ impl SpellColorFormWidget {
         for row in popup_row..popup_row + popup_height {
             for col in popup_col..popup_col + popup_width {
                 if col < area.width && row < area.height {
-                    buf.set_string(col, row, " ", Style::default().bg(theme.browser_background));
+                    buf.set_string(col, row, " ", Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                 }
             }
         }
@@ -274,7 +279,7 @@ impl SpellColorFormWidget {
             FormMode::Edit(_) => " Edit Spell Color ",
         };
 
-        let border_style = Style::default().fg(theme.form_label);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label));
 
         // Top border
         let top = format!("┌{}┐", "─".repeat(popup_width as usize - 2));
@@ -410,12 +415,12 @@ impl SpellColorFormWidget {
         let label_para = Paragraph::new(Line::from(label_span));
         RatatuiWidget::render(label_para, label_area, buf);
 
-        let base_style = Style::default().fg(theme.form_label).bg(textarea_bg);
+        let base_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label)).bg(textarea_bg);
         textarea.set_style(base_style);
         textarea.set_cursor_style(
             Style::default()
-                .bg(theme.text_primary)
-                .fg(theme.browser_background),
+                .bg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
         );
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_style(Style::default().fg(Color::Gray).bg(textarea_bg));
@@ -459,12 +464,12 @@ impl SpellColorFormWidget {
         let label_para = Paragraph::new(Line::from(label_span));
         RatatuiWidget::render(label_para, label_area, buf);
 
-        let base_style = Style::default().fg(theme.form_label).bg(textarea_bg);
+        let base_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label)).bg(textarea_bg);
         textarea.set_style(base_style);
         textarea.set_cursor_style(
             Style::default()
-                .bg(theme.text_primary)
-                .fg(theme.browser_background),
+                .bg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
         );
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_style(Style::default().fg(Color::Gray).bg(textarea_bg));

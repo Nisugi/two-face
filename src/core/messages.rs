@@ -53,6 +53,9 @@ pub struct MessageProcessor {
     squelch_enabled: bool,
     squelch_matcher: Option<aho_corasick::AhoCorasick>,
     squelch_regexes: Vec<regex::Regex>,
+
+    /// Redirect cache: true if any highlights have redirect_to configured (lazy check optimization)
+    has_redirect_highlights: bool,
 }
 
 impl MessageProcessor {
@@ -84,10 +87,13 @@ impl MessageProcessor {
             squelch_enabled: false,
             squelch_matcher: None,
             squelch_regexes: Vec::new(),
+            has_redirect_highlights: false,
         };
 
         // Initialize squelch patterns from config
         processor.update_squelch_patterns();
+        // Initialize redirect cache from config
+        processor.update_redirect_cache();
         processor
     }
 
@@ -895,6 +901,7 @@ impl MessageProcessor {
             .collect();
 
         // Check if line should be squelched (ignored/filtered)
+        // Squelch always takes precedence over redirect
         if self.should_squelch_line(&full_text) {
             tracing::debug!(
                 "Line squelched: '{}'",
@@ -906,6 +913,29 @@ impl MessageProcessor {
             );
             self.current_segments.clear();
             return; // Discard line completely
+        }
+
+        // Check for redirect match (after squelch, as squelch takes precedence)
+        let redirect_match = self.check_redirect_match(&full_text);
+
+        // Handle redirect by overriding stream (works for both Text and TabbedText windows)
+        let original_stream = self.current_stream.clone();
+        let mut should_send_to_original = true;
+
+        if let Some((redirect_stream, redirect_mode, _match_len)) = redirect_match {
+            tracing::debug!(
+                "Line matched redirect pattern -> stream '{}' (mode: {:?})",
+                redirect_stream,
+                redirect_mode
+            );
+
+            // Override stream to redirect target
+            self.current_stream = redirect_stream;
+
+            // Determine if we should also send to original stream
+            if redirect_mode == crate::config::RedirectMode::RedirectOnly {
+                should_send_to_original = false;
+            }
         }
 
         let mut line = StyledLine {
@@ -928,10 +958,11 @@ impl MessageProcessor {
 
         // If all segments were filtered out, nothing to add
         if line.segments.is_empty() {
+            self.current_stream = original_stream; // Restore original stream
             return;
         }
 
-        // Determine target window based on stream
+        // Determine target window based on stream (may be redirected stream)
         let window_name = self.map_stream_to_window(&self.current_stream);
 
         // Special handling for room stream - room uses components, not text segments
@@ -1047,6 +1078,44 @@ impl MessageProcessor {
         // Enqueue for TTS if enabled and text was added to a window
         if let (Some(window_name), Some(tts_mgr)) = (text_added_to_window, tts_manager) {
             self.enqueue_tts(tts_mgr, &window_name, &line);
+        }
+
+        // Handle redirect_copy mode: also send to original stream
+        if should_send_to_original && self.current_stream != original_stream {
+            // Restore original stream and route line there too
+            self.current_stream = original_stream.clone();
+            let original_window_name = self.map_stream_to_window(&self.current_stream);
+
+            tracing::debug!(
+                "Redirect mode is Copy - also sending to original stream '{}'",
+                self.current_stream
+            );
+
+            // Route to original window
+            if let Some(window) = ui_state.get_window_mut(&original_window_name) {
+                match window.content {
+                    WindowContent::Text(ref mut content) => {
+                        content.add_line(line.clone());
+                    }
+                    WindowContent::Inventory(ref mut content) => {
+                        content.add_line(line.clone());
+                    }
+                    WindowContent::Spells(ref mut content) => {
+                        content.add_line(line.clone());
+                    }
+                    _ => {}
+                }
+            } else if original_window_name != "main" {
+                // Fallback to main for original stream too
+                if let Some(main_window) = ui_state.get_window_mut("main") {
+                    if let WindowContent::Text(ref mut content) = main_window.content {
+                        content.add_line(line.clone());
+                    }
+                }
+            }
+        } else {
+            // Restore original stream even if not copying (cleanup)
+            self.current_stream = original_stream;
         }
     }
 
@@ -1335,6 +1404,83 @@ impl MessageProcessor {
             self.squelch_regexes.len(),
             self.squelch_enabled
         );
+    }
+
+    /// Update the redirect cache (lazy check optimization)
+    pub fn update_redirect_cache(&mut self) {
+        self.has_redirect_highlights = self
+            .config
+            .highlights
+            .values()
+            .any(|pattern| pattern.redirect_to.is_some());
+
+        tracing::debug!(
+            "Updated redirect cache: has_redirect_highlights={}",
+            self.has_redirect_highlights
+        );
+    }
+
+    /// Check if a line matches a redirect pattern
+    /// Returns (redirect_window_name, redirect_mode, match_length) if matched
+    /// Squelch patterns are excluded (squelch takes precedence)
+    /// Longest match wins when multiple patterns match
+    fn check_redirect_match(
+        &self,
+        text: &str,
+    ) -> Option<(String, crate::config::RedirectMode, usize)> {
+        // Lazy check: skip if no redirects configured
+        if !self.has_redirect_highlights {
+            return None;
+        }
+
+        let mut best_match: Option<(String, crate::config::RedirectMode, usize)> = None;
+
+        // Check all highlight patterns with redirects configured
+        for pattern in self.config.highlights.values() {
+            // Skip if no redirect or if squelched (squelch takes precedence)
+            if pattern.redirect_to.is_none() || pattern.squelch {
+                continue;
+            }
+
+            let redirect_window = pattern.redirect_to.as_ref().unwrap();
+
+            // Check if pattern matches
+            let match_len = if pattern.fast_parse {
+                // Check literal substring match (split on |)
+                pattern
+                    .pattern
+                    .split('|')
+                    .filter_map(|literal| {
+                        let trimmed = literal.trim();
+                        if text.contains(trimmed) {
+                            Some(trimmed.len())
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+            } else {
+                // Check regex match
+                if let Some(ref regex) = pattern.compiled_regex {
+                    regex.find(text).map(|m| m.end() - m.start())
+                } else {
+                    None
+                }
+            };
+
+            // Update best match if this match is longer
+            if let Some(len) = match_len {
+                if best_match.is_none() || len > best_match.as_ref().unwrap().2 {
+                    best_match = Some((
+                        redirect_window.clone(),
+                        pattern.redirect_mode.clone(),
+                        len,
+                    ));
+                }
+            }
+        }
+
+        best_match
     }
 
     /// Check if a line should be squelched (ignored/filtered)

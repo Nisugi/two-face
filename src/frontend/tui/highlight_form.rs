@@ -3,6 +3,7 @@
 //! Mirrors the VellumFE workflow: regex pattern entry, optional colors/sounds,
 //! and checkbox flags for rendering behavior.
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::{Config, HighlightPattern};
 use ratatui::{
     buffer::Buffer,
@@ -43,6 +44,7 @@ pub struct HighlightFormWidget {
     bg_color: TextArea<'static>,
     sound: TextArea<'static>,
     sound_volume: TextArea<'static>,
+    redirect_to: TextArea<'static>, // Stream name for redirect
 
     // Checkbox states
     bold: bool,
@@ -51,7 +53,7 @@ pub struct HighlightFormWidget {
     squelch: bool,
 
     // Form state
-    focused_field: usize, // 0-10: which field has focus (0-6 text, 7-10 checkboxes)
+    focused_field: usize, // 0-12: which field has focus (0-7 text, 8-11 checkboxes, 12 redirect dropdown)
     status_message: String,
     pattern_error: Option<String>,
     mode: FormMode,
@@ -59,6 +61,9 @@ pub struct HighlightFormWidget {
     // Sound dropdown
     sound_files: Vec<String>, // Available sound files (index 0 = "none", then actual files)
     sound_file_index: usize,  // Selected index in sound_files
+
+    // Redirect dropdown (Off=0, Only=1, Copy=2)
+    redirect_mode_index: usize,
 
     // Popup position (for dragging)
     pub popup_x: u16,
@@ -130,6 +135,10 @@ impl HighlightFormWidget {
         sound_volume.set_cursor_line_style(Style::default());
         sound_volume.set_placeholder_text("0.0-1.0 (e.g., 0.8)");
 
+        let mut redirect_to = TextArea::default();
+        redirect_to.set_cursor_line_style(Style::default());
+        redirect_to.set_placeholder_text("stream name (e.g., combat, speech)");
+
         Self {
             name,
             pattern,
@@ -138,6 +147,7 @@ impl HighlightFormWidget {
             bg_color,
             sound,
             sound_volume,
+            redirect_to,
             bold: false,
             color_entire_line: false,
             fast_parse: false,
@@ -148,6 +158,7 @@ impl HighlightFormWidget {
             mode: FormMode::Create,
             sound_files: Self::load_sound_files(),
             sound_file_index: 0, // Default to "none"
+            redirect_mode_index: 0, // Default to "Off"
             popup_x: 0,
             popup_y: 0,
             is_dragging: false,
@@ -203,6 +214,22 @@ impl HighlightFormWidget {
         form.fast_parse = pattern.fast_parse;
         form.squelch = pattern.squelch;
 
+        // Load redirect settings
+        if let Some(ref redirect_stream) = pattern.redirect_to {
+            form.redirect_to = TextArea::from([redirect_stream.clone()]);
+            form.redirect_to.set_cursor_line_style(Style::default());
+        }
+
+        // Set redirect mode index (0=Off, 1=Only, 2=Copy)
+        form.redirect_mode_index = if pattern.redirect_to.is_none() {
+            0 // Off
+        } else {
+            match pattern.redirect_mode {
+                crate::config::RedirectMode::RedirectOnly => 1,
+                crate::config::RedirectMode::RedirectCopy => 2,
+            }
+        };
+
         form.status_message = "Editing highlight".to_string();
         form
     }
@@ -214,13 +241,13 @@ impl HighlightFormWidget {
 
     /// Move focus to next field
     pub fn focus_next(&mut self) {
-        self.focused_field = (self.focused_field + 1) % 11;
+        self.focused_field = (self.focused_field + 1) % 13; // 0-12: 8 text fields + 4 checkboxes + 1 dropdown
     }
 
     /// Move focus to previous field
     pub fn focus_prev(&mut self) {
         self.focused_field = if self.focused_field == 0 {
-            10
+            12
         } else {
             self.focused_field - 1
         };
@@ -247,91 +274,24 @@ impl HighlightFormWidget {
 
     /// Handle key input for current focused field
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<FormResult> {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        // Note: Most keys are now routed via MenuAction in mod.rs:
+        // - Tab/Shift+Tab → MenuAction::NextField/PreviousField
+        // - Up/Down → MenuAction::NavigateUp/NavigateDown (for field navigation)
+        // - Left/Right → MenuAction::CycleBackward/CycleForward (for dropdowns)
+        // - Esc → MenuAction::Cancel
+        // - Ctrl+A → MenuAction::SelectAll
+        // - Ctrl+C/X/V → MenuAction::Copy/Cut/Paste
+        // - Space/Enter → MenuAction::Toggle/Select (for checkboxes)
+        // - Ctrl+S → MenuAction::Save
+        // - Ctrl+D → MenuAction::Delete (handled via handle_action)
+
+        
 
         match key.code {
-            KeyCode::Tab => {
-                self.focus_next();
-                None
-            }
-            KeyCode::BackTab => {
-                self.focus_prev();
-                None
-            }
-            KeyCode::Up if self.focused_field == 5 => {
-                // Cycle sound dropdown up
-                if self.sound_file_index > 0 {
-                    self.sound_file_index -= 1;
-                    self.update_sound_from_index();
-                }
-                None
-            }
-            KeyCode::Down if self.focused_field == 5 => {
-                // Cycle sound dropdown down
-                if !self.sound_files.is_empty()
-                    && self.sound_file_index + 1 < self.sound_files.len()
-                {
-                    self.sound_file_index += 1;
-                    self.update_sound_from_index();
-                }
-                None
-            }
-            KeyCode::Up => {
-                self.focus_prev();
-                None
-            }
-            KeyCode::Down => {
-                self.focus_next();
-                None
-            }
-            KeyCode::Esc => Some(FormResult::Cancel),
-            KeyCode::Char('s') | KeyCode::Char('S')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                // Ctrl+s to save
-                self.save_internal()
-            }
-            KeyCode::Char(' ') | KeyCode::Enter if (7..=10).contains(&self.focused_field) => {
-                // Toggle checkboxes (fields 7-10)
-                match self.focused_field {
-                    7 => self.bold = !self.bold,
-                    8 => self.color_entire_line = !self.color_entire_line,
-                    9 => self.fast_parse = !self.fast_parse,
-                    10 => self.squelch = !self.squelch,
-                    _ => {}
-                }
-                None
-            }
-            KeyCode::Char('d') | KeyCode::Char('D')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(self.mode, FormMode::Edit(_)) =>
-            {
-                // Ctrl+D to delete in edit mode
-                if let FormMode::Edit(ref name) = self.mode {
-                    Some(FormResult::Delete { name: name.clone() })
-                } else {
-                    None
-                }
-            }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+A to select all in current text field
-                let textarea = match self.focused_field {
-                    0 => &mut self.name,
-                    1 => &mut self.pattern,
-                    2 => &mut self.category,
-                    3 => &mut self.fg_color,
-                    4 => &mut self.bg_color,
-                    5 => &mut self.sound,
-                    6 => &mut self.sound_volume,
-                    _ => return None,
-                };
-                textarea.select_all();
-                None
-            }
             _ => {
                 // Pass key to appropriate text field
                 // Convert KeyEvent for tui-textarea compatibility
-                let rt_key = crate::core::event_bridge::to_textarea_event(key);
+                let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key);
 
                 let handled = match self.focused_field {
                     0 => self.name.input(rt_key),
@@ -345,6 +305,7 @@ impl HighlightFormWidget {
                     4 => self.bg_color.input(rt_key),
                     5 => self.sound.input(rt_key),
                     6 => self.sound_volume.input(rt_key),
+                    11 => self.redirect_to.input(rt_key),
                     _ => false,
                 };
 
@@ -355,6 +316,84 @@ impl HighlightFormWidget {
 
                 None
             }
+        }
+    }
+
+    /// Handle MenuAction (called from mod.rs input routing)
+    pub fn handle_action(&mut self, action: crate::core::menu_actions::MenuAction) -> Option<FormResult> {
+        use crate::core::menu_actions::MenuAction;
+
+        match action {
+            MenuAction::NavigateUp => {
+                // Up/Down now navigate fields (replaced old Up/Down navigation)
+                self.focus_prev();
+                None
+            }
+            MenuAction::NavigateDown => {
+                // Up/Down now navigate fields
+                self.focus_next();
+                None
+            }
+            MenuAction::CycleBackward => {
+                // Left arrow - cycle dropdown backward
+                if self.focused_field == 5 {
+                    // Sound dropdown
+                    if self.sound_file_index > 0 {
+                        self.sound_file_index -= 1;
+                        self.update_sound_from_index();
+                    }
+                } else if self.focused_field == 12 {
+                    // Redirect mode dropdown
+                    if self.redirect_mode_index > 0 {
+                        self.redirect_mode_index -= 1;
+                    }
+                }
+                None
+            }
+            MenuAction::CycleForward => {
+                // Right arrow - cycle dropdown forward
+                if self.focused_field == 5 {
+                    // Sound dropdown
+                    if !self.sound_files.is_empty()
+                        && self.sound_file_index + 1 < self.sound_files.len()
+                    {
+                        self.sound_file_index += 1;
+                        self.update_sound_from_index();
+                    }
+                } else if self.focused_field == 12 {
+                    // Redirect mode dropdown
+                    if self.redirect_mode_index < 2 {
+                        self.redirect_mode_index += 1;
+                    }
+                }
+                None
+            }
+            MenuAction::Select | MenuAction::Toggle => {
+                // Enter/Space - toggle checkboxes
+                if (7..=10).contains(&self.focused_field) {
+                    match self.focused_field {
+                        7 => self.bold = !self.bold,
+                        8 => self.color_entire_line = !self.color_entire_line,
+                        9 => self.fast_parse = !self.fast_parse,
+                        10 => self.squelch = !self.squelch,
+                        _ => {}
+                    }
+                }
+                None
+            }
+            MenuAction::Save => {
+                // Ctrl+S - save the form
+                self.save_internal()
+            }
+            MenuAction::Delete => {
+                // Ctrl+D - delete in edit mode
+                if let FormMode::Edit(ref name) = self.mode {
+                    Some(FormResult::Delete { name: name.clone() })
+                } else {
+                    None
+                }
+            }
+            _ => None
         }
     }
 
@@ -443,6 +482,22 @@ impl HighlightFormWidget {
             }
         };
 
+        // Parse redirect settings
+        let redirect_to = {
+            let redirect_text = self.redirect_to.lines()[0].as_str().trim();
+            if redirect_text.is_empty() || self.redirect_mode_index == 0 {
+                None // Off mode or empty stream
+            } else {
+                Some(redirect_text.to_string())
+            }
+        };
+
+        let redirect_mode = match self.redirect_mode_index {
+            1 => crate::config::RedirectMode::RedirectOnly,
+            2 => crate::config::RedirectMode::RedirectCopy,
+            _ => crate::config::RedirectMode::default(), // Off (shouldn't be used as redirect_to will be None)
+        };
+
         let pattern = HighlightPattern {
             pattern: pattern_text.to_string(),
             category,
@@ -454,6 +509,8 @@ impl HighlightFormWidget {
             squelch: self.squelch,
             sound,
             sound_volume,
+            redirect_to,
+            redirect_mode,
             compiled_regex: None, // Will be compiled when config is loaded
         };
 
@@ -472,7 +529,7 @@ impl HighlightFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let width = 62;
-        let height = 21; // Increased for squelch checkbox
+        let height = 25; // Increased for redirect fields (redirect_to + redirect_mode)
 
         // Center popup initially
         if self.popup_x == 0 && self.popup_y == 0 {
@@ -496,7 +553,7 @@ impl HighlightFormWidget {
         for row in 0..height {
             for col in 0..width {
                 if x + col < area.width && y + row < area.height {
-                    buf[(x + col, y + row)].set_bg(theme.browser_background);
+                    buf[(x + col, y + row)].set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
                 }
             }
         }
@@ -513,8 +570,8 @@ impl HighlightFormWidget {
             if (x + 1 + i as u16) < (x + width) {
                 buf[(x + 1 + i as u16, y)]
                     .set_char(ch)
-                    .set_fg(theme.form_label)
-                    .set_bg(theme.browser_background);
+                    .set_fg(crossterm_bridge::to_ratatui_color(theme.form_label))
+                    .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             }
         }
 
@@ -528,8 +585,8 @@ impl HighlightFormWidget {
         for (i, ch) in footer.chars().enumerate() {
             buf[(footer_x + i as u16, footer_y)]
                 .set_char(ch)
-                .set_fg(theme.text_primary)
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
     }
 
@@ -542,7 +599,7 @@ impl HighlightFormWidget {
         buf: &mut Buffer,
         theme: &crate::theme::AppTheme,
     ) {
-        let border_style = Style::default().fg(theme.form_label);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label));
 
         // Top border
         buf[(x, y)].set_char('┌').set_style(border_style);
@@ -672,7 +729,7 @@ impl HighlightFormWidget {
             // Color preview
             buf[(input_start + 10, current_y)]
                 .set_char(' ')
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             if !fg_text.is_empty() {
                 if let Some(color) = self.parse_and_resolve_color(&fg_text, config) {
                     buf[(input_start + 11, current_y)]
@@ -705,7 +762,7 @@ impl HighlightFormWidget {
             // Color preview
             buf[(input_start + 10, current_y)]
                 .set_char(' ')
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
             if !bg_text.is_empty() {
                 if let Some(color) = self.parse_and_resolve_color(&bg_text, config) {
                     buf[(input_start + 11, current_y)]
@@ -738,117 +795,138 @@ impl HighlightFormWidget {
             buf,
             theme,
         );
+        current_y += 1;
+
+        // Field 11: Redirect To (stream name)
+        Self::render_text_row(
+            focused_field,
+            11,
+            "Redirect To:",
+            &mut self.redirect_to,
+            "stream name",
+            x + 2,
+            current_y,
+            input_start,
+            30,
+            txtbg,
+            buf,
+            theme,
+        );
+        current_y += 1;
+
+        // Field 12: Redirect Mode (dropdown)
+        self.render_redirect_mode_dropdown(x + 2, current_y, input_start, buf, theme);
         current_y += 2;
 
         // Checkboxes (Fields 7-9)
         buf[(x + 2, current_y)]
             .set_char('[')
-            .set_fg(if self.focused_field == 7 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 7 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 3, current_y)]
             .set_char(if self.bold { '✓' } else { ' ' })
-            .set_fg(if self.focused_field == 7 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 7 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 4, current_y)]
             .set_char(']')
-            .set_fg(if self.focused_field == 7 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 7 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         let bold_label = " Bold";
         for (i, ch) in bold_label.chars().enumerate() {
             buf[(x + 5 + i as u16, current_y)]
                 .set_char(ch)
-                .set_fg(if self.focused_field == 7 {
-                    theme.form_label_focused
-                } else {
-                    theme.form_label
-                })
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 7 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            }))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
         current_y += 1;
 
         buf[(x + 2, current_y)]
             .set_char('[')
-            .set_fg(if self.focused_field == 8 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 8 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 3, current_y)]
             .set_char(if self.color_entire_line { '✓' } else { ' ' })
-            .set_fg(if self.focused_field == 8 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 8 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 4, current_y)]
             .set_char(']')
-            .set_fg(if self.focused_field == 8 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 8 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         let cel_label = " Color entire line";
         for (i, ch) in cel_label.chars().enumerate() {
             buf[(x + 5 + i as u16, current_y)]
                 .set_char(ch)
-                .set_fg(if self.focused_field == 8 {
-                    theme.form_label_focused
-                } else {
-                    theme.form_label
-                })
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 8 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            }))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
         current_y += 1;
 
         buf[(x + 2, current_y)]
             .set_char('[')
-            .set_fg(if self.focused_field == 9 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 9 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 3, current_y)]
             .set_char(if self.fast_parse { '✓' } else { ' ' })
-            .set_fg(if self.focused_field == 9 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 9 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 4, current_y)]
             .set_char(']')
-            .set_fg(if self.focused_field == 9 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 9 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         let fp_label = " Fast parse";
         for (i, ch) in fp_label.chars().enumerate() {
             buf[(x + 5 + i as u16, current_y)]
                 .set_char(ch)
-                .set_fg(if self.focused_field == 9 {
-                    theme.form_label_focused
-                } else {
-                    theme.form_label
-                })
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 9 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            }))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         current_y += 1;
@@ -856,38 +934,38 @@ impl HighlightFormWidget {
         // Field 10: Squelch checkbox
         buf[(x + 2, current_y)]
             .set_char('[')
-            .set_fg(if self.focused_field == 10 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 10 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 3, current_y)]
             .set_char(if self.squelch { '✓' } else { ' ' })
-            .set_fg(if self.focused_field == 10 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 10 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         buf[(x + 4, current_y)]
             .set_char(']')
-            .set_fg(if self.focused_field == 10 {
+            .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 10 {
                 theme.form_label_focused
             } else {
                 theme.form_label
-            })
-            .set_bg(theme.browser_background);
+            }))
+            .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         let squelch_label = " Squelch (ignore line)";
         for (i, ch) in squelch_label.chars().enumerate() {
             buf[(x + 5 + i as u16, current_y)]
                 .set_char(ch)
-                .set_fg(if self.focused_field == 10 {
-                    theme.form_label_focused
-                } else {
-                    theme.form_label
-                })
-                .set_bg(theme.browser_background);
+                .set_fg(crossterm_bridge::to_ratatui_color(if self.focused_field == 10 {
+                theme.form_label_focused
+            } else {
+                theme.form_label
+            }))
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
     }
 
@@ -906,18 +984,18 @@ impl HighlightFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let focused = focused_field == field_id;
-        let label_color = if focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if focused {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
 
         // Render label
         for (i, ch) in label.chars().enumerate() {
             buf[(x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Create rect for the TextArea widget
@@ -934,7 +1012,7 @@ impl HighlightFormWidget {
         textarea.set_block(block);
 
         // Set text style
-        textarea.set_style(Style::default().fg(theme.text_primary).bg(bg));
+        textarea.set_style(Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_primary)).bg(bg));
 
         // Render the TextArea widget - it handles cursor positioning and scrolling automatically
         textarea.render(textarea_rect, buf);
@@ -954,18 +1032,18 @@ impl HighlightFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let focused = focused_field == field_id;
-        let label_color = if focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if focused {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
 
         // Render label
         for (i, ch) in label.chars().enumerate() {
             buf[(x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Create rect for the TextArea widget (10 chars wide for color input)
@@ -982,7 +1060,7 @@ impl HighlightFormWidget {
         textarea.set_block(block);
 
         // Set text style
-        textarea.set_style(Style::default().fg(theme.text_primary).bg(bg));
+        textarea.set_style(Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_primary)).bg(bg));
 
         // Render the TextArea widget
         textarea.render(textarea_rect, buf);
@@ -998,11 +1076,11 @@ impl HighlightFormWidget {
         theme: &crate::theme::AppTheme,
     ) {
         let focused = self.focused_field == 5;
-        let label_color = if focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if focused  {
             theme.form_label_focused
         } else {
             theme.form_label
-        };
+        });
 
         // Render label
         let label = "Sound:";
@@ -1010,7 +1088,7 @@ impl HighlightFormWidget {
             buf[(x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(label_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
 
         // Get current value from dropdown index
@@ -1022,16 +1100,62 @@ impl HighlightFormWidget {
             };
 
         // Render current value (highlight if focused, no background)
-        let value_color = if focused {
+        let value_color = crossterm_bridge::to_ratatui_color(if focused {
             theme.form_label_focused
         } else {
             theme.text_disabled
-        };
+        });
         for (i, ch) in current_value.chars().enumerate().take(30) {
             buf[(input_x + i as u16, y)]
                 .set_char(ch)
                 .set_fg(value_color)
-                .set_bg(theme.browser_background);
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
+        }
+    }
+
+    fn render_redirect_mode_dropdown(
+        &self,
+        x: u16,
+        y: u16,
+        input_x: u16,
+        buf: &mut Buffer,
+        theme: &crate::theme::AppTheme,
+    ) {
+        let focused = self.focused_field == 12;
+        let label_color = crossterm_bridge::to_ratatui_color(if focused  {
+            theme.form_label_focused
+        } else {
+            theme.form_label
+        });
+
+        // Render label
+        let label = "Redirect Mode:";
+        for (i, ch) in label.chars().enumerate() {
+            buf[(x + i as u16, y)]
+                .set_char(ch)
+                .set_fg(label_color)
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
+        }
+
+        // Get current value from dropdown index (0=Off, 1=Only, 2=Copy)
+        let current_value = match self.redirect_mode_index {
+            0 => "Off",
+            1 => "Only",
+            2 => "Copy",
+            _ => "Off",
+        };
+
+        // Render current value (highlight if focused, no background)
+        let value_color = crossterm_bridge::to_ratatui_color(if focused {
+            theme.form_label_focused
+        } else {
+            theme.text_disabled
+        });
+        for (i, ch) in current_value.chars().enumerate() {
+            buf[(input_x + i as u16, y)]
+                .set_char(ch)
+                .set_fg(value_color)
+                .set_bg(crossterm_bridge::to_ratatui_color(theme.browser_background));
         }
     }
 

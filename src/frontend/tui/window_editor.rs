@@ -10,6 +10,7 @@
 //! - Section 4: Border (show, color, style, sides)
 //! - Section 5: Special (widget-specific: streams, cursor colors)
 
+use crate::frontend::tui::crossterm_bridge;
 use crate::config::WindowDef;
 use crate::theme::EditorTheme;
 use ratatui::{
@@ -696,12 +697,12 @@ impl WindowEditor {
     }
 
     /// Tab navigation (calls next_field for compatibility)
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         self.next_field();
     }
 
-    /// Shift+Tab navigation (calls previous_field for compatibility)
-    pub fn previous(&mut self) {
+    /// Up arrow navigation (calls previous_field for compatibility)
+    pub fn navigate_up(&mut self) {
         self.previous_field();
     }
 
@@ -1049,7 +1050,7 @@ impl WindowEditor {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .style(Style::default().bg(Color::Black).fg(theme.border_color));
+            .style(Style::default().bg(Color::Black).fg(crossterm_bridge::to_ratatui_color(theme.border_color)));
         block.render(popup_area, buf);
 
         let content = Rect {
@@ -1069,7 +1070,7 @@ impl WindowEditor {
                 resize_x,
                 resize_y,
                 "╬",
-                Style::default().fg(theme.border_color),
+                Style::default().fg(crossterm_bridge::to_ratatui_color(theme.border_color)),
             );
         }
     }
@@ -1121,7 +1122,7 @@ impl WindowEditor {
                 x,
                 y,
                 "Available Sections:",
-                Style::default().fg(theme.label_color),
+                Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color)),
             );
             y += 1; // Normal increment to section list
 
@@ -1132,14 +1133,14 @@ impl WindowEditor {
                 }
 
                 let shortcut = format!("  Ctrl+{}  {}", idx + 1, section.name);
-                buf.set_string(x, y, &shortcut, Style::default().fg(theme.text_color));
+                buf.set_string(x, y, &shortcut, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
                 y += 1;
             }
         } else if let Some(section) = self.sections.get(self.current_section - 1) {
             // Viewing a numbered section (1-5) - render its fields
             // Section header
             let header = format!("--- {} ---", section.name);
-            buf.set_string(x, y, &header, Style::default().fg(theme.section_header_color));
+            buf.set_string(x, y, &header, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.section_header_color)));
             y += 1;
 
             // Render only fields in the current section
@@ -1265,11 +1266,11 @@ impl WindowEditor {
         theme: &EditorTheme,
         is_current: bool,
     ) {
-        let label_color = if is_current {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         let prefix = if is_current { "→ " } else { "  " };
         buf.set_string(x, y, prefix, Style::default().fg(label_color));
@@ -1280,11 +1281,11 @@ impl WindowEditor {
         } else {
             &textarea.lines()[0]
         };
-        let text_color = if is_current {
+        let text_color = crossterm_bridge::to_ratatui_color(if is_current  {
             theme.cursor_color
         } else {
             theme.text_color
-        };
+        });
         let input_x = x + 2 + label.len() as u16 + 1;
         buf.set_string(input_x, y, value, Style::default().fg(text_color));
     }
@@ -1324,11 +1325,11 @@ impl WindowEditor {
         theme: &EditorTheme,
         is_current: bool,
     ) {
-        let label_color = if is_current {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         let prefix = if is_current { "→ " } else { "  " };
         buf.set_string(x, y, prefix, Style::default().fg(label_color));
@@ -1350,11 +1351,11 @@ impl WindowEditor {
         theme: &EditorTheme,
         is_current: bool,
     ) {
-        let label_color = if is_current {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         let prefix = if is_current { "→ " } else { "  " };
         buf.set_string(x, y, prefix, Style::default().fg(label_color));
@@ -1362,7 +1363,7 @@ impl WindowEditor {
 
         let display = format!("{} ▼", value);
         let input_x = x + 2 + label.len() as u16 + 1;
-        buf.set_string(input_x, y, &display, Style::default().fg(theme.text_color));
+        buf.set_string(input_x, y, &display, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
     }
 
     fn render_textarea(
@@ -1378,11 +1379,11 @@ impl WindowEditor {
         theme: &EditorTheme,
     ) {
         let is_focused = self.focused_field == field_id;
-        let label_color = if is_focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_focused  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         buf.set_string(x, y, label, Style::default().fg(label_color));
         let input_x = x + label.len() as u16 + spacing;
@@ -1393,11 +1394,11 @@ impl WindowEditor {
         } else {
             &textarea.lines()[0]
         };
-        let text_color = if is_focused {
+        let text_color = crossterm_bridge::to_ratatui_color(if is_focused  {
             theme.cursor_color
         } else {
             theme.text_color
-        };
+        });
         buf.set_string(input_x, y, value, Style::default().fg(text_color));
     }
 
@@ -1446,7 +1447,7 @@ impl WindowEditor {
             None
         };
 
-        buf.set_string(x, y, "[", Style::default().fg(theme.label_color));
+        buf.set_string(x, y, "[", Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color)));
         if let Some(color) = color {
             let style = Style::default().bg(color);
             buf[(x + 1, y)].set_char(' ').set_style(style);
@@ -1455,7 +1456,7 @@ impl WindowEditor {
             buf[(x + 1, y)].set_char(' ').reset();
             buf[(x + 2, y)].set_char(' ').reset();
         }
-        buf.set_string(x + 3, y, "]", Style::default().fg(theme.label_color));
+        buf.set_string(x + 3, y, "]", Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color)));
     }
 
     fn render_checkbox(
@@ -1469,11 +1470,11 @@ impl WindowEditor {
         theme: &EditorTheme,
     ) {
         let is_focused = self.focused_field == field_id;
-        let label_color = if is_focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_focused  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         buf.set_string(x, y, label, Style::default().fg(label_color));
         let checkbox = if checked { "[✓]" } else { "[ ]" };
@@ -1492,16 +1493,16 @@ impl WindowEditor {
         theme: &EditorTheme,
     ) {
         let is_focused = self.focused_field == field_id;
-        let label_color = if is_focused {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_focused  {
             theme.focused_label_color
         } else {
             theme.label_color
-        };
+        });
 
         buf.set_string(x, y, label, Style::default().fg(label_color));
         let input_x = x + label.len() as u16 + 1;
         let display = format!("{} ▼", value);
-        buf.set_string(input_x, y, &display, Style::default().fg(theme.text_color));
+        buf.set_string(input_x, y, &display, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
     }
 }
 

@@ -335,17 +335,22 @@ impl PopupMenu {
 
     /// Check if a mouse click at (x, y) hits a menu item
     /// Returns the index of the clicked item if any
-    pub fn check_click(&self, x: u16, y: u16, area: ratatui::layout::Rect) -> Option<usize> {
+    ///
+    /// # Arguments
+    /// * `area` - Tuple of (x, y, width, height) representing the menu area
+    pub fn check_click(&self, x: u16, y: u16, area: (u16, u16, u16, u16)) -> Option<usize> {
+        let (area_x, area_y, area_width, area_height) = area;
+
         // Check if click is within the menu area
-        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+        if x < area_x || x >= area_x + area_width || y < area_y || y >= area_y + area_height {
             return None;
         }
 
         // Calculate which item was clicked (accounting for border and title)
-        let relative_y = (y - area.y) as usize;
+        let relative_y = (y - area_y) as usize;
 
         // Border takes 1 row at top and bottom
-        if relative_y == 0 || relative_y >= area.height as usize - 1 {
+        if relative_y == 0 || relative_y >= area_height as usize - 1 {
             return None; // Clicked on border
         }
 

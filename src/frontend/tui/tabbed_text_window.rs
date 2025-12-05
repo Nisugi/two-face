@@ -11,6 +11,8 @@ use ratatui::{
     widgets::{Block, BorderType, Widget as RatatuiWidget},
 };
 
+use super::crossterm_bridge;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TabBarPosition {
     Top,
@@ -459,7 +461,7 @@ impl TabbedTextWindow {
                 "thick" => BorderType::Thick,
                 _ => BorderType::Plain,
             };
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             block = block.borders(borders).border_type(border_type);
             block.inner(outer)
         } else {
@@ -511,7 +513,7 @@ impl TabbedTextWindow {
                 _ => BorderType::Plain,
             };
 
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
 
             block = block.borders(borders).border_type(border_type);
 

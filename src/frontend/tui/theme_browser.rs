@@ -65,14 +65,14 @@ impl ThemeBrowser {
         }
     }
 
-    pub fn previous(&mut self) {
+    pub fn navigate_up(&mut self) {
         if !self.themes.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
     }
 
-    pub fn next(&mut self) {
+    pub fn navigate_down(&mut self) {
         if self.selected_index + 1 < self.themes.len() {
             self.selected_index += 1;
             self.adjust_scroll();
@@ -176,6 +176,24 @@ impl ThemeBrowser {
         self.adjust_scroll();
 
         Ok(())
+    }
+
+    /// Move to next page (alias for page_down)
+    pub fn next_page(&mut self) {
+        self.page_down();
+    }
+
+    /// Move to previous page (alias for page_up)
+    pub fn previous_page(&mut self) {
+        self.page_up();
+    }
+
+    /// Get the selected theme ID
+    pub fn get_selected(&self) -> Option<String> {
+        if self.themes.is_empty() || self.selected_index >= self.themes.len() {
+            return None;
+        }
+        Some(self.themes[self.selected_index].0.clone())
     }
 }
 

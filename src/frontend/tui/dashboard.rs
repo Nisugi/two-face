@@ -11,6 +11,8 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+use super::crossterm_bridge;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DashboardLayout {
     Horizontal,
@@ -143,7 +145,7 @@ impl Dashboard {
                 _ => BorderType::Plain,
             };
 
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
 
             block = block.borders(borders).border_type(border_type);
 

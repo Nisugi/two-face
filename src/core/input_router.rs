@@ -8,10 +8,10 @@
 use crate::config::Config;
 use crate::core::menu_actions::{ActionContext, MenuAction};
 use crate::data::ui_state::InputMode;
-use crossterm::event::KeyEvent;
+use crate::frontend::common::KeyEvent;
 
 /// Route a key event to a MenuAction based on current context
-pub fn route_input(key: KeyEvent, mode: &InputMode, config: &Config) -> MenuAction {
+pub fn route_input(key: &KeyEvent, mode: &InputMode, config: &Config) -> MenuAction {
     // Determine the action context based on InputMode
     let context = get_action_context(mode);
 
@@ -67,7 +67,7 @@ pub fn should_use_menu_keybinds(mode: &InputMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crate::frontend::common::{KeyCode, KeyModifiers};
 
     #[test]
     fn test_context_mapping() {

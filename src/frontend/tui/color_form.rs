@@ -4,7 +4,8 @@
 //! color editing feels consistent with other configuration dialogs.
 
 use crate::config::PaletteColor;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::frontend::tui::crossterm_bridge;
+use crossterm::event::KeyEvent;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -107,54 +108,22 @@ impl ColorForm {
     }
 
     pub fn handle_input(&mut self, key_event: KeyEvent) -> Option<FormAction> {
+        // Note: Tab, Shift+Tab, Esc, Ctrl+A, Ctrl+C/X/V, and Space (toggle) are now
+        // routed via MenuAction in mod.rs. This method only handles text input and
+        // any form-specific logic not covered by MenuActions.
+
         match key_event.code {
-            KeyCode::Esc => {
-                return Some(FormAction::Cancel);
-            }
-            KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+A to select all in current text field
-                let textarea = match self.focused_field {
-                    0 => &mut self.name,
-                    1 => &mut self.color,
-                    2 => &mut self.category,
-                    _ => return None,
-                };
-                textarea.select_all();
-                return None;
-            }
-            KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.save_internal();
-            }
-            KeyCode::BackTab => {
-                self.previous_field();
-                return None;
-            }
-            KeyCode::Tab => {
-                self.next_field();
-                return None;
-            }
-            KeyCode::Enter => {
-                if self.focused_field == 3 {
-                    // Toggle favorite on Enter when focused
-                    self.favorite = !self.favorite;
-                    return None;
-                } else if self.focused_field <= 2 {
-                    // In text field - move to next field
-                    self.next_field();
-                    return None;
-                } else {
-                    // On favorite or beyond - save the form
-                    return self.save_internal();
-                }
-            }
-            KeyCode::Char(' ') if self.focused_field == 3 => {
-                // Space toggles favorite
-                self.favorite = !self.favorite;
-                return None;
-            }
+            // All the previously hardcoded keys are now handled by MenuAction routing in mod.rs:
+            // - Tab/BackTab → MenuAction::NextField/PreviousField
+            // - Esc → MenuAction::Cancel
+            // - Ctrl+A → MenuAction::SelectAll
+            // - Ctrl+C/X/V → MenuAction::Copy/Cut/Paste
+            // - Space → MenuAction::Toggle (for checkbox)
+            // - Ctrl+S → MenuAction::Save (handled below via handle_action)
+            // - Enter → MenuAction::Select (handled below via handle_action)
             _ => {
                 // Pass to the focused textarea (convert KeyEvent for tui-textarea compatibility)
-                let rt_key = crate::core::event_bridge::to_textarea_event(key_event);
+                let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key_event);
                 match self.focused_field {
                     0 => {
                         self.name.input(rt_key);
@@ -171,6 +140,30 @@ impl ColorForm {
         }
 
         None
+    }
+
+    /// Handle MenuAction (called from mod.rs input routing)
+    pub fn handle_action(&mut self, action: crate::core::menu_actions::MenuAction) -> Option<FormAction> {
+        use crate::core::menu_actions::MenuAction;
+
+        match action {
+            MenuAction::Select => {
+                // Enter key - toggle if on checkbox, otherwise do nothing (field navigation handled elsewhere)
+                if self.focused_field == 3 {
+                    self.favorite = !self.favorite;
+                    None
+                } else {
+                    // On text fields, Enter doesn't do anything special
+                    // (NextField is handled by MenuAction::NextField routing)
+                    None
+                }
+            }
+            MenuAction::Save => {
+                // Ctrl+S - save the form
+                self.save_internal()
+            }
+            _ => None
+        }
     }
 
     fn next_field(&mut self) {
@@ -327,13 +320,13 @@ impl ColorForm {
         for row in self.popup_y..self.popup_y + popup_height {
             for col in self.popup_x..self.popup_x + popup_width {
                 if col < area.width && row < area.height {
-                    buf.set_string(col, row, " ", Style::default().bg(theme.browser_background));
+                    buf.set_string(col, row, " ", Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
                 }
             }
         }
 
         // Draw border
-        let border_style = Style::default().fg(theme.form_label);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label));
 
         // Top border
         let top = format!("┌{}┐", "─".repeat(popup_width as usize - 2));
@@ -474,10 +467,10 @@ impl ColorForm {
         let label_para = Paragraph::new(Line::from(label_span));
         RatatuiWidget::render(label_para, label_area, buf);
 
-        let base_style = Style::default().fg(theme.form_label).bg(textarea_bg);
+        let base_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label)).bg(textarea_bg);
         let focused_style = Style::default()
-            .fg(theme.browser_background)
-            .bg(theme.form_label_focused)
+            .fg(crossterm_bridge::to_ratatui_color(theme.browser_background))
+            .bg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
             .add_modifier(Modifier::BOLD);
         textarea.set_style(if focused_field == field_id {
             focused_style
@@ -486,8 +479,8 @@ impl ColorForm {
         });
         textarea.set_cursor_style(
             Style::default()
-                .bg(theme.text_primary)
-                .fg(theme.browser_background),
+                .bg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
         );
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_style(Style::default().fg(Color::Gray).bg(textarea_bg));
@@ -531,10 +524,10 @@ impl ColorForm {
         let label_para = Paragraph::new(Line::from(label_span));
         RatatuiWidget::render(label_para, label_area, buf);
 
-        let base_style = Style::default().fg(theme.form_label).bg(textarea_bg);
+        let base_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label)).bg(textarea_bg);
         let focused_style = Style::default()
-            .fg(theme.browser_background)
-            .bg(theme.form_label_focused)
+            .fg(crossterm_bridge::to_ratatui_color(theme.browser_background))
+            .bg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
             .add_modifier(Modifier::BOLD);
         textarea.set_style(if focused_field == field_id {
             focused_style
@@ -543,8 +536,8 @@ impl ColorForm {
         });
         textarea.set_cursor_style(
             Style::default()
-                .bg(theme.text_primary)
-                .fg(theme.browser_background),
+                .bg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                .fg(crossterm_bridge::to_ratatui_color(theme.browser_background)),
         );
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_style(Style::default().fg(Color::Gray).bg(textarea_bg));
@@ -600,7 +593,7 @@ impl ColorForm {
         let label_para = Paragraph::new(Line::from(label_span));
         RatatuiWidget::render(label_para, label_area, buf);
 
-        let base_style = Style::default().fg(theme.form_label).bg(textarea_bg);
+        let base_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label)).bg(textarea_bg);
 
         let val_text = if value { "[✓]" } else { "[ ]" };
         buf.set_string(x + 10, y, val_text, base_style);

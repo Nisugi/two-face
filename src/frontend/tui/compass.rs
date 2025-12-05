@@ -12,6 +12,8 @@ use ratatui::{
 };
 use std::collections::HashSet;
 
+use super::crossterm_bridge;
+
 const CONTENT_WIDTH: u16 = 7;
 const CONTENT_HEIGHT: u16 = 3;
 
@@ -147,7 +149,7 @@ impl Compass {
         }
 
         if self.show_border {
-            let borders = crate::config::parse_border_sides(&self.border_sides);
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
             block = block.borders(borders);
 
             if let Some(ref style) = self.border_style {

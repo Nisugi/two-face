@@ -3,6 +3,7 @@
 //! Provides ordering, optional alternate text, and per-row progress bars, which
 //! makes it a handy building block for several specialized widgets.
 
+use crate::frontend::tui::crossterm_bridge;
 use super::progress_bar::ProgressBar;
 use ratatui::{
     buffer::Buffer,
@@ -258,7 +259,7 @@ impl ScrollableContainer {
 
         // Determine which borders to show
         let borders = if self.show_border {
-            crate::config::parse_border_sides(&self.border_sides)
+            crossterm_bridge::to_ratatui_borders(&self.border_sides)
         } else {
             Borders::NONE
         };

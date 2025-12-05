@@ -3,14 +3,15 @@
 //! This module defines the `Frontend` trait that both TUI and GUI frontends must implement.
 //! It provides a unified interface for event polling, rendering, and cleanup.
 
+pub mod common;
 pub mod events;
 pub mod gui;
 pub mod tui;
 
 use anyhow::Result;
+pub use common::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 pub use events::FrontendEvent;
 pub use gui::EguiApp;
-pub use tui::TuiFrontend;
 
 /// Frontend trait - must be implemented by both TUI and GUI frontends
 ///

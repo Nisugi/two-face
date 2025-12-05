@@ -3,275 +3,24 @@
 //! Presents meta fields plus grouped color sections, supports dragging, and
 //! serializes/deserializes `ThemeData` structs for persistence.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::frontend::tui::crossterm_bridge;
+use crossterm::event::KeyEvent;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::Widget as RatatuiWidget,
 };
 use tui_textarea::TextArea;
+
+// Re-export the shared ThemeData from the theme module
+pub use crate::theme::loader::ThemeData;
 
 /// Result of theme editor form submission
 #[derive(Debug, Clone)]
 pub enum ThemeEditorResult {
     Save(ThemeData),
     Cancel,
-}
-
-/// Theme data structure for editing
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ThemeData {
-    pub name: String,
-    pub description: String,
-
-    // Window colors
-    pub window_border: String,
-    pub window_border_focused: String,
-    pub window_background: String,
-    pub window_title: String,
-
-    // Text colors
-    pub text_primary: String,
-    pub text_secondary: String,
-    pub text_disabled: String,
-    pub text_selected: String,
-
-    // Browser/List colors
-    pub browser_border: String,
-    pub browser_title: String,
-    pub browser_item_normal: String,
-    pub browser_item_selected: String,
-    pub browser_item_focused: String,
-    pub browser_background: String,
-    pub browser_scrollbar: String,
-
-    // Form colors
-    pub form_border: String,
-    pub form_label: String,
-    pub form_label_focused: String,
-    pub form_field_background: String,
-    pub form_field_text: String,
-    pub form_checkbox_checked: String,
-    pub form_checkbox_unchecked: String,
-    pub form_error: String,
-
-    // Editor colors
-    pub editor_border: String,
-    pub editor_label: String,
-    pub editor_label_focused: String,
-    pub editor_text: String,
-    pub editor_cursor: String,
-    pub editor_status: String,
-    pub editor_background: String,
-
-    // Menu colors
-    pub menu_border: String,
-    pub menu_background: String,
-    pub menu_item_normal: String,
-    pub menu_item_selected: String,
-    // menu_item_disabled: String,
-    pub menu_separator: String,
-
-    // Status bar colors
-    pub status_background: String,
-    // status_text: String,
-    // status_highlight: String,
-
-    // Button colors
-    pub button_normal: String,
-    // button_focused: String,
-    pub button_disabled: String,
-    // Game-specific colors
-    // health_bar: String,
-    // mana_bar: String,
-    // stamina_bar: String,
-    // experience_bar: String,
-    // progress_bar_fill: String,
-    // progress_bar_background: String,
-    // countdown_text: String,
-    // countdown_background: String,
-}
-
-impl Default for ThemeData {
-    fn default() -> Self {
-        Self::from_theme(&crate::theme::ThemePresets::dark())
-    }
-}
-
-impl ThemeData {
-    /// Create ThemeData from an existing AppTheme
-    pub fn from_theme(theme: &crate::theme::AppTheme) -> Self {
-        Self {
-            name: theme.name.clone(),
-            description: theme.description.clone(),
-
-            window_border: Self::color_to_hex(&theme.window_border),
-            window_border_focused: Self::color_to_hex(&theme.window_border_focused),
-            window_background: Self::color_to_hex(&theme.window_background),
-            window_title: Self::color_to_hex(&theme.window_title),
-
-            text_primary: Self::color_to_hex(&theme.text_primary),
-            text_secondary: Self::color_to_hex(&theme.text_secondary),
-            text_disabled: Self::color_to_hex(&theme.text_disabled),
-            text_selected: Self::color_to_hex(&theme.text_selected),
-
-            browser_border: Self::color_to_hex(&theme.browser_border),
-            browser_title: Self::color_to_hex(&theme.browser_title),
-            browser_item_normal: Self::color_to_hex(&theme.browser_item_normal),
-            browser_item_selected: Self::color_to_hex(&theme.browser_item_selected),
-            browser_item_focused: Self::color_to_hex(&theme.browser_item_focused),
-            browser_background: Self::color_to_hex(&theme.browser_background),
-            browser_scrollbar: Self::color_to_hex(&theme.browser_scrollbar),
-
-            form_border: Self::color_to_hex(&theme.form_border),
-            form_label: Self::color_to_hex(&theme.form_label),
-            form_label_focused: Self::color_to_hex(&theme.form_label_focused),
-            form_field_background: Self::color_to_hex(&theme.form_field_background),
-            form_field_text: Self::color_to_hex(&theme.form_field_text),
-            form_checkbox_checked: Self::color_to_hex(&theme.form_checkbox_checked),
-            form_checkbox_unchecked: Self::color_to_hex(&theme.form_checkbox_unchecked),
-            form_error: Self::color_to_hex(&theme.form_error),
-
-            editor_border: Self::color_to_hex(&theme.editor_border),
-            editor_label: Self::color_to_hex(&theme.editor_label),
-            editor_label_focused: Self::color_to_hex(&theme.editor_label_focused),
-            editor_text: Self::color_to_hex(&theme.editor_text),
-            editor_cursor: Self::color_to_hex(&theme.editor_cursor),
-            editor_status: Self::color_to_hex(&theme.editor_status),
-            editor_background: Self::color_to_hex(&theme.editor_background),
-
-            menu_border: Self::color_to_hex(&theme.menu_border),
-            menu_background: Self::color_to_hex(&theme.menu_background),
-            menu_item_normal: Self::color_to_hex(&theme.menu_item_normal),
-            menu_item_selected: Self::color_to_hex(&theme.menu_item_selected),
-            // menu_item_disabled: Self::color_to_hex(&// theme.menu_item_disabled),
-            menu_separator: Self::color_to_hex(&theme.menu_separator),
-
-            status_background: Self::color_to_hex(&theme.status_background),
-            // status_text: Self::color_to_hex(&// theme.status_text),
-            // status_highlight: Self::color_to_hex(&// theme.status_highlight),
-            button_normal: Self::color_to_hex(&theme.button_normal),
-            // button_focused: Self::color_to_hex(&// theme.button_focused),
-            button_disabled: Self::color_to_hex(&theme.button_disabled),
-            // health_bar: Self::color_to_hex(&// theme.health_bar),
-            // mana_bar: Self::color_to_hex(&// theme.mana_bar),
-            // stamina_bar: Self::color_to_hex(&// theme.stamina_bar),
-            // experience_bar: Self::color_to_hex(&// theme.experience_bar),
-            // progress_bar_fill: Self::color_to_hex(&// theme.progress_bar_fill),
-            // progress_bar_background: Self::color_to_hex(&// theme.progress_bar_background),
-            // countdown_text: Self::color_to_hex(&// theme.countdown_text),
-            // countdown_background: Self::color_to_hex(&// theme.countdown_background),
-        }
-    }
-
-    /// Convert ratatui Color to hex string
-    fn color_to_hex(color: &Color) -> String {
-        match color {
-            Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
-            Color::Reset => "#000000".to_string(), // Default to black
-            Color::Black => "#000000".to_string(),
-            Color::Red => "#ff0000".to_string(),
-            Color::Green => "#00ff00".to_string(),
-            Color::Yellow => "#ffff00".to_string(),
-            Color::Blue => "#0000ff".to_string(),
-            Color::Magenta => "#ff00ff".to_string(),
-            Color::Cyan => "#00ffff".to_string(),
-            Color::Gray => "#808080".to_string(),
-            Color::DarkGray => "#404040".to_string(),
-            Color::LightRed => "#ff8080".to_string(),
-            Color::LightGreen => "#80ff80".to_string(),
-            Color::LightYellow => "#ffff80".to_string(),
-            Color::LightBlue => "#8080ff".to_string(),
-            Color::LightMagenta => "#ff80ff".to_string(),
-            Color::LightCyan => "#80ffff".to_string(),
-            Color::White => "#ffffff".to_string(),
-            _ => "#000000".to_string(),
-        }
-    }
-
-    /// Convert to AppTheme
-    pub fn to_app_theme(&self) -> Option<crate::theme::AppTheme> {
-        // Parse all colors
-        let window_border = Self::parse_color(&self.window_border)?;
-        let window_border_focused = Self::parse_color(&self.window_border_focused)?;
-        let window_background = Self::parse_color(&self.window_background)?;
-        let window_title = Self::parse_color(&self.window_title)?;
-
-        // ... (would parse all other colors)
-
-        Some(crate::theme::AppTheme {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            window_border,
-            window_border_focused,
-            window_background,
-            window_title,
-            // ... (would set all other fields)
-            ..crate::theme::ThemePresets::dark() // Fallback for now
-        })
-    }
-
-    fn parse_color(hex: &str) -> Option<Color> {
-        let hex = hex.trim_start_matches('#');
-        if hex.len() != 6 {
-            return None;
-        }
-
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-
-        Some(Color::Rgb(r, g, b))
-    }
-
-    /// Save this theme to a TOML file in ~/.two-face/themes/
-    pub fn save_to_file(&self, config_base: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
-        use std::fs;
-        use std::path::PathBuf;
-
-        // Determine themes directory path
-        let themes_dir = if let Some(base) = config_base {
-            PathBuf::from(base).join("themes")
-        } else {
-            let home = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-            home.join(".two-face").join("themes")
-        };
-
-        // Create themes directory if it doesn't exist
-        fs::create_dir_all(&themes_dir)?;
-
-        // Sanitize filename (remove invalid characters)
-        let filename = self
-            .name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-
-        let filepath = themes_dir.join(format!("{}.toml", filename));
-
-        // Serialize to TOML
-        let toml_string = toml::to_string_pretty(self)?;
-
-        // Write to file
-        fs::write(&filepath, toml_string)?;
-
-        Ok(filepath)
-    }
-
-    /// Load a theme from a TOML file
-    pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        let theme_data: ThemeData = toml::from_str(&contents)?;
-        Ok(theme_data)
-    }
 }
 
 pub struct ThemeEditor {
@@ -512,43 +261,52 @@ impl ThemeEditor {
     }
 
     pub fn handle_input(&mut self, key_event: KeyEvent) -> Option<ThemeEditorResult> {
-        match key_event.code {
-            KeyCode::Esc => {
-                return Some(ThemeEditorResult::Cancel);
+        // Note: All navigation keys (Tab, BackTab, Esc, Ctrl+Enter, Up, Down, Ctrl+S)
+        // are now routed via MenuAction in mod.rs. This method only handles text input.
+
+        // Forward to active field (convert KeyEvent for tui-textarea compatibility)
+        let rt_key = crate::frontend::tui::textarea_bridge::to_textarea_event(key_event);
+        if self.current_section == 0 {
+            // Meta fields (name/description)
+            if self.current_field == 0 {
+                self.name.input(rt_key);
+            } else if self.current_field == 1 {
+                self.description.input(rt_key);
             }
-            KeyCode::Enter if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Save theme - collect all edited values
-                return Some(ThemeEditorResult::Save(self.collect_theme_data()));
-            }
-            KeyCode::Tab => {
-                self.next_field();
-            }
-            KeyCode::BackTab => {
-                self.previous_field();
-            }
-            _ => {
-                // Forward to active field (convert KeyEvent for tui-textarea compatibility)
-                let rt_key = crate::core::event_bridge::to_textarea_event(key_event);
-                if self.current_section == 0 {
-                    // Meta fields (name/description)
-                    if self.current_field == 0 {
-                        self.name.input(rt_key);
-                    } else if self.current_field == 1 {
-                        self.description.input(rt_key);
-                    }
-                } else {
-                    // Color fields
-                    let section_idx = self.current_section - 1;
-                    if let Some(section) = self.color_sections.get_mut(section_idx) {
-                        if let Some(field) = section.fields.get_mut(self.current_field) {
-                            field.textarea.input(rt_key);
-                        }
-                    }
+        } else {
+            // Color fields
+            let section_idx = self.current_section - 1;
+            if let Some(section) = self.color_sections.get_mut(section_idx) {
+                if let Some(field) = section.fields.get_mut(self.current_field) {
+                    field.textarea.input(rt_key);
                 }
             }
         }
 
         None
+    }
+
+    /// Handle MenuAction (called from mod.rs input routing)
+    pub fn handle_action(&mut self, action: crate::core::menu_actions::MenuAction) -> Option<ThemeEditorResult> {
+        use crate::core::menu_actions::MenuAction;
+
+        match action {
+            MenuAction::NavigateUp => {
+                // Up arrow - navigate to previous field
+                self.previous_field();
+                None
+            }
+            MenuAction::NavigateDown => {
+                // Down arrow - navigate to next field
+                self.next_field();
+                None
+            }
+            MenuAction::Save => {
+                // Ctrl+S - save theme
+                Some(ThemeEditorResult::Save(self.collect_theme_data()))
+            }
+            _ => None
+        }
     }
 
     /// Collect all edited values into a ThemeData struct
@@ -624,7 +382,15 @@ impl ThemeEditor {
         data
     }
 
-    fn next_field(&mut self) {
+    /// Jump to a specific section (0 = meta, 1+ = color sections)
+    pub fn jump_to_section(&mut self, section: usize) {
+        if section <= self.color_sections.len() {
+            self.current_section = section;
+            self.current_field = 0;
+        }
+    }
+
+    pub fn next_field(&mut self) {
         if self.current_section == 0 {
             // Meta section (name, description)
             if self.current_field == 0 {
@@ -654,7 +420,7 @@ impl ThemeEditor {
         }
     }
 
-    fn previous_field(&mut self) {
+    pub fn previous_field(&mut self) {
         if self.current_field > 0 {
             self.current_field -= 1;
         } else {
@@ -710,7 +476,7 @@ impl ThemeEditor {
                 if col < area.width && row < area.height {
                     buf[(col, row)]
                         .set_char(' ')
-                        .set_bg(theme.form_field_background);
+                        .set_bg(crossterm_bridge::to_ratatui_color(theme.form_field_background));
                 }
             }
         }
@@ -725,7 +491,7 @@ impl ThemeEditor {
             y,
             title,
             Style::default()
-                .fg(theme.form_label)
+                .fg(crossterm_bridge::to_ratatui_color(theme.form_label))
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -735,7 +501,7 @@ impl ThemeEditor {
             x + 2,
             y + height - 1,
             footer,
-            Style::default().fg(theme.text_disabled),
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_disabled)),
         );
 
         // Render fields
@@ -782,7 +548,7 @@ impl ThemeEditor {
                 current_y,
                 format!("--- {} ---", section_name),
                 Style::default()
-                    .fg(theme.browser_title)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_title))
                     .add_modifier(Modifier::BOLD),
             );
             current_y += 1;
@@ -807,10 +573,10 @@ impl ThemeEditor {
                 // Label
                 let label_style = if is_focused {
                     Style::default()
-                        .fg(theme.form_label_focused)
+                        .fg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.form_label)
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label))
                 };
                 buf.set_string(
                     x + 4,
@@ -829,10 +595,10 @@ impl ThemeEditor {
                 // Value with focus indicator
                 let value_style = if is_focused {
                     Style::default()
-                        .fg(theme.form_field_text)
-                        .bg(theme.form_field_background)
+                        .fg(crossterm_bridge::to_ratatui_color(theme.form_field_text))
+                        .bg(crossterm_bridge::to_ratatui_color(theme.form_field_background))
                 } else {
-                    Style::default().fg(theme.text_primary)
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
                 };
                 buf.set_string(x + 26, current_y, format!("{:<10}", value), value_style);
 
@@ -841,7 +607,7 @@ impl ThemeEditor {
                     for offset in 0..3 {
                         buf[(x + 38 + offset, current_y)]
                             .set_char(' ')
-                            .set_bg(color);
+                            .set_bg(crossterm_bridge::to_ratatui_color(color));
                     }
                 }
 
@@ -854,7 +620,7 @@ impl ThemeEditor {
                 x + 2,
                 current_y,
                 "Available Sections:",
-                Style::default().fg(theme.text_secondary),
+                Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_secondary)),
             );
             current_y += 1;
 
@@ -863,7 +629,7 @@ impl ThemeEditor {
                     x + 4,
                     current_y,
                     format!("{}. {}", i + 1, section.name),
-                    Style::default().fg(theme.text_primary),
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_primary)),
                 );
                 current_y += 1;
             }
@@ -879,7 +645,7 @@ impl ThemeEditor {
         buf: &mut Buffer,
         theme: &crate::theme::AppTheme,
     ) {
-        let border_style = Style::default().fg(theme.form_border);
+        let border_style = Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_border));
 
         // Top
         buf[(x, y)].set_char('┌').set_style(border_style);
@@ -923,9 +689,9 @@ impl ThemeEditor {
         focused: bool,
     ) {
         let label_style = if focused {
-            Style::default().fg(theme.form_label_focused)
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
         } else {
-            Style::default().fg(theme.form_label)
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.form_label))
         };
 
         buf.set_string(x, y, label, label_style);
@@ -939,10 +705,10 @@ impl ThemeEditor {
 
         textarea.set_style(
             Style::default()
-                .fg(theme.form_field_text)
-                .bg(theme.form_field_background),
+                .fg(crossterm_bridge::to_ratatui_color(theme.form_field_text))
+                .bg(crossterm_bridge::to_ratatui_color(theme.form_field_background)),
         );
-        textarea.set_cursor_style(Style::default().bg(theme.editor_cursor));
+        textarea.set_cursor_style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.editor_cursor)));
         RatatuiWidget::render(&*textarea, input_area, buf);
     }
 }

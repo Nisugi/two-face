@@ -33,6 +33,55 @@ pub struct DirectConnectConfig {
     pub data_dir: PathBuf,
 }
 
+impl DirectConnectConfig {
+    /// Build DirectConnectConfig from CLI arguments and config
+    pub fn from_cli(
+        direct_enabled: bool,
+        direct_account: Option<String>,
+        direct_password: Option<String>,
+        direct_character: Option<String>,
+        character_fallback: Option<String>,
+        direct_game: Option<&str>,
+        config: &crate::config::Config,
+    ) -> Result<Option<Self>> {
+        
+
+        if !direct_enabled {
+            return Ok(None);
+        }
+
+        let account = direct_account
+            .context("`--direct-account` is required when using --direct")?;
+
+        let password = match direct_password {
+            Some(pwd) => pwd,
+            None => {
+                let prompt = format!("Password for account {}: ", account);
+                rpassword::prompt_password(prompt).context("Failed to read password")?
+            }
+        };
+
+        let character = direct_character
+            .or(character_fallback)
+            .or_else(|| config.connection.character.clone())
+            .context(
+                "Specify --direct-character, --character, or set connection.character in config for direct mode",
+            )?;
+
+        let game_code = direct_game.unwrap_or("GS3").to_string();
+
+        let data_dir = crate::config::Config::base_dir()?;
+
+        Ok(Some(Self {
+            account,
+            password,
+            character,
+            game_code,
+            data_dir,
+        }))
+    }
+}
+
 /// Direct connector that authenticates via eAccess and establishes the game socket.
 pub struct DirectConnection;
 
@@ -159,7 +208,7 @@ async fn run_stream(
 
 async fn send_pid_handshake(stream: &mut TcpStream) -> Result<()> {
     let pid = std::process::id();
-    let msg = format!("SET_FRONTEND_PID:{}\n", pid);
+    let msg = format!("SET_FRONTEND_PID {}\n", pid);
     stream.write_all(msg.as_bytes()).await?;
     stream.flush().await?;
     debug!("Sent frontend PID: {}", pid);

@@ -2,6 +2,7 @@
 //!
 //! Provides keyboard navigation, click hit-testing, and theme-aware rendering.
 
+use crate::frontend::tui::crossterm_bridge;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -131,12 +132,12 @@ impl PopupMenu {
         for (idx, item) in self.items.iter().enumerate() {
             let style = if idx == self.selected {
                 Style::default()
-                    .fg(theme.browser_background)
-                    .bg(theme.form_label_focused)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.browser_background))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.form_label_focused))
             } else {
                 Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.browser_background)
+                    .fg(crossterm_bridge::to_ratatui_color(theme.text_primary))
+                    .bg(crossterm_bridge::to_ratatui_color(theme.browser_background))
             };
 
             let line = Line::from(vec![
@@ -150,8 +151,8 @@ impl PopupMenu {
         // Create block with border
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.menu_border))
-            .style(Style::default().bg(theme.browser_background));
+            .border_style(Style::default().fg(crossterm_bridge::to_ratatui_color(theme.menu_border)))
+            .style(Style::default().bg(crossterm_bridge::to_ratatui_color(theme.browser_background)));
 
         let paragraph = Paragraph::new(lines).block(block);
 
