@@ -42,10 +42,12 @@ pub mod theme_editor;
 mod theme_cache;
 pub mod uicolors_browser;
 pub mod window_editor;
+mod widget_manager;
 
 use crate::frontend::{Frontend, FrontendEvent};
 pub mod widget_traits;
 use theme_cache::ThemeCache;
+use widget_manager::WidgetManager;
 use crate::core::AppCore;
 use anyhow::Result;
 use crossterm::{
@@ -59,47 +61,8 @@ use std::io;
 
 pub struct TuiFrontend {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    /// Cache of TextWindow widgets per window name
-    text_windows: HashMap<String, text_window::TextWindow>,
-    /// Cache of CommandInput widgets per window name
-    command_inputs: HashMap<String, command_input::CommandInput>,
-    /// Cache of RoomWindow widgets per window name
-    room_windows: HashMap<String, room_window::RoomWindow>,
-    /// Cache of InventoryWindow widgets per window name
-    inventory_windows: HashMap<String, inventory_window::InventoryWindow>,
-    /// Cache of SpellsWindow widgets per window name
-    spells_windows: HashMap<String, spells_window::SpellsWindow>,
-    /// Cache of ProgressBar widgets per window name
-    progress_bars: HashMap<String, progress_bar::ProgressBar>,
-    /// Cache of Countdown widgets per window name
-    countdowns: HashMap<String, countdown::Countdown>,
-    /// Cache of ActiveEffects widgets per window name
-    active_effects_windows: HashMap<String, active_effects::ActiveEffects>,
-    /// Cache of Hand widgets per window name
-    hand_widgets: HashMap<String, hand::Hand>,
-    /// Cache of Spacer widgets per window name
-    spacer_widgets: HashMap<String, spacer::Spacer>,
-    /// Cache of Indicator widgets per window name
-    indicator_widgets: HashMap<String, indicator::Indicator>,
-    /// Cache of Targets widgets per window name
-    targets_widgets: HashMap<String, targets::Targets>,
-    /// Cache of Players widgets per window name
-    players_widgets: HashMap<String, players::Players>,
-    /// Cache of Dashboard widgets per window name
-    dashboard_widgets: HashMap<String, dashboard::Dashboard>,
-    /// Cache of TabbedTextWindow widgets per window name
-    tabbed_text_windows: HashMap<String, tabbed_text_window::TabbedTextWindow>,
-    /// Cache of Compass widgets per window name
-    compass_widgets: HashMap<String, compass::Compass>,
-    /// Cache of InjuryDoll widgets per window name
-    injury_doll_widgets: HashMap<String, injury_doll::InjuryDoll>,
-    /// Cache of QuickBar widgets per window name
-    quickbar_widgets: HashMap<String, quickbar::QuickBar>,
-    /// Performance stats widget (singleton overlay)
-    performance_stats_widget: Option<performance_stats::PerformanceStatsWidget>,
-    /// Track last synced generation per text window to know what's new
-    /// Using generation instead of line count to handle buffer rotation at max_lines
-    last_synced_generation: HashMap<String, u64>,
+    /// Widget manager - handles all widget caches and synchronization
+    widget_manager: WidgetManager,
     /// Active popup menu (if any)
     popup_menu: Option<popup_menu::PopupMenu>,
     /// Active submenu (if any)
@@ -478,26 +441,7 @@ impl TuiFrontend {
 
         Ok(Self {
             terminal,
-            text_windows: HashMap::new(),
-            command_inputs: HashMap::new(),
-            room_windows: HashMap::new(),
-            inventory_windows: HashMap::new(),
-            spells_windows: HashMap::new(),
-            progress_bars: HashMap::new(),
-            countdowns: HashMap::new(),
-            active_effects_windows: HashMap::new(),
-            hand_widgets: HashMap::new(),
-            spacer_widgets: HashMap::new(),
-            indicator_widgets: HashMap::new(),
-            targets_widgets: HashMap::new(),
-            players_widgets: HashMap::new(),
-            dashboard_widgets: HashMap::new(),
-            tabbed_text_windows: HashMap::new(),
-            compass_widgets: HashMap::new(),
-            injury_doll_widgets: HashMap::new(),
-            quickbar_widgets: HashMap::new(),
-            performance_stats_widget: None,
-            last_synced_generation: HashMap::new(),
+            widget_manager: WidgetManager::new(),
             popup_menu: None,
             submenu: None,
             menu_categories: HashMap::new(),
@@ -532,14 +476,14 @@ impl TuiFrontend {
 
     /// Navigate to next tab in all tabbed windows
     pub fn next_tab_all(&mut self) {
-        for widget in self.tabbed_text_windows.values_mut() {
+        for widget in self.widget_manager.tabbed_text_windows.values_mut() {
             widget.next_tab();
         }
     }
 
     /// Navigate to previous tab in all tabbed windows
     pub fn prev_tab_all(&mut self) {
-        for widget in self.tabbed_text_windows.values_mut() {
+        for widget in self.widget_manager.tabbed_text_windows.values_mut() {
             widget.prev_tab();
         }
     }
@@ -547,7 +491,7 @@ impl TuiFrontend {
     /// Navigate to next tab with unread messages (searches all tabbed windows)
     /// Returns true if found, false if no unread tabs
     pub fn go_to_next_unread_tab(&mut self) -> bool {
-        for widget in self.tabbed_text_windows.values_mut() {
+        for widget in self.widget_manager.tabbed_text_windows.values_mut() {
             if widget.next_tab_with_unread() {
                 return true; // Found and switched
             }
@@ -567,7 +511,7 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create TextWindow for this window
-                let text_window = self.text_windows.entry(name.clone()).or_insert_with(|| {
+                let text_window = self.widget_manager.text_windows.entry(name.clone()).or_insert_with(|| {
                     let mut tw =
                         text_window::TextWindow::new(&text_content.title, text_content.max_lines);
 
@@ -610,7 +554,7 @@ impl TuiFrontend {
                 text_window.set_width(window.position.width);
 
                 // Get last synced generation
-                let last_synced_gen = self.last_synced_generation.get(name).copied().unwrap_or(0);
+                let last_synced_gen = self.widget_manager.last_synced_generation.get(name).copied().unwrap_or(0);
                 let current_gen = text_content.generation;
 
                 // Check if there are new lines to sync (generation changed)
@@ -680,7 +624,7 @@ impl TuiFrontend {
                     }
 
                     // Update last synced generation
-                    self.last_synced_generation
+                    self.widget_manager.last_synced_generation
                         .insert(name.clone(), current_gen);
                 }
 
@@ -695,7 +639,7 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create RoomWindow for this window
-                if !self.room_windows.contains_key(name) {
+                if !self.widget_manager.room_windows.contains_key(name) {
                     let mut room_window = room_window::RoomWindow::new("Room".to_string());
 
                     // Configure RoomWindow with settings from WindowDef
@@ -707,7 +651,7 @@ impl TuiFrontend {
                         room_window.set_component_visible("room exits", data.show_exits);
                     }
 
-                    self.room_windows.insert(name.clone(), room_window);
+                    self.widget_manager.room_windows.insert(name.clone(), room_window);
                     tracing::debug!("Created RoomWindow widget for '{}' during sync", name);
                 }
             }
@@ -748,7 +692,7 @@ impl TuiFrontend {
             };
 
             // Ensure the backing widget exists so we can apply configuration
-            let cmd_input = self.command_inputs.entry(name.clone()).or_insert_with(|| {
+            let cmd_input = self.widget_manager.command_inputs.entry(name.clone()).or_insert_with(|| {
                 let mut widget = command_input::CommandInput::new(1000);
                 if let Some(base) = base_config.as_ref() {
                     let title = base
@@ -842,15 +786,15 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create InventoryWindow for this window
-                if !self.inventory_windows.contains_key(name) {
+                if !self.widget_manager.inventory_windows.contains_key(name) {
                     let inv_window =
                         inventory_window::InventoryWindow::new(text_content.title.clone());
-                    self.inventory_windows.insert(name.clone(), inv_window);
+                    self.widget_manager.inventory_windows.insert(name.clone(), inv_window);
                     tracing::debug!("Created InventoryWindow widget for '{}'", name);
                 }
 
                 // Update configuration and content from WindowDef if present
-                if let Some(inv_window) = self.inventory_windows.get_mut(name) {
+                if let Some(inv_window) = self.widget_manager.inventory_windows.get_mut(name) {
                     inv_window.set_title(text_content.title.clone());
                     if let Some(def) = window_def {
                         let colors = resolve_window_colors(def.base(), theme);
@@ -862,7 +806,7 @@ impl TuiFrontend {
 
                     // Change detection: only sync if content changed (using generation)
                     let last_synced_gen =
-                        self.last_synced_generation.get(name).copied().unwrap_or(0);
+                        self.widget_manager.last_synced_generation.get(name).copied().unwrap_or(0);
                     let current_gen = text_content.generation;
 
                     if current_gen != last_synced_gen {
@@ -877,7 +821,7 @@ impl TuiFrontend {
                             inv_window.finish_line();
                         }
                         // Update last synced generation
-                        self.last_synced_generation
+                        self.widget_manager.last_synced_generation
                             .insert(name.clone(), current_gen);
                     }
                 } else {
@@ -909,15 +853,15 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create SpellsWindow for this window
-                if !self.spells_windows.contains_key(name) {
+                if !self.widget_manager.spells_windows.contains_key(name) {
                     let spells_window =
                         spells_window::SpellsWindow::new(text_content.title.clone());
-                    self.spells_windows.insert(name.clone(), spells_window);
+                    self.widget_manager.spells_windows.insert(name.clone(), spells_window);
                     tracing::debug!("Created SpellsWindow widget for '{}'", name);
                 }
 
                 // Update configuration and content from WindowDef if present
-                if let Some(spells_window) = self.spells_windows.get_mut(name) {
+                if let Some(spells_window) = self.widget_manager.spells_windows.get_mut(name) {
                     spells_window.set_title(text_content.title.clone());
                     if let Some(def) = window_def {
                         let colors = resolve_window_colors(def.base(), theme);
@@ -933,7 +877,7 @@ impl TuiFrontend {
 
                     // Change detection: only sync if content changed (using generation)
                     let last_synced_gen =
-                        self.last_synced_generation.get(name).copied().unwrap_or(0);
+                        self.widget_manager.last_synced_generation.get(name).copied().unwrap_or(0);
                     let current_gen = text_content.generation;
 
                     if current_gen != last_synced_gen {
@@ -960,7 +904,7 @@ impl TuiFrontend {
                             spells_window.finish_line();
                         }
                         // Update last synced generation
-                        self.last_synced_generation
+                        self.widget_manager.last_synced_generation
                             .insert(name.clone(), current_gen);
                     }
                 } else {
@@ -986,7 +930,7 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create QuickBar widget for this window
-                if !self.quickbar_widgets.contains_key(name) {
+                if !self.widget_manager.quickbar_widgets.contains_key(name) {
                     // Extract QuickBarWidgetData from WindowDef
                     let data = if let Some(crate::config::WindowDef::QuickBar { data, .. }) =
                         window_def
@@ -1003,12 +947,12 @@ impl TuiFrontend {
                     };
 
                     let quickbar_widget = quickbar::QuickBar::new(data);
-                    self.quickbar_widgets.insert(name.clone(), quickbar_widget);
+                    self.widget_manager.quickbar_widgets.insert(name.clone(), quickbar_widget);
                     tracing::debug!("Created QuickBar widget for '{}'", name);
                 }
 
                 // Update configuration and content from WindowDef if present
-                if let Some(quickbar_widget) = self.quickbar_widgets.get_mut(name) {
+                if let Some(quickbar_widget) = self.widget_manager.quickbar_widgets.get_mut(name) {
                     if let Some(def) = window_def {
                         // Update content if it changed
                         if !content.is_empty() {
@@ -1045,18 +989,18 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create ProgressBar for this window
-                if !self.progress_bars.contains_key(name) {
+                if !self.widget_manager.progress_bars.contains_key(name) {
                     let label = window_def
                         .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| progress_data.label.clone());
 
                     let bar = progress_bar::ProgressBar::new(&label);
-                    self.progress_bars.insert(name.clone(), bar);
+                    self.widget_manager.progress_bars.insert(name.clone(), bar);
                     tracing::debug!("Created ProgressBar widget for '{}'", name);
                 }
 
                 // Update configuration and value
-                if let Some(progress_bar) = self.progress_bars.get_mut(name) {
+                if let Some(progress_bar) = self.widget_manager.progress_bars.get_mut(name) {
                     // Set value from game data
                     if let Some(ref custom_text) = progress_data.color {
                         // color field is being used as custom text (e.g., "clear as a bell")
@@ -1124,18 +1068,18 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create Countdown for this window
-                if !self.countdowns.contains_key(name) {
+                if !self.widget_manager.countdowns.contains_key(name) {
                     let label = window_def
                         .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| name.clone());
 
                     let countdown = countdown::Countdown::new(&label);
-                    self.countdowns.insert(name.clone(), countdown);
+                    self.widget_manager.countdowns.insert(name.clone(), countdown);
                     tracing::debug!("Created Countdown widget for '{}'", name);
                 }
 
                 // Update configuration and value
-                if let Some(countdown_widget) = self.countdowns.get_mut(name) {
+                if let Some(countdown_widget) = self.widget_manager.countdowns.get_mut(name) {
                     // Set end time from game data
                     countdown_widget.set_end_time(countdown_data.end_time);
 
@@ -1177,7 +1121,7 @@ impl TuiFrontend {
                 let window_def = app_core.layout.windows.iter().find(|wd| wd.name() == *name);
 
                 // Get or create ActiveEffects for this window
-                if !self.active_effects_windows.contains_key(name) {
+                if !self.widget_manager.active_effects_windows.contains_key(name) {
                     let label = window_def
                         .and_then(|def| def.base().title.as_ref()).cloned()
                         .unwrap_or_else(|| name.clone());
@@ -1186,12 +1130,12 @@ impl TuiFrontend {
                         &label,
                         effects_content.category.clone(),
                     );
-                    self.active_effects_windows.insert(name.clone(), widget);
+                    self.widget_manager.active_effects_windows.insert(name.clone(), widget);
                     tracing::debug!("Created ActiveEffects widget for '{}'", name);
                 }
 
                 // Update effects data and configuration
-                if let Some(widget) = self.active_effects_windows.get_mut(name) {
+                if let Some(widget) = self.widget_manager.active_effects_windows.get_mut(name) {
                     let previous_scroll = widget.scroll_position();
 
                     // Clear existing effects
@@ -1239,13 +1183,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if window.widget_type == crate::data::WidgetType::Spacer {
                 // Ensure spacer widget exists in cache
-                if !self.spacer_widgets.contains_key(name) {
+                if !self.widget_manager.spacer_widgets.contains_key(name) {
                     let widget = spacer::Spacer::new();
-                    self.spacer_widgets.insert(name.clone(), widget);
+                    self.widget_manager.spacer_widgets.insert(name.clone(), widget);
                 }
 
                 // Update spacer widget configuration
-                if let Some(spacer_widget) = self.spacer_widgets.get_mut(name) {
+                if let Some(spacer_widget) = self.widget_manager.spacer_widgets.get_mut(name) {
                     // Apply window configuration from layout
                     if let Some(window_def) =
                         app_core.layout.windows.iter().find(|w| w.name() == name)
@@ -1270,13 +1214,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Indicator(indicator_data) = &window.content {
                 // Ensure indicator widget exists in cache
-                if !self.indicator_widgets.contains_key(name) {
+                if !self.widget_manager.indicator_widgets.contains_key(name) {
                     let widget = indicator::Indicator::new(name);
-                    self.indicator_widgets.insert(name.clone(), widget);
+                    self.widget_manager.indicator_widgets.insert(name.clone(), widget);
                 }
 
                 // Update indicator widget content and configuration
-                if let Some(indicator_widget) = self.indicator_widgets.get_mut(name) {
+                if let Some(indicator_widget) = self.widget_manager.indicator_widgets.get_mut(name) {
                     // Set status (which determines if it's active/shown)
                     indicator_widget.set_status(&indicator_data.status);
 
@@ -1321,13 +1265,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Targets { targets_text } = &window.content {
                 // Ensure widget exists
-                if !self.targets_widgets.contains_key(name) {
+                if !self.widget_manager.targets_widgets.contains_key(name) {
                     let widget = targets::Targets::new(name);
-                    self.targets_widgets.insert(name.clone(), widget);
+                    self.widget_manager.targets_widgets.insert(name.clone(), widget);
                 }
 
                 // Update widget
-                if let Some(widget) = self.targets_widgets.get_mut(name) {
+                if let Some(widget) = self.widget_manager.targets_widgets.get_mut(name) {
                     widget.set_targets_from_text(targets_text);
 
                     // Apply configuration
@@ -1360,13 +1304,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Players { players_text } = &window.content {
                 // Ensure widget exists
-                if !self.players_widgets.contains_key(name) {
+                if !self.widget_manager.players_widgets.contains_key(name) {
                     let widget = players::Players::new(name);
-                    self.players_widgets.insert(name.clone(), widget);
+                    self.widget_manager.players_widgets.insert(name.clone(), widget);
                 }
 
                 // Update widget
-                if let Some(widget) = self.players_widgets.get_mut(name) {
+                if let Some(widget) = self.widget_manager.players_widgets.get_mut(name) {
                     widget.set_players_from_text(players_text);
 
                     // Apply configuration
@@ -1399,15 +1343,15 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Dashboard { indicators } = &window.content {
                 // Ensure widget exists
-                if !self.dashboard_widgets.contains_key(name) {
+                if !self.widget_manager.dashboard_widgets.contains_key(name) {
                     // Default to horizontal layout - can be configured via WindowDef later
                     let widget =
                         dashboard::Dashboard::new(name, dashboard::DashboardLayout::Horizontal);
-                    self.dashboard_widgets.insert(name.clone(), widget);
+                    self.widget_manager.dashboard_widgets.insert(name.clone(), widget);
                 }
 
                 // Update widget
-                if let Some(widget) = self.dashboard_widgets.get_mut(name) {
+                if let Some(widget) = self.widget_manager.dashboard_widgets.get_mut(name) {
                     // Update indicator values
                     for (id, value) in indicators {
                         widget.set_indicator_value(id, *value);
@@ -1442,7 +1386,7 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::TabbedText(tabbed_content) = &window.content {
                 // Ensure widget exists - create if needed
-                if !self.tabbed_text_windows.contains_key(name) {
+                if !self.widget_manager.tabbed_text_windows.contains_key(name) {
                     // Create widget with tab definitions
                     let tabs: Vec<(String, String)> = tabbed_content
                         .tabs
@@ -1455,11 +1399,11 @@ impl TuiFrontend {
                         tabs,
                         tabbed_content.max_lines_per_tab,
                     );
-                    self.tabbed_text_windows.insert(name.clone(), widget);
+                    self.widget_manager.tabbed_text_windows.insert(name.clone(), widget);
                 }
 
                 // Apply configuration
-                if let Some(widget) = self.tabbed_text_windows.get_mut(name) {
+                if let Some(widget) = self.widget_manager.tabbed_text_windows.get_mut(name) {
                     if let Some(window_def) =
                         app_core.layout.windows.iter().find(|w| w.name() == name)
                     {
@@ -1489,13 +1433,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Compass(compass_data) = &window.content {
                 // Ensure widget exists
-                if !self.compass_widgets.contains_key(name) {
+                if !self.widget_manager.compass_widgets.contains_key(name) {
                     let widget = compass::Compass::new(name);
-                    self.compass_widgets.insert(name.clone(), widget);
+                    self.widget_manager.compass_widgets.insert(name.clone(), widget);
                 }
 
                 // Update widget
-                if let Some(widget) = self.compass_widgets.get_mut(name) {
+                if let Some(widget) = self.widget_manager.compass_widgets.get_mut(name) {
                     widget.set_directions(compass_data.directions.clone());
 
                     // Apply configuration
@@ -1552,13 +1496,13 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::InjuryDoll(injury_data) = &window.content {
                 // Ensure widget exists
-                if !self.injury_doll_widgets.contains_key(name) {
+                if !self.widget_manager.injury_doll_widgets.contains_key(name) {
                     let widget = injury_doll::InjuryDoll::new(name);
-                    self.injury_doll_widgets.insert(name.clone(), widget);
+                    self.widget_manager.injury_doll_widgets.insert(name.clone(), widget);
                 }
 
                 // Update widget
-                if let Some(widget) = self.injury_doll_widgets.get_mut(name) {
+                if let Some(widget) = self.widget_manager.injury_doll_widgets.get_mut(name) {
                     // Update all injuries
                     for (body_part, level) in &injury_data.injuries {
                         widget.set_injury(body_part.clone(), *level);
@@ -1630,7 +1574,7 @@ impl TuiFrontend {
         for (name, window) in &app_core.ui_state.windows {
             if let crate::data::WindowContent::Hand { item, link } = &window.content {
                 // Ensure hand widget exists in cache
-                if !self.hand_widgets.contains_key(name) {
+                if !self.widget_manager.hand_widgets.contains_key(name) {
                     // Determine hand type based on window name
                     let hand_type = match name.as_str() {
                         "left_hand" => hand::HandType::Left,
@@ -1640,11 +1584,11 @@ impl TuiFrontend {
                     };
 
                     let widget = hand::Hand::new(name, hand_type);
-                    self.hand_widgets.insert(name.clone(), widget);
+                    self.widget_manager.hand_widgets.insert(name.clone(), widget);
                 }
 
                 // Update hand widget content
-                if let Some(hand_widget) = self.hand_widgets.get_mut(name) {
+                if let Some(hand_widget) = self.widget_manager.hand_widgets.get_mut(name) {
                     // Set content (or empty if None)
                     let content = item.clone().unwrap_or_default();
                     hand_widget.set_content(content);
@@ -1713,7 +1657,7 @@ impl TuiFrontend {
             let window_name = window_def.name();
             self.ensure_room_window_exists(window_name, window_def);
 
-            if let Some(room_window) = self.room_windows.get_mut(window_name) {
+            if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
                 let colors = resolve_window_colors(window_def.base(), theme);
                 room_window.set_border_config(
                     window_def.base().show_border,
@@ -1795,7 +1739,7 @@ impl TuiFrontend {
     /// Scroll a text window by name
     pub fn scroll_window(&mut self, window_name: &str, lines: i32) {
         // Try text window first
-        if let Some(text_window) = self.text_windows.get_mut(window_name) {
+        if let Some(text_window) = self.widget_manager.text_windows.get_mut(window_name) {
             if lines > 0 {
                 text_window.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1805,7 +1749,7 @@ impl TuiFrontend {
         }
 
         // Try room window
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             if lines > 0 {
                 room_window.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1815,7 +1759,7 @@ impl TuiFrontend {
         }
 
         // Try inventory window
-        if let Some(inventory_window) = self.inventory_windows.get_mut(window_name) {
+        if let Some(inventory_window) = self.widget_manager.inventory_windows.get_mut(window_name) {
             if lines > 0 {
                 inventory_window.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1825,7 +1769,7 @@ impl TuiFrontend {
         }
 
         // Try spells window
-        if let Some(spells_window) = self.spells_windows.get_mut(window_name) {
+        if let Some(spells_window) = self.widget_manager.spells_windows.get_mut(window_name) {
             if lines > 0 {
                 spells_window.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1835,7 +1779,7 @@ impl TuiFrontend {
         }
 
         // Try active_effects widget
-        if let Some(active_effects) = self.active_effects_windows.get_mut(window_name) {
+        if let Some(active_effects) = self.widget_manager.active_effects_windows.get_mut(window_name) {
             if lines > 0 {
                 active_effects.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1845,7 +1789,7 @@ impl TuiFrontend {
         }
 
         // Try targets widget
-        if let Some(targets) = self.targets_widgets.get_mut(window_name) {
+        if let Some(targets) = self.widget_manager.targets_widgets.get_mut(window_name) {
             if lines > 0 {
                 targets.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1855,7 +1799,7 @@ impl TuiFrontend {
         }
 
         // Try players widget
-        if let Some(players) = self.players_widgets.get_mut(window_name) {
+        if let Some(players) = self.widget_manager.players_widgets.get_mut(window_name) {
             if lines > 0 {
                 players.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1865,7 +1809,7 @@ impl TuiFrontend {
         }
 
         // Try quickbar widget
-        if let Some(quickbar) = self.quickbar_widgets.get_mut(window_name) {
+        if let Some(quickbar) = self.widget_manager.quickbar_widgets.get_mut(window_name) {
             // QuickBar scrolls 1 row at a time
             // Use a safe default for visible height (will be accurate during actual display)
             let visible_rows = 5;
@@ -1882,7 +1826,7 @@ impl TuiFrontend {
         }
 
         // Try tabbed text window
-        if let Some(tabbed_window) = self.tabbed_text_windows.get_mut(window_name) {
+        if let Some(tabbed_window) = self.widget_manager.tabbed_text_windows.get_mut(window_name) {
             if lines > 0 {
                 tabbed_window.scroll_up(lines as usize);
             } else if lines < 0 {
@@ -1899,7 +1843,7 @@ impl TuiFrontend {
         mouse_row: u16,
         window_rect: ratatui::layout::Rect,
     ) -> Option<(usize, usize)> {
-        let text_window = self.text_windows.get(window_name)?;
+        let text_window = self.widget_manager.text_windows.get(window_name)?;
         text_window.mouse_to_text_coords(mouse_col, mouse_row, window_rect)
     }
 
@@ -1911,7 +1855,7 @@ impl TuiFrontend {
         mouse_col: u16,
         mouse_row: u16,
     ) -> bool {
-        if let Some(tabbed_window) = self.tabbed_text_windows.get_mut(window_name) {
+        if let Some(tabbed_window) = self.widget_manager.tabbed_text_windows.get_mut(window_name) {
             return tabbed_window.handle_mouse_click(window_rect, mouse_col, mouse_row);
         }
         false
@@ -1926,16 +1870,16 @@ impl TuiFrontend {
         end_line: usize,
         end_col: usize,
     ) -> Option<String> {
-        let text_window = self.text_windows.get(window_name)?;
+        let text_window = self.widget_manager.text_windows.get(window_name)?;
         Some(text_window.extract_selection_text(start_line, start_col, end_line, end_col))
     }
 
     /// Ensure a command input widget exists (should be called during init)
     pub fn ensure_command_input_exists(&mut self, window_name: &str) {
-        if !self.command_inputs.contains_key(window_name) {
+        if !self.widget_manager.command_inputs.contains_key(window_name) {
             let mut cmd_input = command_input::CommandInput::new(1000);
             cmd_input.set_title("Command".to_string());
-            self.command_inputs
+            self.widget_manager.command_inputs
                 .insert(window_name.to_string(), cmd_input);
             tracing::debug!("Created CommandInput widget for '{}'", window_name);
         }
@@ -1953,7 +1897,7 @@ impl TuiFrontend {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         // Widget should already exist (created during init)
-        if !self.command_inputs.contains_key(window_name) {
+        if !self.widget_manager.command_inputs.contains_key(window_name) {
             tracing::warn!(
                 "CommandInput widget '{}' doesn't exist, creating it now",
                 window_name
@@ -1961,7 +1905,7 @@ impl TuiFrontend {
             self.ensure_command_input_exists(window_name);
         }
 
-        if let Some(cmd_input) = self.command_inputs.get_mut(window_name) {
+        if let Some(cmd_input) = self.widget_manager.command_inputs.get_mut(window_name) {
             match code {
                 KeyCode::Char(c) => {
                     if modifiers.contains(KeyModifiers::CONTROL) {
@@ -2042,7 +1986,7 @@ impl TuiFrontend {
 
     /// Submit command from command input and return the command string
     pub fn command_input_submit(&mut self, window_name: &str) -> Option<String> {
-        self.command_inputs.get_mut(window_name)?.submit()
+        self.widget_manager.command_inputs.get_mut(window_name)?.submit()
     }
 
     /// Load command history for a character
@@ -2051,7 +1995,7 @@ impl TuiFrontend {
         window_name: &str,
         character: Option<&str>,
     ) -> Result<()> {
-        if let Some(cmd_input) = self.command_inputs.get_mut(window_name) {
+        if let Some(cmd_input) = self.widget_manager.command_inputs.get_mut(window_name) {
             cmd_input.load_history(character)?;
         }
         Ok(())
@@ -2063,7 +2007,7 @@ impl TuiFrontend {
         window_name: &str,
         character: Option<&str>,
     ) -> Result<()> {
-        if let Some(cmd_input) = self.command_inputs.get(window_name) {
+        if let Some(cmd_input) = self.widget_manager.command_inputs.get(window_name) {
             cmd_input.save_history(character)?;
         }
         Ok(())
@@ -2075,7 +2019,7 @@ impl TuiFrontend {
         window_name: &str,
         window_def: &crate::config::WindowDef,
     ) {
-        if !self.room_windows.contains_key(window_name) {
+        if !self.widget_manager.room_windows.contains_key(window_name) {
             let mut room_window = room_window::RoomWindow::new("Room".to_string());
 
             // Configure RoomWindow with settings from WindowDef
@@ -2088,7 +2032,7 @@ impl TuiFrontend {
                 room_window.set_show_name(data.show_name);
             }
 
-            self.room_windows
+            self.widget_manager.room_windows
                 .insert(window_name.to_string(), room_window);
             tracing::debug!("Created RoomWindow widget for '{}'", window_name);
         }
@@ -2096,7 +2040,7 @@ impl TuiFrontend {
 
     /// Clear all components in a room window (called when pushStream id="room")
     pub fn room_window_clear_components(&mut self, window_name: &str) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.clear_all_components();
             tracing::debug!("Cleared all components for room window '{}'", window_name);
         }
@@ -2104,7 +2048,7 @@ impl TuiFrontend {
 
     /// Start building a room component
     pub fn room_window_start_component(&mut self, window_name: &str, component_id: String) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.start_component(component_id);
         }
     }
@@ -2115,28 +2059,28 @@ impl TuiFrontend {
         window_name: &str,
         segment: crate::data::widget::TextSegment,
     ) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.add_segment(segment);
         }
     }
 
     /// Finish the current line in a room component
     pub fn room_window_finish_line(&mut self, window_name: &str) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.finish_line();
         }
     }
 
     /// Finish building the current component in a room window
     pub fn room_window_finish_component(&mut self, window_name: &str) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.finish_component();
         }
     }
 
     /// Set the title of a room window
     pub fn room_window_set_title(&mut self, window_name: &str, title: String) {
-        if let Some(room_window) = self.room_windows.get_mut(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get_mut(window_name) {
             room_window.set_title(title);
         }
     }
@@ -2150,7 +2094,7 @@ impl TuiFrontend {
         window_rect: ratatui::layout::Rect,
     ) -> Option<crate::data::LinkData> {
         // Try text window first
-        if let Some(text_window) = self.text_windows.get(window_name) {
+        if let Some(text_window) = self.widget_manager.text_windows.get(window_name) {
             let border_offset = if text_window.has_border() { 1 } else { 0 };
 
             // Bounds check within content area
@@ -2201,7 +2145,7 @@ impl TuiFrontend {
         }
 
         // Try room window
-        if let Some(room_window) = self.room_windows.get(window_name) {
+        if let Some(room_window) = self.widget_manager.room_windows.get(window_name) {
             tracing::debug!(
                 "Checking room window '{}' for link at ({}, {})",
                 window_name,
@@ -2294,7 +2238,7 @@ impl TuiFrontend {
         }
 
         // Try inventory window
-        if let Some(inventory_window) = self.inventory_windows.get(window_name) {
+        if let Some(inventory_window) = self.widget_manager.inventory_windows.get(window_name) {
             tracing::debug!(
                 "Checking inventory window '{}' for link at ({}, {})",
                 window_name,
@@ -2383,7 +2327,7 @@ impl TuiFrontend {
         }
 
         // Try hand widget
-        if let Some(hand_widget) = self.hand_widgets.get(window_name) {
+        if let Some(hand_widget) = self.widget_manager.hand_widgets.get(window_name) {
             if let Some(link) = hand_widget.link_data() {
                 let border_offset = if hand_widget.has_border() { 1 } else { 0 };
                 if mouse_col >= window_rect.x + border_offset
@@ -2397,7 +2341,7 @@ impl TuiFrontend {
         }
 
         // Try quickbar widget
-        if let Some(quickbar) = self.quickbar_widgets.get(window_name) {
+        if let Some(quickbar) = self.widget_manager.quickbar_widgets.get(window_name) {
             let border_offset = 1u16; // Assume border for now
 
             // Bounds check within content area
@@ -2430,7 +2374,7 @@ impl TuiFrontend {
         window_name: &str,
         pattern: &str,
     ) -> Result<usize, regex::Error> {
-        if let Some(text_window) = self.text_windows.get_mut(window_name) {
+        if let Some(text_window) = self.widget_manager.text_windows.get_mut(window_name) {
             // Make search case-insensitive by prepending (?i) unless user already specified flags
             let case_insensitive_pattern = if pattern.starts_with("(?") {
                 pattern.to_string()
@@ -2445,7 +2389,7 @@ impl TuiFrontend {
 
     /// Go to next search match
     pub fn next_search_match(&mut self, window_name: &str) -> bool {
-        if let Some(text_window) = self.text_windows.get_mut(window_name) {
+        if let Some(text_window) = self.widget_manager.text_windows.get_mut(window_name) {
             text_window.next_match()
         } else {
             false
@@ -2454,7 +2398,7 @@ impl TuiFrontend {
 
     /// Go to previous search match
     pub fn prev_search_match(&mut self, window_name: &str) -> bool {
-        if let Some(text_window) = self.text_windows.get_mut(window_name) {
+        if let Some(text_window) = self.widget_manager.text_windows.get_mut(window_name) {
             text_window.prev_match()
         } else {
             false
@@ -2463,14 +2407,14 @@ impl TuiFrontend {
 
     /// Clear search from all text windows
     pub fn clear_all_searches(&mut self) {
-        for text_window in self.text_windows.values_mut() {
+        for text_window in self.widget_manager.text_windows.values_mut() {
             text_window.clear_search();
         }
     }
 
     /// Get search info from a window (current match, total matches)
     pub fn get_search_info(&self, window_name: &str) -> Option<(usize, usize)> {
-        self.text_windows
+        self.widget_manager.text_windows
             .get(window_name)
             .and_then(|tw| tw.search_info())
     }
@@ -2570,24 +2514,24 @@ impl Frontend for TuiFrontend {
         self.sync_injury_doll_widgets(app_core, &theme);
 
         // Temporarily take ownership of widgets to use in render
-        let mut text_windows = std::mem::take(&mut self.text_windows);
-        let command_inputs = std::mem::take(&mut self.command_inputs);
-        let mut room_windows = std::mem::take(&mut self.room_windows);
-        let mut inventory_windows = std::mem::take(&mut self.inventory_windows);
-        let mut spells_windows = std::mem::take(&mut self.spells_windows);
-        let mut progress_bars = std::mem::take(&mut self.progress_bars);
-        let mut countdowns = std::mem::take(&mut self.countdowns);
-        let mut active_effects_windows = std::mem::take(&mut self.active_effects_windows);
-        let mut hand_widgets = std::mem::take(&mut self.hand_widgets);
-        let mut spacer_widgets = std::mem::take(&mut self.spacer_widgets);
-        let mut indicator_widgets = std::mem::take(&mut self.indicator_widgets);
-        let mut targets_widgets = std::mem::take(&mut self.targets_widgets);
-        let mut players_widgets = std::mem::take(&mut self.players_widgets);
-        let mut dashboard_widgets = std::mem::take(&mut self.dashboard_widgets);
-        let mut tabbed_text_windows = std::mem::take(&mut self.tabbed_text_windows);
-        let mut compass_widgets = std::mem::take(&mut self.compass_widgets);
-        let mut injury_doll_widgets = std::mem::take(&mut self.injury_doll_widgets);
-        let mut quickbar_widgets = std::mem::take(&mut self.quickbar_widgets);
+        let mut text_windows = std::mem::take(&mut self.widget_manager.text_windows);
+        let command_inputs = std::mem::take(&mut self.widget_manager.command_inputs);
+        let mut room_windows = std::mem::take(&mut self.widget_manager.room_windows);
+        let mut inventory_windows = std::mem::take(&mut self.widget_manager.inventory_windows);
+        let mut spells_windows = std::mem::take(&mut self.widget_manager.spells_windows);
+        let mut progress_bars = std::mem::take(&mut self.widget_manager.progress_bars);
+        let mut countdowns = std::mem::take(&mut self.widget_manager.countdowns);
+        let mut active_effects_windows = std::mem::take(&mut self.widget_manager.active_effects_windows);
+        let mut hand_widgets = std::mem::take(&mut self.widget_manager.hand_widgets);
+        let mut spacer_widgets = std::mem::take(&mut self.widget_manager.spacer_widgets);
+        let mut indicator_widgets = std::mem::take(&mut self.widget_manager.indicator_widgets);
+        let mut targets_widgets = std::mem::take(&mut self.widget_manager.targets_widgets);
+        let mut players_widgets = std::mem::take(&mut self.widget_manager.players_widgets);
+        let mut dashboard_widgets = std::mem::take(&mut self.widget_manager.dashboard_widgets);
+        let mut tabbed_text_windows = std::mem::take(&mut self.widget_manager.tabbed_text_windows);
+        let mut compass_widgets = std::mem::take(&mut self.widget_manager.compass_widgets);
+        let mut injury_doll_widgets = std::mem::take(&mut self.widget_manager.injury_doll_widgets);
+        let mut quickbar_widgets = std::mem::take(&mut self.widget_manager.quickbar_widgets);
 
         // Clone cached theme for use in render closure (cheaper than HashMap lookup + clone per widget)
         let theme_for_render = theme.clone();
@@ -2978,24 +2922,24 @@ impl Frontend for TuiFrontend {
         })?;
 
         // Restore widgets
-        self.text_windows = text_windows;
-        self.command_inputs = command_inputs;
-        self.room_windows = room_windows;
-        self.inventory_windows = inventory_windows;
-        self.spells_windows = spells_windows;
-        self.progress_bars = progress_bars;
-        self.countdowns = countdowns;
-        self.active_effects_windows = active_effects_windows;
-        self.hand_widgets = hand_widgets;
-        self.spacer_widgets = spacer_widgets;
-        self.indicator_widgets = indicator_widgets;
-        self.targets_widgets = targets_widgets;
-        self.players_widgets = players_widgets;
-        self.dashboard_widgets = dashboard_widgets;
-        self.tabbed_text_windows = tabbed_text_windows;
-        self.compass_widgets = compass_widgets;
-        self.injury_doll_widgets = injury_doll_widgets;
-        self.quickbar_widgets = quickbar_widgets;
+        self.widget_manager.text_windows = text_windows;
+        self.widget_manager.command_inputs = command_inputs;
+        self.widget_manager.room_windows = room_windows;
+        self.widget_manager.inventory_windows = inventory_windows;
+        self.widget_manager.spells_windows = spells_windows;
+        self.widget_manager.progress_bars = progress_bars;
+        self.widget_manager.countdowns = countdowns;
+        self.widget_manager.active_effects_windows = active_effects_windows;
+        self.widget_manager.hand_widgets = hand_widgets;
+        self.widget_manager.spacer_widgets = spacer_widgets;
+        self.widget_manager.indicator_widgets = indicator_widgets;
+        self.widget_manager.targets_widgets = targets_widgets;
+        self.widget_manager.players_widgets = players_widgets;
+        self.widget_manager.dashboard_widgets = dashboard_widgets;
+        self.widget_manager.tabbed_text_windows = tabbed_text_windows;
+        self.widget_manager.compass_widgets = compass_widgets;
+        self.widget_manager.injury_doll_widgets = injury_doll_widgets;
+        self.widget_manager.quickbar_widgets = quickbar_widgets;
 
         Ok(())
     }
