@@ -46,10 +46,10 @@ fn send_line(stream: &mut SslStream<TcpStream>, line: &str) -> Result<()> {
 ```bash
 # Direct connection mode
 two-face --direct \
-  --direct-account YOUR_ACCOUNT \
-  --direct-password YOUR_PASSWORD \
-  --direct-game prime \
-  --direct-character CHARACTER_NAME
+  --account YOUR_ACCOUNT \
+  --password YOUR_PASSWORD \
+  --game prime \
+  --character CHARACTER_NAME
 
 # Or via Lich (traditional mode)
 two-face --host 127.0.0.1 --port 8000

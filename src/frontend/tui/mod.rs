@@ -39,11 +39,13 @@ mod targets;
 mod text_window;
 pub mod theme_browser;
 pub mod theme_editor;
+mod theme_cache;
 pub mod uicolors_browser;
 pub mod window_editor;
 
 use crate::frontend::{Frontend, FrontendEvent};
 pub mod widget_traits;
+use theme_cache::ThemeCache;
 use crate::core::AppCore;
 use anyhow::Result;
 use crossterm::{
@@ -132,10 +134,8 @@ pub struct TuiFrontend {
     pub settings_editor: Option<settings_editor::SettingsEditor>,
     /// Debouncer for terminal resize events (100ms debounce)
     resize_debouncer: ResizeDebouncer,
-    /// Cached theme to avoid HashMap lookup + clone every render
-    cached_theme: crate::theme::AppTheme,
-    /// Cached theme ID to detect theme changes
-    cached_theme_id: String,
+    /// Theme cache to avoid HashMap lookup + clone every render
+    theme_cache: ThemeCache,
 }
 
 /// Parse a hex color string like "#RRGGBB" into ratatui Color
@@ -515,15 +515,13 @@ impl TuiFrontend {
             theme_editor: None,
             settings_editor: None,
             resize_debouncer: ResizeDebouncer::new(300), // 300ms debounce
-            cached_theme: crate::theme::ThemePresets::dark(),
-            cached_theme_id: "dark".to_string(),
+            theme_cache: ThemeCache::new(),
         })
     }
 
     /// Update cached theme (call this when theme changes via command/browser)
     pub fn update_theme_cache(&mut self, theme_id: String, theme: crate::theme::AppTheme) {
-        self.cached_theme = theme;
-        self.cached_theme_id = theme_id;
+        self.theme_cache.update(theme_id, theme);
     }
 
     /// Get the terminal size (width, height)
@@ -2537,7 +2535,7 @@ impl Frontend for TuiFrontend {
             .ok_or_else(|| anyhow::anyhow!("Invalid app type"))?;
 
         // Clone theme once so all sync tasks share the same palette
-        let theme = self.cached_theme.clone();
+        let theme = self.theme_cache.get_theme().clone();
 
         // Sync data from data layer into TextWindows
         self.sync_text_windows(app_core, &theme);

@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(cargo test:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(powershell -Command \"(Get-Content ''c:\\Gemstone\\Projects\\two-face\\src\\main.rs'').Count\")",
+      "Bash(grep:*)"
     ]
   },
   "enabledMcpjsonServers": [
