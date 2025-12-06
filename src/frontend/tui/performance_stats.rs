@@ -1,224 +1,370 @@
-//! Terminal-oriented performance statistics widget.
+//! Terminal performance widget with configurable sections and theming.
 //!
-//! The `PerformanceStatsWidget` renders the metrics that are gathered by
-//! `crate::performance::PerformanceStats` and presents them as a compact block
-//! of labeled values that can be embedded inside any ratatui layout.  The
-//! widget supports configurable borders/backgrounds so the caller can blend it
-//! into different themes or overlay it on top of other content.
+//! This widget mirrors the window/editor options: border style/sides, optional
+//! background fill, and per-section toggles so the user can pick which metrics
+//! to surface. Metrics are pulled from `PerformanceStats` each render.
 
+use crate::config::BorderSides;
+use crate::frontend::tui::crossterm_bridge;
 use crate::performance::PerformanceStats;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph, Widget as RatatuiWidget},
+    widgets::{Block, BorderType, Paragraph, Widget},
 };
 
-/// Richly formatted block that surfaces performance metrics such as FPS,
-/// network throughput, parser speed, and approximate memory usage.
+#[derive(Clone)]
 pub struct PerformanceStatsWidget {
+    title: String,
     show_border: bool,
-    border_color: Color,
-    background_color: Option<Color>,
+    border_style: Option<String>,
+    border_color: Option<String>,
+    border_sides: BorderSides,
+    background_color: Option<String>,
+    transparent_background: bool,
+    text_color: Option<String>,
+    // Section toggles
+    show_fps: bool,
+    show_frame_times: bool,
+    show_render_times: bool,
+    show_ui_times: bool,
+    show_wrap_times: bool,
+    show_net: bool,
+    show_parse: bool,
+    show_events: bool,
+    show_memory: bool,
+    show_lines: bool,
+    show_uptime: bool,
+    show_jitter: bool,
+    show_frame_spikes: bool,
+    show_event_lag: bool,
+    show_memory_delta: bool,
 }
 
 impl PerformanceStatsWidget {
-    /// Create a widget with sensible defaults (border on, neutral colors).
     pub fn new() -> Self {
         Self {
+            title: "Performance".to_string(),
             show_border: true,
-            border_color: Color::Gray,
-            background_color: Some(Color::Black), // Default black background
+            border_style: Some("single".to_string()),
+            border_color: None,
+            border_sides: BorderSides::default(),
+            background_color: None,
+            transparent_background: true,
+            text_color: None,
+            show_fps: true,
+            show_frame_times: true,
+            show_render_times: true,
+            show_ui_times: true,
+            show_wrap_times: true,
+            show_net: true,
+            show_parse: true,
+            show_events: true,
+            show_memory: true,
+            show_lines: true,
+            show_uptime: true,
+            show_jitter: true,
+            show_frame_spikes: true,
+            show_event_lag: true,
+            show_memory_delta: true,
         }
     }
 
-    /// Enable/disable the surrounding border.
-    pub fn with_border(mut self, show: bool) -> Self {
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = title.into();
+    }
+
+    pub fn set_border_config(&mut self, show: bool, style: Option<String>, color: Option<String>) {
         self.show_border = show;
-        self
-    }
-
-    /// Override the color that will be used for every border segment.
-    pub fn with_border_color(mut self, color: Color) -> Self {
+        self.border_style = style;
         self.border_color = color;
-        self
     }
 
-    /// Set a solid background fill; `None` leaves whatever content was behind.
-    pub fn with_background_color(mut self, color: Option<Color>) -> Self {
+    pub fn set_border_sides(&mut self, sides: BorderSides) {
+        self.border_sides = sides;
+    }
+
+    pub fn set_background_color(&mut self, color: Option<String>) {
         self.background_color = color;
-        self
     }
 
-    /// Render the widget into the provided buffer using the supplied stats.
-    ///
-    /// The method clears/fills the background (if requested), draws the outer
-    /// block, and then streams a series of labeled lines that combine numeric
-    /// snapshots from the `PerformanceStats` tracker.  The ordering keeps
-    /// high-level frame timing at the top, followed by network, parser, event,
-    /// memory, and uptime sections so that the most actionable information is
-    /// visible immediately.
+    pub fn set_transparent_background(&mut self, transparent: bool) {
+        self.transparent_background = transparent;
+    }
+
+    pub fn set_text_color(&mut self, color: Option<String>) {
+        self.text_color = color;
+    }
+
+    pub fn apply_flags(&mut self, data: &crate::config::PerformanceWidgetData) {
+        self.show_fps = data.show_fps;
+        self.show_frame_times = data.show_frame_times;
+        self.show_render_times = data.show_render_times;
+        self.show_ui_times = data.show_ui_times;
+        self.show_wrap_times = data.show_wrap_times;
+        self.show_net = data.show_net;
+        self.show_parse = data.show_parse;
+        self.show_events = data.show_events;
+        self.show_memory = data.show_memory;
+        self.show_lines = data.show_lines;
+        self.show_uptime = data.show_uptime;
+        self.show_jitter = data.show_jitter;
+        self.show_frame_spikes = data.show_frame_spikes;
+        self.show_event_lag = data.show_event_lag;
+        self.show_memory_delta = data.show_memory_delta;
+    }
+
+    fn parse_color(hex: &str) -> Option<Color> {
+        let hex = hex.trim_start_matches('#');
+        if hex.len() != 6 {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Color::Rgb(r, g, b))
+    }
+
+    fn themed_color(&self, fallback: Color) -> Color {
+        self.text_color
+            .as_ref()
+            .and_then(|c| Self::parse_color(c))
+            .unwrap_or(fallback)
+    }
+
     pub fn render(&self, area: Rect, buf: &mut Buffer, stats: &PerformanceStats) {
-        // Fill background if specified (clear text behind widget)
-        if let Some(bg_color) = self.background_color {
-            for y in area.y..area.y + area.height {
-                for x in area.x..area.x + area.width {
-                    if x < buf.area().width && y < buf.area().height {
-                        buf[(x, y)]
-                            .set_char(' ')
-                            .set_bg(bg_color)
-                            .set_fg(Color::Reset);
+        // Fill background when requested
+        if !self.transparent_background {
+            if let Some(bg_hex) = &self.background_color {
+                if let Some(color) = Self::parse_color(bg_hex) {
+                    for y in area.y..area.y.saturating_add(area.height) {
+                        for x in area.x..area.x.saturating_add(area.width) {
+                            if x < buf.area().width && y < buf.area().height {
+                                buf[(x, y)]
+                                    .set_char(' ')
+                                    .set_bg(color)
+                                    .set_fg(Color::Reset);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Create block with border if enabled
-        let block = if self.show_border {
-            Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(self.border_color))
-                .title("Performance Stats")
+        // Build outer block
+        let mut block = if self.show_border {
+            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
+            Block::default().borders(borders).title(self.title.as_str())
         } else {
             Block::default()
         };
 
+        if let Some(style_name) = self.border_style.as_deref() {
+            let border_type = match style_name {
+                "double" => BorderType::Double,
+                "rounded" => BorderType::Rounded,
+                "thick" => BorderType::Thick,
+                "quadrant_inside" => BorderType::QuadrantInside,
+                "quadrant_outside" => BorderType::QuadrantOutside,
+                _ => BorderType::Plain,
+            };
+            block = block.border_type(border_type);
+        }
+
+        if let Some(color_hex) = &self.border_color {
+            if let Some(color) = Self::parse_color(color_hex) {
+                block = block.border_style(Style::default().fg(color));
+            }
+        }
+
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Format stats into lines
-        let lines = vec![
-            // Frame stats
-            Line::from(vec![
-                Span::styled("FPS: ", Style::default().fg(Color::Cyan)),
+        let label_color = self.themed_color(Color::Cyan);
+        let value_color = self.themed_color(Color::White);
+
+        let mut lines: Vec<Line> = Vec::new();
+        let add_spacer = |lines: &mut Vec<Line>| {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+        };
+
+        if self.show_fps {
+            lines.push(Line::from(vec![
+                Span::styled("FPS: ", Style::default().fg(label_color)),
+                Span::styled(format!("{:.1}", stats.fps()), Style::default().fg(value_color)),
+            ]));
+        }
+        if self.show_frame_times {
+            lines.push(Line::from(vec![
+                Span::styled("Frame: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{:.1}", stats.fps()),
-                    Style::default().fg(Color::White),
+                    format!("{:.2}ms (max {:.2})", stats.avg_frame_time_ms(), stats.max_frame_time_ms()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Frame: ", Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        if self.show_jitter {
+            lines.push(Line::from(vec![
+                Span::styled("Jitter: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!(
-                        "{:.2}ms (max: {:.2})",
-                        stats.avg_frame_time_ms(),
-                        stats.max_frame_time_ms()
-                    ),
-                    Style::default().fg(Color::White),
+                    format!("{:.2}ms", stats.frame_jitter_ms()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Render: ", Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        if self.show_frame_spikes {
+            lines.push(Line::from(vec![
+                Span::styled("Spikes: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!(
-                        "{:.2}ms (max: {:.2})",
-                        stats.avg_render_time_ms(),
-                        stats.max_render_time_ms()
-                    ),
-                    Style::default().fg(Color::White),
+                    format!("{}", stats.frame_spike_count()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("UI: ", Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        if self.show_render_times {
+            lines.push(Line::from(vec![
+                Span::styled("Render: ", Style::default().fg(label_color)),
+                Span::styled(
+                    format!("{:.2}ms (max {:.2})", stats.avg_render_time_ms(), stats.max_render_time_ms()),
+                    Style::default().fg(value_color),
+                ),
+            ]));
+        }
+        if self.show_ui_times {
+            lines.push(Line::from(vec![
+                Span::styled("UI: ", Style::default().fg(label_color)),
                 Span::styled(
                     format!("{:.2}ms", stats.avg_ui_render_time_ms()),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Wrap: ", Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        if self.show_wrap_times {
+            lines.push(Line::from(vec![
+                Span::styled("Wrap: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{:.0}μs", stats.avg_text_wrap_time_us()),
-                    Style::default().fg(Color::White),
+                    format!("{:.0}µs", stats.avg_text_wrap_time_us()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(""),
-            // Network stats
-            Line::from(vec![
-                Span::styled("Net In: ", Style::default().fg(Color::Green)),
+            ]));
+        }
+
+        if self.show_net {
+            add_spacer(&mut lines);
+            lines.push(Line::from(vec![
+                Span::styled("Net In: ", Style::default().fg(label_color)),
                 Span::styled(
                     format!("{:.2} KB/s", stats.bytes_received_per_sec() as f64 / 1024.0),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Net Out: ", Style::default().fg(Color::Yellow)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Net Out: ", Style::default().fg(label_color)),
                 Span::styled(
                     format!("{:.2} KB/s", stats.bytes_sent_per_sec() as f64 / 1024.0),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(""),
-            // Parser stats
-            Line::from(vec![
-                Span::styled("Parse: ", Style::default().fg(Color::Magenta)),
+            ]));
+        }
+
+        if self.show_parse {
+            add_spacer(&mut lines);
+            lines.push(Line::from(vec![
+                Span::styled("Parse: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{:.0}μs", stats.avg_parse_time_us()),
-                    Style::default().fg(Color::White),
+                    format!("{:.0}µs", stats.avg_parse_time_us()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Chunks/s: ", Style::default().fg(Color::Magenta)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Chunks/s: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{}", stats.chunks_per_sec()),
-                    Style::default().fg(Color::White),
+                    stats.chunks_per_sec().to_string(),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Elems/s: ", Style::default().fg(Color::Magenta)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Elems/s: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{}", stats.elements_per_sec()),
-                    Style::default().fg(Color::White),
+                    stats.elements_per_sec().to_string(),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(""),
-            // Event stats
-            Line::from(vec![
-                Span::styled("Event: ", Style::default().fg(Color::LightBlue)),
+            ]));
+        }
+
+        if self.show_events {
+            add_spacer(&mut lines);
+            lines.push(Line::from(vec![
+                Span::styled("Event: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!(
-                        "{:.0}μs (max: {:.0})",
-                        stats.avg_event_process_time_us(),
-                        stats.max_event_process_time_us()
-                    ),
-                    Style::default().fg(Color::White),
+                    format!("{:.0}µs (max {:.0})", stats.avg_event_process_time_us(), stats.max_event_process_time_us()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(""),
-            // Memory stats
-            Line::from(vec![
-                Span::styled("Memory: ", Style::default().fg(Color::Red)),
+            ]));
+        }
+        if self.show_event_lag {
+            lines.push(Line::from(vec![
+                Span::styled("Event Lag: ", Style::default().fg(label_color)),
+                Span::styled(
+                    format!("{:.0}ms", stats.event_lag_ms()),
+                    Style::default().fg(value_color),
+                ),
+            ]));
+        }
+
+        if self.show_memory {
+            add_spacer(&mut lines);
+            lines.push(Line::from(vec![
+                Span::styled("Memory: ", Style::default().fg(label_color)),
                 Span::styled(
                     format!("{:.1} MB", stats.estimated_memory_mb()),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Lines: ", Style::default().fg(Color::Red)),
+            ]));
+        }
+        if self.show_memory_delta {
+            lines.push(Line::from(vec![
+                Span::styled("Memory Δ: ", Style::default().fg(label_color)),
                 Span::styled(
-                    format!("{}", stats.total_lines_buffered()),
-                    Style::default().fg(Color::White),
+                    format!("{:.2} MB", stats.memory_delta_mb()),
+                    Style::default().fg(value_color),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Windows: ", Style::default().fg(Color::Red)),
-                Span::styled(
-                    format!("{}", stats.active_window_count()),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(""),
-            // Uptime
-            Line::from(vec![
-                Span::styled("Uptime: ", Style::default().fg(Color::Blue)),
-                Span::styled(stats.uptime_formatted(), Style::default().fg(Color::White)),
-            ]),
-        ];
+            ]));
+        }
 
-        // Ratatui takes care of wrapping/truncation. We simply hand off the
-        // computed lines as a paragraph.
+        if self.show_lines {
+            lines.push(Line::from(vec![
+                Span::styled("Lines: ", Style::default().fg(label_color)),
+                Span::styled(
+                    stats.total_lines_buffered().to_string(),
+                    Style::default().fg(value_color),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Windows: ", Style::default().fg(label_color)),
+                Span::styled(
+                    stats.active_window_count().to_string(),
+                    Style::default().fg(value_color),
+                ),
+            ]));
+        }
+
+        if self.show_uptime {
+            add_spacer(&mut lines);
+            lines.push(Line::from(vec![
+                Span::styled("Uptime: ", Style::default().fg(label_color)),
+                Span::styled(stats.uptime_formatted(), Style::default().fg(value_color)),
+            ]));
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::from("No metrics enabled"));
+        }
+
         let paragraph = Paragraph::new(lines);
         paragraph.render(inner, buf);
     }

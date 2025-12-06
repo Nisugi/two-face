@@ -3,7 +3,6 @@
 //! These methods handle keyboard input routing based on the current input mode.
 //! Extracted from mod.rs to reduce file size and improve organization.
 
-use crate::core::AppCore;
 use anyhow::Result;
 
 /// Input handling methods (impl extension for TuiFrontend)

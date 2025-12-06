@@ -492,7 +492,7 @@ impl KeybindFormWidget {
         &mut self,
         x: u16,
         y: u16,
-        width: u16,
+        _width: u16,
         buf: &mut Buffer,
         config: &crate::config::Config,
         theme: &crate::theme::AppTheme,

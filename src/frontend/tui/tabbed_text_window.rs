@@ -4,11 +4,13 @@
 //! actual text rendering to the existing `TextWindow`.
 
 use super::text_window::TextWindow;
+use crate::selection::SelectionState;
+use crate::theme::AppTheme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Widget as RatatuiWidget},
+    widgets::{Block, BorderType, Widget},
 };
 
 use super::crossterm_bridge;
@@ -19,9 +21,18 @@ pub enum TabBarPosition {
     Bottom,
 }
 
+impl TabBarPosition {
+    pub(crate) fn from_str(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "bottom" => Self::Bottom,
+            _ => Self::Top,
+        }
+    }
+}
+
 struct TabInfo {
     name: String,
-    stream: String,
+    streams: Vec<String>,
     window: TextWindow,
     has_unread: bool,
     unread_count: usize,
@@ -66,10 +77,14 @@ impl TabbedTextWindow {
         }
     }
 
-    pub fn with_tabs(title: &str, tabs: Vec<(String, String)>, max_lines_per_tab: usize) -> Self {
+    pub fn with_tabs(
+        title: &str,
+        tabs: Vec<(String, Vec<String>, bool)>,
+        max_lines_per_tab: usize,
+    ) -> Self {
         let mut window = Self::new(title, TabBarPosition::Top);
-        for (name, stream) in tabs {
-            window.add_tab(name, stream, max_lines_per_tab, false);
+        for (name, streams, show_timestamps) in tabs {
+            window.add_tab(name, streams, max_lines_per_tab, show_timestamps);
         }
         window
     }
@@ -87,8 +102,12 @@ impl TabbedTextWindow {
     }
 
     pub fn with_tab_bar_position(mut self, position: TabBarPosition) -> Self {
-        self.tab_bar_position = position;
+        self.set_tab_bar_position(position);
         self
+    }
+
+    pub fn set_tab_bar_position(&mut self, position: TabBarPosition) {
+        self.tab_bar_position = position;
     }
 
     pub fn with_tab_colors(
@@ -106,6 +125,21 @@ impl TabbedTextWindow {
     pub fn with_unread_prefix(mut self, prefix: String) -> Self {
         self.tab_unread_prefix = prefix;
         self
+    }
+
+    pub fn set_tab_colors(
+        &mut self,
+        active: Option<String>,
+        inactive: Option<String>,
+        unread: Option<String>,
+    ) {
+        self.tab_active_color = active;
+        self.tab_inactive_color = inactive;
+        self.tab_unread_color = unread;
+    }
+
+    pub fn set_unread_prefix(&mut self, prefix: String) {
+        self.tab_unread_prefix = prefix;
     }
 
     pub fn set_content_align(&mut self, align: Option<String>) {
@@ -140,7 +174,7 @@ impl TabbedTextWindow {
     pub fn add_tab(
         &mut self,
         name: String,
-        stream: String,
+        streams: Vec<String>,
         max_lines: usize,
         show_timestamps: bool,
     ) {
@@ -152,7 +186,7 @@ impl TabbedTextWindow {
 
         self.tabs.push(TabInfo {
             name,
-            stream,
+            streams,
             window,
             has_unread: false,
             unread_count: 0,
@@ -206,6 +240,10 @@ impl TabbedTextWindow {
 
     pub fn get_tab_names(&self) -> Vec<String> {
         self.tabs.iter().map(|t| t.name.clone()).collect()
+    }
+
+    pub fn get_tab_window_mut(&mut self, index: usize) -> Option<&mut TextWindow> {
+        self.tabs.get_mut(index).map(|ti| &mut ti.window)
     }
 
     /// Switch to the next tab (wraps around to first tab)
@@ -268,6 +306,7 @@ impl TabbedTextWindow {
     }
 
     pub fn reorder_tabs(&mut self, new_order: &[String]) {
+        let active_name = self.tabs.get(self.active_tab_index).map(|t| t.name.clone());
         let mut new_tabs = Vec::new();
         for name in new_order {
             if let Some(idx) = self.tabs.iter().position(|t| &t.name == name) {
@@ -278,13 +317,31 @@ impl TabbedTextWindow {
         new_tabs.append(&mut self.tabs);
         self.tabs = new_tabs;
 
-        // Reset active index
-        self.active_tab_index = 0;
+        // Reset active index to previously active tab if it still exists
+        if let Some(active_name) = active_name {
+            if let Some(new_idx) = self.tabs.iter().position(|t| t.name == active_name) {
+                self.active_tab_index = new_idx;
+            } else {
+                self.active_tab_index = 0;
+            }
+        } else {
+            self.active_tab_index = 0;
+        }
+    }
+
+    /// Mark a tab as having unread content, incrementing its counter by `count`
+    pub fn mark_tab_unread(&mut self, index: usize, count: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            if count > 0 {
+                tab.has_unread = true;
+                tab.unread_count = tab.unread_count.saturating_add(count);
+            }
+        }
     }
 
     pub fn add_text_to_stream(&mut self, stream: &str, styled: super::text_window::StyledText) {
         for (idx, tab) in self.tabs.iter_mut().enumerate() {
-            if tab.stream == stream {
+            if tab.streams.contains(&stream.to_string()) {
                 tab.window.add_text(styled.clone());
 
                 // Mark as unread if not active tab
@@ -298,7 +355,7 @@ impl TabbedTextWindow {
 
     pub fn finish_line_for_stream(&mut self, stream: &str, width: u16) {
         for tab in &mut self.tabs {
-            if tab.stream == stream {
+            if tab.streams.contains(&stream.to_string()) {
                 tab.window.finish_line(width);
             }
         }
@@ -328,13 +385,15 @@ impl TabbedTextWindow {
     }
 
     pub fn get_all_streams(&self) -> Vec<String> {
-        self.tabs.iter().map(|t| t.stream.clone()).collect()
+        self.tabs.iter().flat_map(|t| t.streams.clone()).collect()
     }
 
     pub fn clear_stream(&mut self, stream: &str) {
         for tab in &mut self.tabs {
-            if tab.stream == stream {
+            if tab.streams.contains(&stream.to_string()) {
                 tab.window.clear();
+                tab.has_unread = false;
+                tab.unread_count = 0;
             }
         }
     }
@@ -423,6 +482,9 @@ impl TabbedTextWindow {
         let mut curr_x = tab_bar_rect.x;
 
         for (idx, tab) in self.tabs.iter().enumerate() {
+            if curr_x >= tab_bar_rect.right() {
+                break;
+            }
             let tab_text = if idx == self.active_tab_index {
                 tab.name.clone()
             } else if tab.has_unread {
@@ -459,6 +521,7 @@ impl TabbedTextWindow {
                 "double" => BorderType::Double,
                 "rounded" => BorderType::Rounded,
                 "thick" => BorderType::Thick,
+                "single" => BorderType::Plain, // closest available thin border
                 _ => BorderType::Plain,
             };
             let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
@@ -497,7 +560,16 @@ impl TabbedTextWindow {
         Color::Rgb(r, g, b)
     }
 
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+    pub fn render_with_focus(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        selection_state: Option<&SelectionState>,
+        selection_bg_color: &str,
+        window_index: usize,
+        theme: &AppTheme,
+    ) {
         if self.tabs.is_empty() {
             return;
         }
@@ -510,6 +582,7 @@ impl TabbedTextWindow {
                 Some("double") => BorderType::Double,
                 Some("rounded") => BorderType::Rounded,
                 Some("thick") => BorderType::Thick,
+                Some("single") => BorderType::Plain, // closest available thin border
                 _ => BorderType::Plain,
             };
 
@@ -517,10 +590,19 @@ impl TabbedTextWindow {
 
             block = block.borders(borders).border_type(border_type);
 
+            let mut border_style = Style::default();
             if let Some(ref color_str) = self.border_color {
                 let color = Self::parse_color(color_str);
-                block = block.border_style(Style::default().fg(color));
+                border_style = border_style.fg(color);
             }
+
+            if focused {
+                border_style = border_style
+                    .fg(crossterm_bridge::to_ratatui_color(theme.window_border_focused))
+                    .add_modifier(Modifier::BOLD);
+            }
+
+            block = block.border_style(border_style);
 
             if !self.title.is_empty() {
                 block = block.title(self.title.clone());
@@ -567,13 +649,53 @@ impl TabbedTextWindow {
             }
         };
 
+        // Paint background for tab bar and content when not transparent
+        if !self.transparent_background {
+            if let Some(ref bg_hex) = self.background_color {
+                let bg = Self::parse_color(bg_hex);
+
+                // Tab bar row
+                for dx in 0..tab_bar_area.width {
+                    let x = tab_bar_area.x + dx;
+                    let y = tab_bar_area.y;
+                    if x < buf.area().width && y < buf.area().height {
+                        buf[(x, y)].set_bg(bg);
+                    }
+                }
+
+                // Content area
+                for dx in 0..content_area.width {
+                    for dy in 0..content_area.height {
+                        let x = content_area.x + dx;
+                        let y = content_area.y + dy;
+                        if x < buf.area().width && y < buf.area().height {
+                            buf[(x, y)].set_bg(bg);
+                        }
+                    }
+                }
+            }
+        }
+
         // Render tab bar
         self.render_tab_bar(tab_bar_area, buf);
 
         // Render active tab content
         if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
-            tab.window.render(content_area, buf);
+            tab.window.render_with_focus(
+                content_area,
+                buf,
+                focused,
+                selection_state,
+                selection_bg_color,
+                window_index,
+                theme,
+            );
         }
+    }
+
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        let theme = crate::theme::ThemePresets::dark();
+        self.render_with_focus(area, buf, false, None, "#4a4a4a", 0, &theme);
     }
 
     fn render_tab_bar(&self, area: Rect, buf: &mut Buffer) {
@@ -594,6 +716,7 @@ impl TabbedTextWindow {
             .unwrap_or(Color::White);
 
         let mut x = area.x;
+        let divider = " | ";
 
         for (idx, tab) in self.tabs.iter().enumerate() {
             if x >= area.right() {
@@ -601,7 +724,7 @@ impl TabbedTextWindow {
             }
 
             // Determine tab text and style
-            let (tab_text, style) = if idx == self.active_tab_index {
+            let (raw_text, style) = if idx == self.active_tab_index {
                 (
                     tab.name.clone(),
                     Style::default()
@@ -617,6 +740,38 @@ impl TabbedTextWindow {
                 (tab.name.clone(), Style::default().fg(inactive_color))
             };
 
+            // Compute available width for this tab (leave space for divider if needed)
+            let remaining = area.right().saturating_sub(x);
+            if remaining == 0 {
+                break;
+            }
+            let max_label_width = if idx < self.tabs.len() - 1 && remaining > divider.len() as u16 {
+                remaining.saturating_sub(divider.len() as u16)
+            } else {
+                remaining
+            };
+
+            // Truncate with ellipsis if needed
+            let tab_text = if raw_text.chars().count() as u16 > max_label_width {
+                if max_label_width == 0 {
+                    String::new()
+                } else if max_label_width == 1 {
+                    "…".to_string()
+                } else if max_label_width == 2 {
+                    "…".repeat(2)
+                } else {
+                    let take_len = max_label_width.saturating_sub(1) as usize;
+                    let mut truncated = String::new();
+                    for ch in raw_text.chars().take(take_len) {
+                        truncated.push(ch);
+                    }
+                    truncated.push('…');
+                    truncated
+                }
+            } else {
+                raw_text
+            };
+
             // Render tab text
             for ch in tab_text.chars() {
                 if x >= area.right() {
@@ -627,8 +782,7 @@ impl TabbedTextWindow {
             }
 
             // Render divider if not last tab
-            if idx < self.tabs.len() - 1 {
-                let divider = " | ";
+            if idx < self.tabs.len() - 1 && x < area.right() {
                 for ch in divider.chars() {
                     if x >= area.right() {
                         break;

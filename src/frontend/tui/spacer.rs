@@ -5,7 +5,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Color,
 };
 
 /// Spacer widget - fills area with optional background color for layout spacing
@@ -77,8 +77,6 @@ impl Spacer {
             .as_ref()
             .map(|c| Self::parse_color(c))
             .unwrap_or(Color::DarkGray);
-
-        let style = Style::default().bg(color);
 
         // Fill each row with background spaces
         for y in area.y..area.y + area.height {

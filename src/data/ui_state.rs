@@ -363,3 +363,459 @@ impl PopupMenu {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== UiState Tests ====================
+
+    #[test]
+    fn test_ui_state_new() {
+        let state = UiState::new();
+        assert!(state.windows.is_empty());
+        assert!(state.focused_window.is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.search_input.is_empty());
+        assert_eq!(state.search_cursor, 0);
+        assert!(state.popup_menu.is_none());
+        assert!(state.submenu.is_none());
+        assert!(state.nested_submenu.is_none());
+        assert_eq!(state.status_text, "Ready");
+        assert!(state.mouse_drag.is_none());
+        assert!(state.selection_state.is_none());
+    }
+
+    #[test]
+    fn test_ui_state_default() {
+        let state = UiState::default();
+        assert!(state.windows.is_empty());
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_ui_state_get_nonexistent_window() {
+        let state = UiState::new();
+        assert!(state.get_window("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_ui_state_focused_window_none() {
+        let state = UiState::new();
+        assert!(state.focused_window().is_none());
+    }
+
+    // ==================== InputMode Tests ====================
+
+    #[test]
+    fn test_input_mode_equality() {
+        assert_eq!(InputMode::Normal, InputMode::Normal);
+        assert_ne!(InputMode::Normal, InputMode::Navigation);
+        assert_ne!(InputMode::History, InputMode::Search);
+    }
+
+    #[test]
+    fn test_input_mode_clone() {
+        let mode = InputMode::WindowEditor;
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_input_mode_debug() {
+        let debug_str = format!("{:?}", InputMode::HighlightBrowser);
+        assert!(debug_str.contains("HighlightBrowser"));
+    }
+
+    #[test]
+    fn test_all_input_modes_distinct() {
+        let modes = vec![
+            InputMode::Normal,
+            InputMode::Navigation,
+            InputMode::History,
+            InputMode::Search,
+            InputMode::Menu,
+            InputMode::WindowEditor,
+            InputMode::HighlightBrowser,
+            InputMode::HighlightForm,
+            InputMode::KeybindBrowser,
+            InputMode::KeybindForm,
+            InputMode::ColorPaletteBrowser,
+            InputMode::ColorForm,
+            InputMode::UIColorsBrowser,
+            InputMode::SpellColorsBrowser,
+            InputMode::SpellColorForm,
+            InputMode::ThemeBrowser,
+            InputMode::ThemeEditor,
+            InputMode::SettingsEditor,
+        ];
+
+        // All modes should be distinct
+        for i in 0..modes.len() {
+            for j in i + 1..modes.len() {
+                assert_ne!(modes[i], modes[j]);
+            }
+        }
+    }
+
+    // ==================== DragOperation Tests ====================
+
+    #[test]
+    fn test_drag_operation_equality() {
+        assert_eq!(DragOperation::Move, DragOperation::Move);
+        assert_ne!(DragOperation::Move, DragOperation::ResizeRight);
+        assert_ne!(DragOperation::ResizeBottom, DragOperation::ResizeBottomRight);
+    }
+
+    #[test]
+    fn test_drag_operation_clone() {
+        let op = DragOperation::ResizeBottomRight;
+        let cloned = op.clone();
+        assert_eq!(op, cloned);
+    }
+
+    #[test]
+    fn test_drag_operation_debug() {
+        let debug_str = format!("{:?}", DragOperation::Move);
+        assert!(debug_str.contains("Move"));
+    }
+
+    // ==================== PopupMenuItem Tests ====================
+
+    #[test]
+    fn test_popup_menu_item_creation() {
+        let item = PopupMenuItem {
+            text: "Look".to_string(),
+            command: "look".to_string(),
+            disabled: false,
+        };
+        assert_eq!(item.text, "Look");
+        assert_eq!(item.command, "look");
+        assert!(!item.disabled);
+    }
+
+    #[test]
+    fn test_popup_menu_item_disabled() {
+        let item = PopupMenuItem {
+            text: "Disabled Action".to_string(),
+            command: "disabled".to_string(),
+            disabled: true,
+        };
+        assert!(item.disabled);
+    }
+
+    #[test]
+    fn test_popup_menu_item_clone() {
+        let item = PopupMenuItem {
+            text: "Get".to_string(),
+            command: "get".to_string(),
+            disabled: false,
+        };
+        let cloned = item.clone();
+        assert_eq!(cloned.text, item.text);
+        assert_eq!(cloned.command, item.command);
+        assert_eq!(cloned.disabled, item.disabled);
+    }
+
+    // ==================== PopupMenu Tests ====================
+
+    fn create_test_menu() -> PopupMenu {
+        let items = vec![
+            PopupMenuItem {
+                text: "Look".to_string(),
+                command: "look".to_string(),
+                disabled: false,
+            },
+            PopupMenuItem {
+                text: "Get".to_string(),
+                command: "get".to_string(),
+                disabled: false,
+            },
+            PopupMenuItem {
+                text: "Drop".to_string(),
+                command: "drop".to_string(),
+                disabled: false,
+            },
+        ];
+        PopupMenu::new(items, (10, 20))
+    }
+
+    #[test]
+    fn test_popup_menu_new() {
+        let menu = create_test_menu();
+        assert_eq!(menu.items.len(), 3);
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.position, (10, 20));
+    }
+
+    #[test]
+    fn test_popup_menu_empty() {
+        let menu = PopupMenu::new(vec![], (0, 0));
+        assert!(menu.items.is_empty());
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn test_popup_menu_select_next() {
+        let mut menu = create_test_menu();
+        assert_eq!(menu.selected, 0);
+
+        menu.select_next();
+        assert_eq!(menu.selected, 1);
+
+        menu.select_next();
+        assert_eq!(menu.selected, 2);
+
+        // Should wrap around
+        menu.select_next();
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn test_popup_menu_select_next_empty() {
+        let mut menu = PopupMenu::new(vec![], (0, 0));
+        menu.select_next(); // Should not panic
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn test_popup_menu_select_prev() {
+        let mut menu = create_test_menu();
+        assert_eq!(menu.selected, 0);
+
+        // Should wrap to last item
+        menu.select_prev();
+        assert_eq!(menu.selected, 2);
+
+        menu.select_prev();
+        assert_eq!(menu.selected, 1);
+
+        menu.select_prev();
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn test_popup_menu_select_prev_empty() {
+        let mut menu = PopupMenu::new(vec![], (0, 0));
+        menu.select_prev(); // Should not panic
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn test_popup_menu_selected_item() {
+        let menu = create_test_menu();
+        let item = menu.selected_item().unwrap();
+        assert_eq!(item.text, "Look");
+    }
+
+    #[test]
+    fn test_popup_menu_selected_item_after_navigation() {
+        let mut menu = create_test_menu();
+        menu.select_next();
+        let item = menu.selected_item().unwrap();
+        assert_eq!(item.text, "Get");
+    }
+
+    #[test]
+    fn test_popup_menu_selected_item_empty() {
+        let menu = PopupMenu::new(vec![], (0, 0));
+        assert!(menu.selected_item().is_none());
+    }
+
+    #[test]
+    fn test_popup_menu_get_selected() {
+        let menu = create_test_menu();
+        let item = menu.get_selected().unwrap();
+        assert_eq!(item.command, "look");
+    }
+
+    #[test]
+    fn test_popup_menu_get_items() {
+        let menu = create_test_menu();
+        let items = menu.get_items();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].text, "Look");
+        assert_eq!(items[1].text, "Get");
+        assert_eq!(items[2].text, "Drop");
+    }
+
+    #[test]
+    fn test_popup_menu_get_position() {
+        let menu = create_test_menu();
+        assert_eq!(menu.get_position(), (10, 20));
+    }
+
+    #[test]
+    fn test_popup_menu_get_selected_index() {
+        let mut menu = create_test_menu();
+        assert_eq!(menu.get_selected_index(), 0);
+
+        menu.select_next();
+        assert_eq!(menu.get_selected_index(), 1);
+    }
+
+    // ==================== PopupMenu::check_click Tests ====================
+
+    #[test]
+    fn test_check_click_outside_left() {
+        let menu = create_test_menu();
+        // Area starts at x=10, click at x=5 is outside
+        let result = menu.check_click(5, 22, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_outside_right() {
+        let menu = create_test_menu();
+        // Area is x=10 to x=30 (10+20), click at x=35 is outside
+        let result = menu.check_click(35, 22, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_outside_top() {
+        let menu = create_test_menu();
+        // Area starts at y=20, click at y=15 is outside
+        let result = menu.check_click(15, 15, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_outside_bottom() {
+        let menu = create_test_menu();
+        // Area is y=20 to y=25 (20+5), click at y=30 is outside
+        let result = menu.check_click(15, 30, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_on_top_border() {
+        let menu = create_test_menu();
+        // y=20 is the top border (relative_y=0)
+        let result = menu.check_click(15, 20, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_on_bottom_border() {
+        let menu = create_test_menu();
+        // y=24 is the bottom border (area_height-1 = 4)
+        let result = menu.check_click(15, 24, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_first_item() {
+        let menu = create_test_menu();
+        // y=21 is the first item (relative_y=1, item_index=0)
+        let result = menu.check_click(15, 21, (10, 20, 20, 5));
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_check_click_second_item() {
+        let menu = create_test_menu();
+        // y=22 is the second item (relative_y=2, item_index=1)
+        let result = menu.check_click(15, 22, (10, 20, 20, 5));
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn test_check_click_third_item() {
+        let menu = create_test_menu();
+        // y=23 is the third item (relative_y=3, item_index=2)
+        let result = menu.check_click(15, 23, (10, 20, 20, 5));
+        assert_eq!(result, Some(2));
+    }
+
+    #[test]
+    fn test_check_click_beyond_items() {
+        // Menu with only 2 items, but area has room for more
+        let items = vec![
+            PopupMenuItem {
+                text: "A".to_string(),
+                command: "a".to_string(),
+                disabled: false,
+            },
+            PopupMenuItem {
+                text: "B".to_string(),
+                command: "b".to_string(),
+                disabled: false,
+            },
+        ];
+        let menu = PopupMenu::new(items, (0, 0));
+
+        // Click on what would be item 3 (but menu only has 2 items)
+        // Area height = 6, so relative_y=3 gives item_index=2
+        let result = menu.check_click(5, 3, (0, 0, 20, 6));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_click_at_area_boundary() {
+        let menu = create_test_menu();
+        // Click at the exact right edge (x=29, just inside x=10+20-1)
+        let result = menu.check_click(29, 21, (10, 20, 20, 5));
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_check_click_at_area_corner() {
+        let menu = create_test_menu();
+        // Click at top-left corner (border)
+        let result = menu.check_click(10, 20, (10, 20, 20, 5));
+        assert!(result.is_none());
+    }
+
+    // ==================== MouseDragState Tests ====================
+
+    #[test]
+    fn test_mouse_drag_state_creation() {
+        let drag = MouseDragState {
+            operation: DragOperation::Move,
+            window_name: "main".to_string(),
+            start_pos: (100, 200),
+            original_window_pos: (10, 20, 80, 40),
+        };
+        assert_eq!(drag.operation, DragOperation::Move);
+        assert_eq!(drag.window_name, "main");
+        assert_eq!(drag.start_pos, (100, 200));
+        assert_eq!(drag.original_window_pos, (10, 20, 80, 40));
+    }
+
+    #[test]
+    fn test_mouse_drag_state_clone() {
+        let drag = MouseDragState {
+            operation: DragOperation::ResizeRight,
+            window_name: "story".to_string(),
+            start_pos: (50, 60),
+            original_window_pos: (0, 0, 100, 50),
+        };
+        let cloned = drag.clone();
+        assert_eq!(cloned.operation, drag.operation);
+        assert_eq!(cloned.window_name, drag.window_name);
+    }
+
+    // ==================== PopupMenu Clone Tests ====================
+
+    #[test]
+    fn test_popup_menu_clone() {
+        let mut menu = create_test_menu();
+        menu.select_next();
+
+        let cloned = menu.clone();
+        assert_eq!(cloned.items.len(), menu.items.len());
+        assert_eq!(cloned.selected, menu.selected);
+        assert_eq!(cloned.position, menu.position);
+    }
+
+    // ==================== UiState Clone Tests ====================
+
+    #[test]
+    fn test_ui_state_clone() {
+        let state = UiState::new();
+        let cloned = state.clone();
+        assert_eq!(cloned.input_mode, state.input_mode);
+        assert_eq!(cloned.status_text, state.status_text);
+    }
+}

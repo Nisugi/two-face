@@ -3,7 +3,7 @@
 //! Translates raw `KeyEvent`s and textual keybinds into semantic `MenuAction`s
 //! so every widget can react consistently regardless of current context.
 
-use crate::frontend::common::{KeyCode, KeyEvent};
+use crate::frontend::common::{KeyCode, KeyEvent, KeyModifiers};
 
 /// All possible menu/widget actions
 #[derive(Debug, Clone, PartialEq)]
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_key_event_to_string() {
-        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CTRL);
         assert_eq!(key_event_to_string(key), "ctrl+s");
 
         let key = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);

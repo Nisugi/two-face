@@ -3,20 +3,15 @@
 //! Presents a VellumFE-inspired popup that lets the user tweak geometry,
 //! borders, and stream assignments for a given window definition.
 //!
-//! Uses a section-based navigation system inspired by the theme editor:
-//! - Section 1: Identity (name, title, show title, locked)
-//! - Section 2: Position/Size (row, col, rows, cols)
-//! - Section 3: Constraints (min/max rows/cols)
-//! - Section 4: Border (show, color, style, sides)
-//! - Section 5: Special (widget-specific: streams, cursor colors)
-
+use crate::frontend::common::{KeyCode, KeyEvent as TfKeyEvent};
 use crate::frontend::tui::crossterm_bridge;
-use crate::config::WindowDef;
+use crate::frontend::tui::textarea_bridge;
+use crate::config::{DashboardIndicatorDef, TabbedTextTab, WindowDef};
 use crate::theme::EditorTheme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, Widget},
 };
 use tui_textarea::TextArea;
@@ -34,7 +29,7 @@ const CONTENT_ALIGN_OPTIONS: &[&str] = &[
     "bottom-right",
 ];
 
-/// Field reference for section-based navigation
+/// Field reference for linear navigation/rendering
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FieldRef {
     // Text inputs
@@ -52,6 +47,9 @@ enum FieldRef {
     BorderColor,
     BorderStyle,
     Streams,
+    BufferSize,
+    Wordwrap,
+    Timestamps,
     TextColor,
     CursorColor,
     CursorBg,
@@ -66,6 +64,53 @@ enum FieldRef {
     BorderBottom,
     BorderLeft,
     BorderRight,
+    TabBarPosition,
+    TabActiveColor,
+    TabInactiveColor,
+    TabUnreadColor,
+    TabUnreadPrefix,
+    ShowDesc,
+    ShowObjs,
+    ShowPlayers,
+    ShowExits,
+    ShowName,
+    ProgressLabel,
+    ProgressColor,
+    ProgressNumbersOnly,
+    CountdownLabel,
+    CountdownIcon,
+    CompassActiveColor,
+    CompassInactiveColor,
+    InjuryDefaultColor,
+    Injury1Color,
+    Injury2Color,
+    Injury3Color,
+    Scar1Color,
+    Scar2Color,
+    Scar3Color,
+    IndicatorDefaultStatus,
+    IndicatorDefaultColor,
+    ActiveEffectsCategory,
+    EditTabs,
+    EditIndicators,
+    DashboardLayout,
+    DashboardSpacing,
+    DashboardHideInactive,
+    PerfShowFps,
+    PerfShowFrameTimes,
+    PerfShowRenderTimes,
+    PerfShowUiTimes,
+    PerfShowWrapTimes,
+    PerfShowNet,
+    PerfShowParse,
+    PerfShowEvents,
+    PerfShowMemory,
+    PerfShowLines,
+    PerfShowUptime,
+    PerfShowJitter,
+    PerfShowFrameSpikes,
+    PerfShowEventLag,
+    PerfShowMemoryDelta,
 }
 
 impl FieldRef {
@@ -98,25 +143,440 @@ impl FieldRef {
             FieldRef::CursorColor => 24,
             FieldRef::CursorBg => 25,
             FieldRef::ContentAlign => 26,
+            FieldRef::TabBarPosition => 27,
+            FieldRef::TabActiveColor => 28,
+            FieldRef::TabInactiveColor => 29,
+            FieldRef::TabUnreadColor => 30,
+            FieldRef::TabUnreadPrefix => 31,
+            FieldRef::ShowDesc => 32,
+            FieldRef::ShowObjs => 33,
+            FieldRef::ShowPlayers => 34,
+            FieldRef::ShowExits => 35,
+            FieldRef::ShowName => 36,
+            FieldRef::ProgressLabel => 37,
+            FieldRef::ProgressColor => 38,
+            FieldRef::ProgressNumbersOnly => 39,
+            FieldRef::CountdownLabel => 40,
+            FieldRef::CountdownIcon => 41,
+            FieldRef::CompassActiveColor => 42,
+            FieldRef::CompassInactiveColor => 43,
+            FieldRef::InjuryDefaultColor => 44,
+            FieldRef::Injury1Color => 45,
+            FieldRef::Injury2Color => 46,
+            FieldRef::Injury3Color => 47,
+            FieldRef::Scar1Color => 48,
+            FieldRef::Scar2Color => 49,
+            FieldRef::Scar3Color => 50,
+            FieldRef::IndicatorDefaultStatus => 51,
+            FieldRef::IndicatorDefaultColor => 52,
+            FieldRef::ActiveEffectsCategory => 53,
+            FieldRef::EditTabs => 54,
+            FieldRef::EditIndicators => 55,
+            FieldRef::DashboardLayout => 56,
+            FieldRef::DashboardSpacing => 57,
+            FieldRef::DashboardHideInactive => 58,
+            FieldRef::PerfShowFps => 59,
+            FieldRef::PerfShowFrameTimes => 60,
+            FieldRef::PerfShowRenderTimes => 61,
+            FieldRef::PerfShowUiTimes => 62,
+            FieldRef::PerfShowWrapTimes => 63,
+            FieldRef::PerfShowNet => 64,
+            FieldRef::PerfShowParse => 65,
+            FieldRef::PerfShowEvents => 66,
+            FieldRef::PerfShowMemory => 67,
+            FieldRef::PerfShowLines => 68,
+            FieldRef::PerfShowUptime => 69,
+            FieldRef::PerfShowJitter => 70,
+            FieldRef::PerfShowFrameSpikes => 71,
+            FieldRef::PerfShowEventLag => 72,
+            FieldRef::PerfShowMemoryDelta => 73,
+            FieldRef::BufferSize => 74,
+            FieldRef::Wordwrap => 75,
+            FieldRef::Timestamps => 76,
         }
     }
 }
 
-/// A section of related fields in the window editor
-#[derive(Clone)]
-struct WindowSection {
-    name: &'static str,
-    fields: Vec<FieldRef>,
+#[derive(Clone, Debug)]
+struct TabEditItem {
+    name: String,
+    streams: Vec<String>,
+    show_timestamps: bool,
 }
 
-/// Global field reference - includes meta fields and all section fields
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct GlobalFieldRef {
-    field: FieldRef,
-    section: usize, // 0 = meta section, 1-5 = numbered sections
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabEditorMode {
+    List,
+    Form,
 }
 
-/// Window editor widget - 50x25 popup with section-based navigation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabEditorFormField {
+    Name,
+    Streams,
+}
+
+#[derive(Clone, Debug)]
+struct TabEditor {
+    tabs: Vec<TabEditItem>,
+    selected: usize,
+    mode: TabEditorMode,
+    form_field: TabEditorFormField,
+    name_input: TextArea<'static>,
+    streams_input: TextArea<'static>,
+    show_timestamps: bool,
+    editing_index: Option<usize>,
+}
+
+impl TabEditor {
+    fn from_tabs(tabs: &[TabbedTextTab]) -> Self {
+        let mut items: Vec<TabEditItem> = tabs
+            .iter()
+            .map(|t| TabEditItem {
+                name: t.name.clone(),
+                streams: t.get_streams(),
+                show_timestamps: t.show_timestamps.unwrap_or(false),
+            })
+            .collect();
+
+        if items.is_empty() {
+            items.push(TabEditItem {
+                name: "Main".to_string(),
+                streams: vec!["main".to_string()],
+                show_timestamps: false,
+            });
+        }
+
+        let mut name_input = WindowEditor::create_textarea();
+        let mut streams_input = WindowEditor::create_textarea();
+        name_input.insert_str(items[0].name.clone());
+        streams_input.insert_str(items[0].streams.join(", "));
+        let initial_ts = items.get(0).map(|t| t.show_timestamps).unwrap_or(false);
+
+        Self {
+            tabs: items,
+            selected: 0,
+            mode: TabEditorMode::List,
+            form_field: TabEditorFormField::Name,
+            name_input,
+            streams_input,
+            show_timestamps: initial_ts,
+            editing_index: None,
+        }
+    }
+
+    fn to_tabs(&self) -> Vec<TabbedTextTab> {
+        self.tabs
+            .iter()
+            .map(|t| TabbedTextTab {
+                name: t.name.clone(),
+                stream: None,
+                streams: t.streams.clone(),
+                show_timestamps: Some(t.show_timestamps),
+            })
+            .collect()
+    }
+
+    fn start_add(&mut self) {
+        self.mode = TabEditorMode::Form;
+        self.form_field = TabEditorFormField::Name;
+        self.editing_index = None;
+        self.name_input = WindowEditor::create_textarea();
+        self.streams_input = WindowEditor::create_textarea();
+        self.show_timestamps = false;
+    }
+
+    fn start_edit(&mut self) {
+        if let Some(item) = self.tabs.get(self.selected).cloned() {
+            self.mode = TabEditorMode::Form;
+            self.form_field = TabEditorFormField::Name;
+            self.editing_index = Some(self.selected);
+            self.name_input = WindowEditor::create_textarea();
+            self.streams_input = WindowEditor::create_textarea();
+            self.name_input.insert_str(item.name);
+            self.streams_input.insert_str(item.streams.join(", "));
+            self.show_timestamps = item.show_timestamps;
+        }
+    }
+
+    fn save_form(&mut self) {
+        let name = self
+            .name_input
+            .lines()
+            .get(0)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let streams: Vec<String> = self
+            .streams_input
+            .lines()
+            .get(0)
+            .map(|s| {
+                s.split(',')
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new);
+
+        if name.is_empty() || streams.is_empty() {
+            return;
+        }
+
+        let item = TabEditItem {
+            name,
+            streams,
+            show_timestamps: self.show_timestamps,
+        };
+
+        if let Some(idx) = self.editing_index {
+            if idx < self.tabs.len() {
+                self.tabs[idx] = item;
+                self.selected = idx;
+            }
+        } else {
+            self.tabs.push(item);
+            self.selected = self.tabs.len().saturating_sub(1);
+        }
+
+        self.mode = TabEditorMode::List;
+        self.editing_index = None;
+    }
+
+    fn cancel_form(&mut self) {
+        self.mode = TabEditorMode::List;
+        self.editing_index = None;
+    }
+
+    fn delete_selected(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if self.selected < self.tabs.len() {
+            self.tabs.remove(self.selected);
+            if self.selected >= self.tabs.len() {
+                self.selected = self.tabs.len().saturating_sub(1);
+            }
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.tabs.swap(self.selected, self.selected - 1);
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.selected + 1 < self.tabs.len() {
+            self.tabs.swap(self.selected, self.selected + 1);
+            self.selected += 1;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IndicatorItem {
+    id: String,
+    icon: String,
+    colors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndicatorEditorMode {
+    List,
+    Form,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndicatorFormField {
+    Id,
+    Icon,
+    Colors,
+}
+
+#[derive(Clone, Debug)]
+struct IndicatorEditor {
+    indicators: Vec<IndicatorItem>,
+    selected: usize,
+    mode: IndicatorEditorMode,
+    form_field: IndicatorFormField,
+    id_input: TextArea<'static>,
+    icon_input: TextArea<'static>,
+    colors_input: TextArea<'static>,
+    editing_index: Option<usize>,
+}
+
+impl IndicatorEditor {
+    fn from_defs(defs: &[DashboardIndicatorDef]) -> Self {
+        let mut items: Vec<IndicatorItem> = if defs.is_empty() {
+            vec![IndicatorItem {
+                id: "poisoned".to_string(),
+                icon: "?".to_string(),
+                colors: vec!["#000000".to_string(), "#00ff00".to_string()],
+            }]
+        } else {
+            defs.iter()
+                .map(|d| IndicatorItem {
+                    id: d.id.clone(),
+                    icon: d.icon.clone(),
+                    colors: if d.colors.is_empty() {
+                        vec!["#ffffff".to_string()]
+                    } else {
+                        d.colors.clone()
+                    },
+                })
+                .collect()
+        };
+
+        if items.is_empty() {
+            items.push(IndicatorItem {
+                id: "status".to_string(),
+                icon: "*".to_string(),
+                colors: vec!["#ffffff".to_string()],
+            });
+        }
+
+        let mut id_input = WindowEditor::create_textarea();
+        let mut icon_input = WindowEditor::create_textarea();
+        let mut colors_input = WindowEditor::create_textarea();
+        id_input.insert_str(items[0].id.clone());
+        icon_input.insert_str(items[0].icon.clone());
+        colors_input.insert_str(items[0].colors.join(", "));
+
+        Self {
+            indicators: items,
+            selected: 0,
+            mode: IndicatorEditorMode::List,
+            form_field: IndicatorFormField::Id,
+            id_input,
+            icon_input,
+            colors_input,
+            editing_index: None,
+        }
+    }
+
+    fn to_defs(&self) -> Vec<DashboardIndicatorDef> {
+        self.indicators
+            .iter()
+            .map(|ind| DashboardIndicatorDef {
+                id: ind.id.clone(),
+                icon: ind.icon.clone(),
+                colors: ind.colors.clone(),
+            })
+            .collect()
+    }
+
+    fn start_add(&mut self) {
+        self.mode = IndicatorEditorMode::Form;
+        self.form_field = IndicatorFormField::Id;
+        self.editing_index = None;
+        self.id_input = WindowEditor::create_textarea();
+        self.icon_input = WindowEditor::create_textarea();
+        self.colors_input = WindowEditor::create_textarea();
+        self.colors_input
+            .insert_str("#000000, #ffffff".to_string());
+    }
+
+    fn start_edit(&mut self) {
+        if let Some(item) = self.indicators.get(self.selected).cloned() {
+            self.mode = IndicatorEditorMode::Form;
+            self.form_field = IndicatorFormField::Id;
+            self.editing_index = Some(self.selected);
+            self.id_input = WindowEditor::create_textarea();
+            self.icon_input = WindowEditor::create_textarea();
+            self.colors_input = WindowEditor::create_textarea();
+            self.id_input.insert_str(item.id);
+            self.icon_input.insert_str(item.icon);
+            self.colors_input.insert_str(item.colors.join(", "));
+        }
+    }
+
+    fn save_form(&mut self) {
+        let id = self
+            .id_input
+            .lines()
+            .get(0)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let icon = self
+            .icon_input
+            .lines()
+            .get(0)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let colors: Vec<String> = self
+            .colors_input
+            .lines()
+            .get(0)
+            .map(|s| {
+                s.split(',')
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new);
+
+        if id.is_empty() || icon.is_empty() {
+            return;
+        }
+
+        let item = IndicatorItem {
+            id,
+            icon,
+            colors: if colors.is_empty() {
+                vec!["#ffffff".to_string()]
+            } else {
+                colors
+            },
+        };
+
+        if let Some(idx) = self.editing_index {
+            if idx < self.indicators.len() {
+                self.indicators[idx] = item;
+                self.selected = idx;
+            }
+        } else {
+            self.indicators.push(item);
+            self.selected = self.indicators.len().saturating_sub(1);
+        }
+
+        self.mode = IndicatorEditorMode::List;
+        self.editing_index = None;
+    }
+
+    fn cancel_form(&mut self) {
+        self.mode = IndicatorEditorMode::List;
+        self.editing_index = None;
+    }
+
+    fn delete_selected(&mut self) {
+        if self.indicators.is_empty() {
+            return;
+        }
+        if self.selected < self.indicators.len() {
+            self.indicators.remove(self.selected);
+            if self.selected >= self.indicators.len() {
+                self.selected = self.indicators.len().saturating_sub(1);
+            }
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.indicators.swap(self.selected, self.selected - 1);
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.selected + 1 < self.indicators.len() {
+            self.indicators.swap(self.selected, self.selected + 1);
+            self.selected += 1;
+        }
+    }
+}
+
+/// Window editor widget - 70x20 popup with single-page layout
 pub struct WindowEditor {
     popup_x: u16,
     popup_y: u16,
@@ -125,19 +585,10 @@ pub struct WindowEditor {
     dragging: bool,
     drag_offset_x: u16,
     drag_offset_y: u16,
-    resizing: bool,
-    resize_start_width: u16,
-    resize_start_height: u16,
-    resize_start_mouse_x: u16,
-    resize_start_mouse_y: u16,
-
-    // Section-based navigation (0 = meta section with Name/Title, 1-5 = numbered sections)
-    sections: Vec<WindowSection>,
-    current_section: usize,         // 0 = meta, 1-5 = sections
-    global_fields: Vec<GlobalFieldRef>, // Flattened list of all fields for Tab navigation
-    current_field_global: usize,    // Index in global_fields list
-
-    pub focused_field: usize, // Legacy field index (for compatibility)
+    // Linear navigation over fields
+    field_order: Vec<FieldRef>,
+    current_field_index: usize,
+    pub focused_field: usize, // Legacy field index (for compatibility with existing input handling)
 
     // Text inputs
     name_input: TextArea<'static>,
@@ -153,18 +604,75 @@ pub struct WindowEditor {
     bg_color_input: TextArea<'static>,
     border_color_input: TextArea<'static>,
     streams_input: TextArea<'static>,
+    buffer_size_input: TextArea<'static>,
+    text_wordwrap: bool,
+    text_show_timestamps: bool,
     text_color_input: TextArea<'static>,
     cursor_color_input: TextArea<'static>,
     cursor_bg_input: TextArea<'static>,
     content_align_input: TextArea<'static>,
+    tab_bar_position_input: TextArea<'static>,
+    tab_active_color_input: TextArea<'static>,
+    tab_inactive_color_input: TextArea<'static>,
+    tab_unread_color_input: TextArea<'static>,
+    tab_unread_prefix_input: TextArea<'static>,
+    progress_label_input: TextArea<'static>,
+    progress_color_input: TextArea<'static>,
+    progress_numbers_only: bool,
+    countdown_label_input: TextArea<'static>,
+    countdown_icon_input: TextArea<'static>,
+    compass_active_color_input: TextArea<'static>,
+    compass_inactive_color_input: TextArea<'static>,
+    injury_default_color_input: TextArea<'static>,
+    injury1_color_input: TextArea<'static>,
+    injury2_color_input: TextArea<'static>,
+    injury3_color_input: TextArea<'static>,
+    scar1_color_input: TextArea<'static>,
+    scar2_color_input: TextArea<'static>,
+    scar3_color_input: TextArea<'static>,
+    indicator_default_status_input: TextArea<'static>,
+    indicator_default_color_input: TextArea<'static>,
+    active_effects_category_input: TextArea<'static>,
+    dashboard_layout_input: TextArea<'static>,
+    dashboard_spacing_input: TextArea<'static>,
+    dashboard_hide_inactive: bool,
+    show_desc: bool,
+    show_objs: bool,
+    show_players: bool,
+    show_exits: bool,
+    show_name: bool,
+    perf_show_fps: bool,
+    perf_show_frame_times: bool,
+    perf_show_render_times: bool,
+    perf_show_ui_times: bool,
+    perf_show_wrap_times: bool,
+    perf_show_net: bool,
+    perf_show_parse: bool,
+    perf_show_events: bool,
+    perf_show_memory: bool,
+    perf_show_lines: bool,
+    perf_show_uptime: bool,
+    perf_show_jitter: bool,
+    perf_show_frame_spikes: bool,
+    perf_show_event_lag: bool,
+    perf_show_memory_delta: bool,
 
     window_def: WindowDef,
     original_window_def: WindowDef,
     is_new: bool,
     status_message: String,
+    tab_editor: Option<TabEditor>,
+    indicator_editor: Option<IndicatorEditor>,
 }
 
 impl WindowEditor {
+    /// Set the window name input and underlying WindowDef name.
+    pub fn set_name(&mut self, name: &str) {
+        self.name_input = Self::create_textarea();
+        self.name_input.insert_str(name);
+        self.window_def.base_mut().name = name.to_string();
+    }
+
     fn create_textarea() -> TextArea<'static> {
         let mut ta = TextArea::default();
         ta.set_cursor_line_style(Style::default());
@@ -178,131 +686,119 @@ impl WindowEditor {
         ta
     }
 
-    /// Helper function to build common sections
-    fn build_standard_sections() -> Vec<WindowSection> {
-        vec![
-            // Section 1: Identity
-            WindowSection {
-                name: "Identity",
-                fields: vec![
-                    FieldRef::ShowTitle,
-                    FieldRef::Locked,
-                    FieldRef::TransparentBg,
-                    FieldRef::BgColor,
-                    FieldRef::ContentAlign,
-                ],
-            },
-            // Section 2: Position & Size
-            WindowSection {
-                name: "Position & Size",
-                fields: vec![FieldRef::Row, FieldRef::Col, FieldRef::Rows, FieldRef::Cols],
-            },
-            // Section 3: Constraints
-            WindowSection {
-                name: "Constraints",
-                fields: vec![
-                    FieldRef::MinRows,
-                    FieldRef::MinCols,
-                    FieldRef::MaxRows,
-                    FieldRef::MaxCols,
-                ],
-            },
-            // Section 4: Border
-            WindowSection {
-                name: "Border",
-                fields: vec![
-                    FieldRef::ShowBorder,
-                    FieldRef::BorderStyle,
-                    FieldRef::BorderColor,
-                    FieldRef::BorderTop,
-                    FieldRef::BorderBottom,
-                    FieldRef::BorderLeft,
-                    FieldRef::BorderRight,
-                ],
-            },
-        ]
-    }
+    /// Build the linear field order used for Tab/Shift+Tab navigation
+    fn build_field_order_for(window_def: &WindowDef) -> Vec<FieldRef> {
+        let mut fields = vec![
+            // Identity + geometry (left column)
+            FieldRef::Name,
+            FieldRef::Title,
+            FieldRef::Row,
+            FieldRef::Col,
+            FieldRef::Rows,
+            FieldRef::Cols,
+            FieldRef::MinRows,
+            FieldRef::MinCols,
+            FieldRef::MaxRows,
+            FieldRef::MaxCols,
+            FieldRef::ContentAlign,
+            FieldRef::BorderStyle,
+            // Appearance (right column)
+            FieldRef::ShowTitle,
+            FieldRef::Locked,
+            FieldRef::TransparentBg,
+            FieldRef::BgColor,
+            FieldRef::ShowBorder,
+            FieldRef::BorderTop,
+            FieldRef::BorderBottom,
+            FieldRef::BorderLeft,
+            FieldRef::BorderRight,
+            FieldRef::BorderColor,
+        ];
 
-    /// Build the 5 sections based on widget type
-    fn build_sections(is_command_input: bool) -> Vec<WindowSection> {
-        let mut sections = Self::build_standard_sections();
-
-        // Section 5: Special (widget-specific)
-        sections.push(WindowSection {
-            name: "Special",
-            fields: if is_command_input {
-                vec![
-                    FieldRef::TextColor,
-                    FieldRef::CursorColor,
-                    FieldRef::CursorBg,
-                ]
-            } else {
-                vec![FieldRef::Streams]
-            },
-        });
-
-        sections
-    }
-
-    /// Build sections based on widget type string
-    /// For spacer widgets, excludes the Border section
-    /// For other widgets, includes all 5 sections
-    fn build_sections_for_widget(widget_type: String) -> Vec<WindowSection> {
-        let is_spacer = widget_type.to_lowercase() == "spacer";
-        let is_command_input = widget_type.to_lowercase() == "command_input";
-
-        let mut sections = if is_spacer {
-            // Spacers: skip Border section, keep first 3
-            Self::build_standard_sections()[..3].to_vec()
-        } else {
-            // Other widgets: include Border section (all 4)
-            Self::build_standard_sections()
-        };
-
-        // Section 5: Special (widget-specific)
-        sections.push(WindowSection {
-            name: "Special",
-            fields: if is_command_input {
-                vec![
-                    FieldRef::TextColor,
-                    FieldRef::CursorColor,
-                    FieldRef::CursorBg,
-                ]
-            } else {
-                vec![FieldRef::Streams]
-            },
-        });
-
-        sections
-    }
-
-    /// Build the global fields list for Tab navigation
-    /// Section 0 (meta): Name, Title
-    /// Sections 1-5: All fields in each section
-    fn build_global_fields(sections: &[WindowSection]) -> Vec<GlobalFieldRef> {
-        let mut global_fields = Vec::new();
-
-        // Meta section (section 0) - Name and Title only
-        global_fields.push(GlobalFieldRef {
-            field: FieldRef::Name,
-            section: 0,
-        });
-        global_fields.push(GlobalFieldRef {
-            field: FieldRef::Title,
-            section: 0,
-        });
-
-        // Add all fields from numbered sections (1-5)
-        for (section_idx, section) in sections.iter().enumerate() {
-            for field_ref in &section.fields {
-                global_fields.push(GlobalFieldRef {
-                    field: *field_ref,
-                    section: section_idx + 1, // Section 1-5 (0 is meta)
-                });
+        // Special section fields appended at end
+        match window_def {
+            WindowDef::CommandInput { .. } => {
+                fields.push(FieldRef::TextColor);
+                fields.push(FieldRef::CursorColor);
+                fields.push(FieldRef::CursorBg);
+            }
+            WindowDef::Text { .. } | WindowDef::Inventory { .. } => {
+                fields.push(FieldRef::Streams);
+                fields.push(FieldRef::BufferSize);
+                fields.push(FieldRef::Wordwrap);
+                fields.push(FieldRef::Timestamps);
+            }
+            WindowDef::TabbedText { .. } => {
+                fields.push(FieldRef::TabBarPosition);
+                fields.push(FieldRef::EditTabs);
+            }
+            WindowDef::Room { .. } => {
+                fields.push(FieldRef::ShowDesc);
+                fields.push(FieldRef::ShowObjs);
+                fields.push(FieldRef::ShowPlayers);
+                fields.push(FieldRef::ShowExits);
+                fields.push(FieldRef::ShowName);
+            }
+            WindowDef::Progress { .. } => {
+                fields.push(FieldRef::ProgressLabel);
+                fields.push(FieldRef::ProgressColor);
+                fields.push(FieldRef::ProgressNumbersOnly);
+            }
+            WindowDef::Countdown { .. } => {
+                fields.push(FieldRef::CountdownLabel);
+                fields.push(FieldRef::CountdownIcon);
+            }
+            WindowDef::Compass { .. } => {
+                fields.push(FieldRef::CompassActiveColor);
+                fields.push(FieldRef::CompassInactiveColor);
+            }
+            WindowDef::InjuryDoll { .. } => {
+                fields.push(FieldRef::InjuryDefaultColor);
+                fields.push(FieldRef::Injury1Color);
+                fields.push(FieldRef::Injury2Color);
+                fields.push(FieldRef::Injury3Color);
+                fields.push(FieldRef::Scar1Color);
+                fields.push(FieldRef::Scar2Color);
+                fields.push(FieldRef::Scar3Color);
+            }
+            WindowDef::Indicator { .. } => {
+                fields.push(FieldRef::IndicatorDefaultStatus);
+                fields.push(FieldRef::IndicatorDefaultColor);
+            }
+            WindowDef::Dashboard { .. } => {
+                fields.push(FieldRef::DashboardLayout);
+                fields.push(FieldRef::DashboardSpacing);
+                fields.push(FieldRef::DashboardHideInactive);
+                fields.push(FieldRef::EditIndicators);
+            }
+            WindowDef::ActiveEffects { .. } => {
+                fields.push(FieldRef::ActiveEffectsCategory);
+            }
+            WindowDef::Hand { .. }
+            | WindowDef::Targets { .. }
+            | WindowDef::Players { .. }
+            | WindowDef::Spacer { .. }
+            | WindowDef::Spells { .. } => {}
+            WindowDef::Performance { .. } => {
+                fields.push(FieldRef::PerfShowFps);
+                fields.push(FieldRef::PerfShowFrameTimes);
+                fields.push(FieldRef::PerfShowRenderTimes);
+                fields.push(FieldRef::PerfShowUiTimes);
+                fields.push(FieldRef::PerfShowWrapTimes);
+                fields.push(FieldRef::PerfShowNet);
+                fields.push(FieldRef::PerfShowParse);
+                fields.push(FieldRef::PerfShowEvents);
+                fields.push(FieldRef::PerfShowMemory);
+                fields.push(FieldRef::PerfShowLines);
+                fields.push(FieldRef::PerfShowUptime);
+                fields.push(FieldRef::PerfShowJitter);
+                fields.push(FieldRef::PerfShowFrameSpikes);
+                fields.push(FieldRef::PerfShowEventLag);
+                fields.push(FieldRef::PerfShowMemoryDelta);
             }
         }
 
-        global_fields
+        fields
     }
 
     fn refresh_size_inputs(&mut self) {
@@ -377,13 +873,70 @@ impl WindowEditor {
         }
 
         let mut streams_input = Self::create_textarea();
+        let mut buffer_size_input = Self::create_textarea();
+        let mut text_wordwrap = true;
+        let mut text_show_timestamps = false;
         if let crate::config::WindowDef::Text { data, .. } = &window_def {
             streams_input.insert_str(data.streams.join(", "));
+            buffer_size_input.insert_str(data.buffer_size.to_string());
+            text_wordwrap = data.wordwrap;
+            text_show_timestamps = data.show_timestamps;
+        }
+        if let crate::config::WindowDef::Inventory { data, .. } = &window_def {
+            streams_input.insert_str(data.streams.join(", "));
+            buffer_size_input.insert_str(data.buffer_size.to_string());
+            text_wordwrap = data.wordwrap;
+            text_show_timestamps = data.show_timestamps;
         }
 
         let mut text_color_input = Self::create_textarea();
         let mut cursor_color_input = Self::create_textarea();
         let mut cursor_bg_input = Self::create_textarea();
+        let mut tab_bar_position_input = Self::create_textarea();
+        let mut tab_active_color_input = Self::create_textarea();
+        let mut tab_inactive_color_input = Self::create_textarea();
+        let mut tab_unread_color_input = Self::create_textarea();
+        let mut tab_unread_prefix_input = Self::create_textarea();
+        let mut progress_label_input = Self::create_textarea();
+        let mut progress_color_input = Self::create_textarea();
+        let mut countdown_label_input = Self::create_textarea();
+        let mut countdown_icon_input = Self::create_textarea();
+        let mut compass_active_color_input = Self::create_textarea();
+        let mut compass_inactive_color_input = Self::create_textarea();
+        let mut injury_default_color_input = Self::create_textarea();
+        let mut injury1_color_input = Self::create_textarea();
+        let mut injury2_color_input = Self::create_textarea();
+        let mut injury3_color_input = Self::create_textarea();
+        let mut scar1_color_input = Self::create_textarea();
+        let mut scar2_color_input = Self::create_textarea();
+        let mut scar3_color_input = Self::create_textarea();
+        let mut indicator_default_status_input = Self::create_textarea();
+        let mut indicator_default_color_input = Self::create_textarea();
+        let mut active_effects_category_input = Self::create_textarea();
+        let mut dashboard_layout_input = Self::create_textarea();
+        let mut dashboard_spacing_input = Self::create_textarea();
+        let mut dashboard_hide_inactive = false;
+        let mut perf_show_fps = true;
+        let mut perf_show_frame_times = true;
+        let mut perf_show_render_times = true;
+        let mut perf_show_ui_times = true;
+        let mut perf_show_wrap_times = true;
+        let mut perf_show_net = true;
+        let mut perf_show_parse = true;
+        let mut perf_show_events = true;
+        let mut perf_show_memory = true;
+        let mut perf_show_lines = true;
+        let mut perf_show_uptime = true;
+        let mut perf_show_jitter = true;
+        let mut perf_show_frame_spikes = true;
+        let mut perf_show_event_lag = true;
+        let mut perf_show_memory_delta = true;
+        let mut show_desc = true;
+        let mut show_objs = true;
+        let mut show_players = true;
+        let mut show_exits = true;
+        let mut show_name = false;
+        let mut progress_numbers_only = false;
         if let crate::config::WindowDef::CommandInput { data, .. } = &window_def {
             if let Some(ref color) = data.text_color {
                 text_color_input.insert_str(color);
@@ -396,33 +949,137 @@ impl WindowEditor {
             }
         }
 
+        if let crate::config::WindowDef::TabbedText { data, .. } = &window_def {
+            tab_bar_position_input.insert_str(&data.tab_bar_position);
+            if let Some(ref c) = data.tab_active_color {
+                tab_active_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.tab_inactive_color {
+                tab_inactive_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.tab_unread_color {
+                tab_unread_color_input.insert_str(c);
+            }
+            if let Some(ref prefix) = data.tab_unread_prefix {
+                tab_unread_prefix_input.insert_str(prefix);
+            }
+        }
+
+        if let crate::config::WindowDef::Progress { data, .. } = &window_def {
+            if let Some(ref label) = data.label {
+                progress_label_input.insert_str(label);
+            }
+            if let Some(ref color) = data.color {
+                progress_color_input.insert_str(color);
+            }
+            progress_numbers_only = data.numbers_only;
+        }
+
+        if let crate::config::WindowDef::Countdown { data, .. } = &window_def {
+            if let Some(ref label) = data.label {
+                countdown_label_input.insert_str(label);
+            }
+            if let Some(icon) = data.icon {
+                countdown_icon_input.insert_str(&icon.to_string());
+            }
+        }
+
+        if let crate::config::WindowDef::Compass { data, .. } = &window_def {
+            if let Some(ref c) = data.active_color {
+                compass_active_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.inactive_color {
+                compass_inactive_color_input.insert_str(c);
+            }
+        }
+
+        if let crate::config::WindowDef::InjuryDoll { data, .. } = &window_def {
+            if let Some(ref c) = data.injury_default_color {
+                injury_default_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.injury1_color {
+                injury1_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.injury2_color {
+                injury2_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.injury3_color {
+                injury3_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.scar1_color {
+                scar1_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.scar2_color {
+                scar2_color_input.insert_str(c);
+            }
+            if let Some(ref c) = data.scar3_color {
+                scar3_color_input.insert_str(c);
+            }
+        }
+
+        if let crate::config::WindowDef::Indicator { data, .. } = &window_def {
+            if let Some(ref status) = data.default_status {
+                indicator_default_status_input.insert_str(status);
+            }
+            if let Some(ref color) = data.default_color {
+                indicator_default_color_input.insert_str(color);
+            }
+        }
+
+        if let crate::config::WindowDef::ActiveEffects { data, .. } = &window_def {
+            active_effects_category_input.insert_str(&data.category);
+        }
+
+        if let crate::config::WindowDef::Dashboard { data, .. } = &window_def {
+            dashboard_layout_input.insert_str(&data.layout);
+            dashboard_spacing_input.insert_str(data.spacing.to_string());
+            dashboard_hide_inactive = data.hide_inactive;
+        }
+
+        if let crate::config::WindowDef::Performance { data, .. } = &window_def {
+            perf_show_fps = data.show_fps;
+            perf_show_frame_times = data.show_frame_times;
+            perf_show_render_times = data.show_render_times;
+            perf_show_ui_times = data.show_ui_times;
+            perf_show_wrap_times = data.show_wrap_times;
+            perf_show_net = data.show_net;
+            perf_show_parse = data.show_parse;
+            perf_show_events = data.show_events;
+            perf_show_memory = data.show_memory;
+            perf_show_lines = data.show_lines;
+            perf_show_uptime = data.show_uptime;
+            perf_show_jitter = data.show_jitter;
+            perf_show_frame_spikes = data.show_frame_spikes;
+            perf_show_event_lag = data.show_event_lag;
+            perf_show_memory_delta = data.show_memory_delta;
+        }
+
+        if let crate::config::WindowDef::Room { data, .. } = &window_def {
+            show_desc = data.show_desc;
+            show_objs = data.show_objs;
+            show_players = data.show_players;
+            show_exits = data.show_exits;
+            show_name = data.show_name;
+        }
+
         let mut content_align_input = Self::create_textarea();
         if let Some(ref align) = window_def.base().content_align {
             content_align_input.insert_str(align);
         }
 
-        let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
-        let sections = Self::build_sections(is_command_input);
-        let global_fields = Self::build_global_fields(&sections);
+        let field_order = Self::build_field_order_for(&window_def);
 
         Self {
             popup_x: 0,
             popup_y: 0,
-            popup_width: 50,
-            popup_height: 25,
+            popup_width: 70,
+            popup_height: 20,
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
-            resizing: false,
-            resize_start_width: 0,
-            resize_start_height: 0,
-            resize_start_mouse_x: 0,
-            resize_start_mouse_y: 0,
-            sections,
-            current_section: 0, // Start on meta section
-            global_fields,
-            current_field_global: 0, // Start on Name field
-            focused_field: 0,
+            field_order,
+            current_field_index: 0,
+            focused_field: FieldRef::Name.legacy_field_id(),
             name_input,
             title_input,
             row_input,
@@ -436,14 +1093,64 @@ impl WindowEditor {
             bg_color_input,
             border_color_input,
             streams_input,
+            buffer_size_input,
+            text_wordwrap,
+            text_show_timestamps,
             text_color_input,
             cursor_color_input,
             cursor_bg_input,
             content_align_input,
+            tab_bar_position_input,
+            tab_active_color_input,
+            tab_inactive_color_input,
+            tab_unread_color_input,
+            tab_unread_prefix_input,
+            progress_label_input,
+            progress_color_input,
+            progress_numbers_only,
+            countdown_label_input,
+            countdown_icon_input,
+            compass_active_color_input,
+            compass_inactive_color_input,
+            injury_default_color_input,
+            injury1_color_input,
+            injury2_color_input,
+            injury3_color_input,
+            scar1_color_input,
+            scar2_color_input,
+            scar3_color_input,
+            indicator_default_status_input,
+            indicator_default_color_input,
+            active_effects_category_input,
+            dashboard_layout_input,
+            dashboard_spacing_input,
+            dashboard_hide_inactive,
+            show_desc,
+            show_objs,
+            show_players,
+            show_exits,
+            show_name,
+            perf_show_fps,
+            perf_show_frame_times,
+            perf_show_render_times,
+            perf_show_ui_times,
+            perf_show_wrap_times,
+            perf_show_net,
+            perf_show_parse,
+            perf_show_events,
+            perf_show_memory,
+            perf_show_lines,
+            perf_show_uptime,
+            perf_show_jitter,
+            perf_show_frame_spikes,
+            perf_show_event_lag,
+            perf_show_memory_delta,
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: false,
-            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+s: Save | Esc: Back/Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+S: Save | Esc: Cancel".to_string(),
+            tab_editor: None,
+            indicator_editor: None,
         }
     }
 
@@ -458,8 +1165,8 @@ impl WindowEditor {
 
     pub fn new_window(widget_type: String) -> Self {
         use crate::config::{
-            BorderSides, CommandInputWidgetData, RoomWidgetData, SpacerWidgetData, TextWidgetData, WindowBase,
-            WindowDef,
+            BorderSides, CommandInputWidgetData, PerformanceWidgetData, RoomWidgetData, SpacerWidgetData,
+            TextWidgetData, WindowBase, WindowDef,
         };
 
         // Create base configuration with defaults
@@ -494,6 +1201,8 @@ impl WindowEditor {
                 data: TextWidgetData {
                     streams: vec![],
                     buffer_size: 10000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             },
             "room" => WindowDef::Room {
@@ -515,11 +1224,33 @@ impl WindowEditor {
                 base,
                 data: SpacerWidgetData {},
             },
+            "performance" => WindowDef::Performance {
+                base,
+                data: PerformanceWidgetData {
+                    show_fps: true,
+                    show_frame_times: true,
+                    show_render_times: true,
+                    show_ui_times: true,
+                    show_wrap_times: true,
+                    show_net: true,
+                    show_parse: true,
+                    show_events: true,
+                    show_memory: true,
+                    show_lines: true,
+                    show_uptime: true,
+                    show_jitter: true,
+                    show_frame_spikes: true,
+                    show_event_lag: true,
+                    show_memory_delta: true,
+                },
+            },
             _ => WindowDef::Text {
                 base,
                 data: TextWidgetData {
                     streams: vec![],
                     buffer_size: 10000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             },
         };
@@ -544,33 +1275,74 @@ impl WindowEditor {
         let bg_color_input = Self::create_textarea();
         let border_color_input = Self::create_textarea();
         let streams_input = Self::create_textarea();
+        let mut buffer_size_input = Self::create_textarea();
+        buffer_size_input.insert_str("10000");
+        let text_wordwrap = true;
+        let text_show_timestamps = false;
         let text_color_input = Self::create_textarea();
         let cursor_color_input = Self::create_textarea();
         let cursor_bg_input = Self::create_textarea();
         let content_align_input = Self::create_textarea();
+        let mut tab_bar_position_input = Self::create_textarea();
+        tab_bar_position_input.insert_str("top");
+        let tab_active_color_input = Self::create_textarea();
+        let tab_inactive_color_input = Self::create_textarea();
+        let tab_unread_color_input = Self::create_textarea();
+        let tab_unread_prefix_input = Self::create_textarea();
+        let progress_label_input = Self::create_textarea();
+        let progress_color_input = Self::create_textarea();
+        let progress_numbers_only = false;
+        let countdown_label_input = Self::create_textarea();
+        let countdown_icon_input = Self::create_textarea();
+        let compass_active_color_input = Self::create_textarea();
+        let compass_inactive_color_input = Self::create_textarea();
+        let injury_default_color_input = Self::create_textarea();
+        let injury1_color_input = Self::create_textarea();
+        let injury2_color_input = Self::create_textarea();
+        let injury3_color_input = Self::create_textarea();
+        let scar1_color_input = Self::create_textarea();
+        let scar2_color_input = Self::create_textarea();
+        let scar3_color_input = Self::create_textarea();
+        let indicator_default_status_input = Self::create_textarea();
+        let indicator_default_color_input = Self::create_textarea();
+        let active_effects_category_input = Self::create_textarea();
+        let dashboard_layout_input = Self::create_textarea();
+        let dashboard_spacing_input = Self::create_textarea();
+        let dashboard_hide_inactive = false;
+        let perf_show_fps = true;
+        let perf_show_frame_times = true;
+        let perf_show_render_times = true;
+        let perf_show_ui_times = true;
+        let perf_show_wrap_times = true;
+        let perf_show_net = true;
+        let perf_show_parse = true;
+        let perf_show_events = true;
+        let perf_show_memory = true;
+        let perf_show_lines = true;
+        let perf_show_uptime = true;
+        let perf_show_jitter = true;
+        let perf_show_frame_spikes = true;
+        let perf_show_event_lag = true;
+        let perf_show_memory_delta = true;
+        let show_desc = true;
+        let show_objs = true;
+        let show_players = true;
+        let show_exits = true;
+        let show_name = false;
 
-        let is_command_input = matches!(window_def, WindowDef::CommandInput{..});
-        let sections = Self::build_sections(is_command_input);
-        let global_fields = Self::build_global_fields(&sections);
+        let field_order = Self::build_field_order_for(&window_def);
 
         Self {
             popup_x: 0,
             popup_y: 0,
-            popup_width: 50,
-            popup_height: 25,
+            popup_width: 70,
+            popup_height: 20,
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
-            resizing: false,
-            resize_start_width: 0,
-            resize_start_height: 0,
-            resize_start_mouse_x: 0,
-            resize_start_mouse_y: 0,
-            sections,
-            current_section: 0, // Start on meta section
-            global_fields,
-            current_field_global: 0, // Start on Name field
-            focused_field: 0,
+            field_order,
+            current_field_index: 0,
+            focused_field: FieldRef::Name.legacy_field_id(),
             name_input,
             title_input,
             row_input,
@@ -584,14 +1356,64 @@ impl WindowEditor {
             bg_color_input,
             border_color_input,
             streams_input,
+            buffer_size_input,
+            text_wordwrap,
+            text_show_timestamps,
             text_color_input,
             cursor_color_input,
             cursor_bg_input,
             content_align_input,
+            tab_bar_position_input,
+            tab_active_color_input,
+            tab_inactive_color_input,
+            tab_unread_color_input,
+            tab_unread_prefix_input,
+            progress_label_input,
+            progress_color_input,
+            progress_numbers_only,
+            countdown_label_input,
+            countdown_icon_input,
+            compass_active_color_input,
+            compass_inactive_color_input,
+            injury_default_color_input,
+            injury1_color_input,
+            injury2_color_input,
+            injury3_color_input,
+            scar1_color_input,
+            scar2_color_input,
+            scar3_color_input,
+            indicator_default_status_input,
+            indicator_default_color_input,
+            active_effects_category_input,
+            dashboard_layout_input,
+            dashboard_spacing_input,
+            dashboard_hide_inactive,
+            show_desc,
+            show_objs,
+            show_players,
+            show_exits,
+            show_name,
+            perf_show_fps,
+            perf_show_frame_times,
+            perf_show_render_times,
+            perf_show_ui_times,
+            perf_show_wrap_times,
+            perf_show_net,
+            perf_show_parse,
+            perf_show_events,
+            perf_show_memory,
+            perf_show_lines,
+            perf_show_uptime,
+            perf_show_jitter,
+            perf_show_frame_spikes,
+            perf_show_event_lag,
+            perf_show_memory_delta,
             window_def: window_def.clone(),
             original_window_def: window_def,
             is_new: true,
-            status_message: "Tab/Shift+Tab: Navigate | Ctrl+1..9: Jump to section | Ctrl+s: Save | Esc: Back/Cancel".to_string(),
+            status_message: "Tab/Shift+Tab: Navigate | Ctrl+S: Save | Esc: Cancel".to_string(),
+            tab_editor: None,
+            indicator_editor: None,
         }
     }
 
@@ -614,86 +1436,101 @@ impl WindowEditor {
         matches!(self.window_def, WindowDef::CommandInput { .. })
     }
 
-    fn total_fields(&self) -> usize {
-        if self.is_command_input() {
-            26
-        } else {
-            23
-        }
-    }
-
-    /// Jump to a specific section (Ctrl+1..5)
-    /// Jumps to the first field of the target section
-    pub fn jump_to_section(&mut self, section_idx: usize) {
-        // section_idx is 1-5, we need to find the first field of that section
-        if section_idx == 0 || section_idx > self.sections.len() {
-            return;
-        }
-
-        // Find the first field in the target section
-        for (global_idx, global_field) in self.global_fields.iter().enumerate() {
-            if global_field.section == section_idx {
-                self.current_field_global = global_idx;
-                self.current_section = section_idx;
-                self.sync_focused_field();
-                return;
-            }
-        }
-    }
-
-    /// Return to meta section (Esc from within a numbered section)
-    pub fn return_to_meta(&mut self) {
-        self.current_section = 0;
-        self.current_field_global = 0; // First field (Name)
-        self.sync_focused_field();
-    }
-
-    /// Check if we're viewing the meta section
-    pub fn is_on_meta(&self) -> bool {
-        self.current_section == 0
+    fn current_field_ref(&self) -> Option<FieldRef> {
+        self.field_order.get(self.current_field_index).copied()
     }
 
     /// Move to next field (Tab)
     pub fn next_field(&mut self) {
-        if self.global_fields.is_empty() {
+        if self.field_order.is_empty() {
             return;
         }
 
-        self.current_field_global = (self.current_field_global + 1) % self.global_fields.len();
-
-        // Update current_section based on the new field
-        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
-            self.current_section = global_field.section;
-        }
-
+        self.current_field_index = (self.current_field_index + 1) % self.field_order.len();
         self.sync_focused_field();
     }
 
     /// Move to previous field (Shift+Tab)
     pub fn previous_field(&mut self) {
-        if self.global_fields.is_empty() {
+        if self.field_order.is_empty() {
             return;
         }
 
-        self.current_field_global = if self.current_field_global == 0 {
-            self.global_fields.len() - 1
+        self.current_field_index = if self.current_field_index == 0 {
+            self.field_order.len() - 1
         } else {
-            self.current_field_global - 1
+            self.current_field_index - 1
         };
-
-        // Update current_section based on the new field
-        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
-            self.current_section = global_field.section;
-        }
 
         self.sync_focused_field();
     }
 
     /// Sync the legacy focused_field index with current global field
     fn sync_focused_field(&mut self) {
-        if let Some(global_field) = self.global_fields.get(self.current_field_global) {
-            self.focused_field = global_field.field.legacy_field_id();
+        if let Some(field_ref) = self.current_field_ref() {
+            self.focused_field = field_ref.legacy_field_id();
         }
+    }
+
+    pub fn is_sub_editor_active(&self) -> bool {
+        self.tab_editor.is_some() || self.indicator_editor.is_some()
+    }
+
+    fn open_tab_editor(&mut self) {
+        if let WindowDef::TabbedText { data, .. } = &self.window_def {
+            self.tab_editor = Some(TabEditor::from_tabs(&data.tabs));
+        } else {
+            self.status_message =
+                "Tab editor only available for TabbedText windows".to_string();
+        }
+    }
+
+    fn open_indicator_editor(&mut self) {
+        if let WindowDef::Dashboard { data, .. } = &self.window_def {
+            self.indicator_editor = Some(IndicatorEditor::from_defs(&data.indicators));
+        } else {
+            self.status_message =
+                "Indicator editor only available for Dashboard windows".to_string();
+        }
+    }
+
+    fn commit_tab_editor(&mut self) {
+        if let (Some(editor), WindowDef::TabbedText { data, .. }) =
+            (&self.tab_editor, &mut self.window_def)
+        {
+            data.tabs = editor.to_tabs();
+        }
+    }
+
+    fn commit_indicator_editor(&mut self) {
+        if let (Some(editor), WindowDef::Dashboard { data, .. }) =
+            (&self.indicator_editor, &mut self.window_def)
+        {
+            data.indicators = editor.to_defs();
+        }
+    }
+
+    pub fn commit_sub_editors(&mut self) {
+        if self.tab_editor.is_some() {
+            self.commit_tab_editor();
+        }
+        if self.indicator_editor.is_some() {
+            self.commit_indicator_editor();
+        }
+    }
+
+    fn close_sub_editor(&mut self) -> bool {
+        if self.tab_editor.is_some() {
+            self.commit_tab_editor();
+            self.tab_editor = None;
+            return true;
+        }
+        if self.indicator_editor.is_some() {
+            self.commit_indicator_editor();
+            self.indicator_editor = None;
+            return true;
+        }
+        false
     }
 
     /// Tab navigation (calls next_field for compatibility)
@@ -708,17 +1545,52 @@ impl WindowEditor {
 
     /// Check if the currently focused field is a checkbox (fields 12-19)
     pub fn is_on_checkbox(&self) -> bool {
-        matches!(self.focused_field, 12..=19)
+        matches!(
+            self.current_field_ref(),
+            Some(
+                FieldRef::ShowTitle
+                    | FieldRef::Locked
+                    | FieldRef::TransparentBg
+                    | FieldRef::ShowBorder
+                    | FieldRef::BorderTop
+                    | FieldRef::BorderBottom
+                    | FieldRef::BorderLeft
+                    | FieldRef::BorderRight
+                    | FieldRef::ShowDesc
+                    | FieldRef::ShowObjs
+                    | FieldRef::ShowPlayers
+                    | FieldRef::ShowExits
+                    | FieldRef::ShowName
+                    | FieldRef::ProgressNumbersOnly
+                    | FieldRef::DashboardHideInactive
+                    | FieldRef::PerfShowFps
+                    | FieldRef::PerfShowFrameTimes
+                    | FieldRef::PerfShowRenderTimes
+                    | FieldRef::PerfShowUiTimes
+                    | FieldRef::PerfShowWrapTimes
+                    | FieldRef::PerfShowNet
+                    | FieldRef::PerfShowParse
+                    | FieldRef::PerfShowEvents
+                    | FieldRef::PerfShowMemory
+                    | FieldRef::PerfShowLines
+                    | FieldRef::PerfShowUptime
+            )
+        )
     }
 
     /// Check if the currently focused field is the border style dropdown
     pub fn is_on_border_style(&self) -> bool {
-        self.focused_field == 11
+        matches!(self.current_field_ref(), Some(FieldRef::BorderStyle))
     }
 
     /// Check if the currently focused field is the content alignment dropdown
     pub fn is_on_content_align(&self) -> bool {
-        self.focused_field == FieldRef::ContentAlign.legacy_field_id()
+        matches!(self.current_field_ref(), Some(FieldRef::ContentAlign))
+    }
+
+    /// Check if focused on tab bar position dropdown (TabbedText)
+    pub fn is_on_tab_bar_position(&self) -> bool {
+        matches!(self.current_field_ref(), Some(FieldRef::TabBarPosition))
     }
 
     /// Cycle to the next border style
@@ -813,9 +1685,81 @@ impl WindowEditor {
             26 => {
                 self.content_align_input.input(input);
             }
-            _ => {} // Checkboxes/dropdowns don't handle text input
+            27 => {
+                self.tab_bar_position_input.input(input);
+            }
+            33 => {
+                self.progress_label_input.input(input);
+            }
+            34 => {
+                self.progress_color_input.input(input);
+            }
+            36 => {
+                self.countdown_label_input.input(input);
+            }
+            37 => {
+                self.countdown_icon_input.input(input);
+            }
+            38 => {
+                self.compass_active_color_input.input(input);
+            }
+            39 => {
+            self.compass_inactive_color_input.input(input);
         }
+        40 => {
+            self.injury_default_color_input.input(input);
+        }
+            41 => {
+                self.injury1_color_input.input(input);
+            }
+            42 => {
+                self.injury2_color_input.input(input);
+            }
+            43 => {
+                self.injury3_color_input.input(input);
+            }
+            44 => {
+                self.scar1_color_input.input(input);
+            }
+            45 => {
+                self.scar2_color_input.input(input);
+            }
+            46 => {
+                self.scar3_color_input.input(input);
+            }
+            47 => {
+                self.indicator_default_status_input.input(input);
+            }
+            48 => {
+                self.indicator_default_color_input.input(input);
+            }
+        49 => {
+            self.active_effects_category_input.input(input);
+        }
+        28 => {
+            self.tab_active_color_input.input(input);
+        }
+        29 => {
+            self.tab_inactive_color_input.input(input);
+        }
+        30 => {
+            self.tab_unread_color_input.input(input);
+        }
+        31 => {
+            self.tab_unread_prefix_input.input(input);
+        }
+        56 => {
+            self.dashboard_layout_input.input(input);
+        }
+        57 => {
+            self.dashboard_spacing_input.input(input);
+        }
+        74 => {
+            self.buffer_size_input.input(input);
+        }
+        _ => {} // Checkboxes/dropdowns don't handle text input
     }
+}
 
     pub fn toggle_field(&mut self) {
         match self.focused_field {
@@ -875,11 +1819,381 @@ impl WindowEditor {
                     .apply_border_configuration(show_border, sides);
                 self.refresh_size_inputs();
             }
-            _ => {}
+            _ => {
+                if let Some(field_ref) = self.current_field_ref() {
+                    match field_ref {
+                        FieldRef::ShowDesc => {
+                            self.show_desc = !self.show_desc;
+                        }
+                        FieldRef::ShowObjs => {
+                            self.show_objs = !self.show_objs;
+                        }
+                        FieldRef::ShowPlayers => {
+                            self.show_players = !self.show_players;
+                        }
+                        FieldRef::ShowExits => {
+                            self.show_exits = !self.show_exits;
+                        }
+                        FieldRef::ShowName => {
+                            self.show_name = !self.show_name;
+                        }
+                        FieldRef::Wordwrap => {
+                            self.text_wordwrap = !self.text_wordwrap;
+                        }
+                        FieldRef::Timestamps => {
+                            self.text_show_timestamps = !self.text_show_timestamps;
+                        }
+                        FieldRef::ProgressNumbersOnly => {
+                            self.progress_numbers_only = !self.progress_numbers_only;
+                        }
+                        FieldRef::TabBarPosition => {
+                            let next = match self
+                                .tab_bar_position_input
+                                .lines()
+                                .get(0)
+                                .map(|s| s.as_str())
+                                .unwrap_or("top")
+                            {
+                                "top" => "bottom",
+                                _ => "top",
+                            };
+                            let mut ta = Self::create_textarea();
+                            ta.insert_str(next);
+                            self.tab_bar_position_input = ta;
+                        }
+                        FieldRef::EditTabs => {
+                            self.open_tab_editor();
+                        }
+                        FieldRef::EditIndicators => {
+                            self.open_indicator_editor();
+                        }
+                        FieldRef::DashboardHideInactive => {
+                            self.dashboard_hide_inactive = !self.dashboard_hide_inactive;
+                        }
+                        FieldRef::DashboardLayout => {
+                        let current = self
+                            .dashboard_layout_input
+                            .lines()
+                            .get(0)
+                            .map(|s| s.as_str())
+                            .unwrap_or("horizontal")
+                            .to_lowercase();
+                        let options = ["horizontal", "vertical", "flow", "grid:2x2", "grid:2x3", "grid:3x3"];
+                        let idx = options
+                            .iter()
+                            .position(|opt| opt.eq_ignore_ascii_case(&current))
+                            .unwrap_or(0);
+                        let next = options[(idx + 1) % options.len()];
+                        let mut ta = Self::create_textarea();
+                        ta.insert_str(next);
+                        self.dashboard_layout_input = ta;
+                    }
+                        FieldRef::PerfShowFps => {
+                            self.perf_show_fps = !self.perf_show_fps;
+                        }
+                        FieldRef::PerfShowFrameTimes => {
+                            self.perf_show_frame_times = !self.perf_show_frame_times;
+                        }
+                        FieldRef::PerfShowRenderTimes => {
+                            self.perf_show_render_times = !self.perf_show_render_times;
+                        }
+                        FieldRef::PerfShowUiTimes => {
+                            self.perf_show_ui_times = !self.perf_show_ui_times;
+                        }
+                        FieldRef::PerfShowWrapTimes => {
+                            self.perf_show_wrap_times = !self.perf_show_wrap_times;
+                        }
+                        FieldRef::PerfShowNet => {
+                            self.perf_show_net = !self.perf_show_net;
+                        }
+                        FieldRef::PerfShowParse => {
+                            self.perf_show_parse = !self.perf_show_parse;
+                        }
+                        FieldRef::PerfShowEvents => {
+                            self.perf_show_events = !self.perf_show_events;
+                        }
+                        FieldRef::PerfShowMemory => {
+                            self.perf_show_memory = !self.perf_show_memory;
+                        }
+                        FieldRef::PerfShowLines => {
+                            self.perf_show_lines = !self.perf_show_lines;
+                        }
+                        FieldRef::PerfShowUptime => {
+                            self.perf_show_uptime = !self.perf_show_uptime;
+                        }
+                        FieldRef::PerfShowJitter => {
+                            self.perf_show_jitter = !self.perf_show_jitter;
+                        }
+                        FieldRef::PerfShowFrameSpikes => {
+                            self.perf_show_frame_spikes = !self.perf_show_frame_spikes;
+                        }
+                        FieldRef::PerfShowEventLag => {
+                            self.perf_show_event_lag = !self.perf_show_event_lag;
+                        }
+                        FieldRef::PerfShowMemoryDelta => {
+                            self.perf_show_memory_delta = !self.perf_show_memory_delta;
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
+    pub fn handle_sub_editor_cancel(&mut self) -> bool {
+        if let Some(editor) = self.tab_editor.as_mut() {
+            if matches!(editor.mode, TabEditorMode::Form) {
+                editor.cancel_form();
+                return true;
+            }
+        }
+        if let Some(editor) = self.indicator_editor.as_mut() {
+            if matches!(editor.mode, IndicatorEditorMode::Form) {
+                editor.cancel_form();
+                return true;
+            }
+        }
+        self.close_sub_editor()
+    }
+
+    pub fn handle_sub_editor_navigation(&mut self, down: bool) -> bool {
+        if let Some(editor) = self.tab_editor.as_mut() {
+            match editor.mode {
+                TabEditorMode::List => {
+                    if down {
+                        if editor.selected + 1 < editor.tabs.len() {
+                            editor.selected += 1;
+                        }
+                    } else if editor.selected > 0 {
+                        editor.selected -= 1;
+                    }
+                }
+                TabEditorMode::Form => {
+                    editor.form_field = match (editor.form_field, down) {
+                        (TabEditorFormField::Name, true) => TabEditorFormField::Streams,
+                        (TabEditorFormField::Streams, false) => TabEditorFormField::Name,
+                        _ => editor.form_field,
+                    };
+                }
+            }
+            return true;
+        }
+
+        if let Some(editor) = self.indicator_editor.as_mut() {
+            match editor.mode {
+                IndicatorEditorMode::List => {
+                    if down {
+                        if editor.selected + 1 < editor.indicators.len() {
+                            editor.selected += 1;
+                        }
+                    } else if editor.selected > 0 {
+                        editor.selected -= 1;
+                    }
+                }
+                IndicatorEditorMode::Form => {
+                    editor.form_field = match (editor.form_field, down) {
+                        (IndicatorFormField::Id, true) => IndicatorFormField::Icon,
+                        (IndicatorFormField::Icon, true) => IndicatorFormField::Colors,
+                        (IndicatorFormField::Colors, true) => IndicatorFormField::Id,
+                        (IndicatorFormField::Colors, false) => IndicatorFormField::Icon,
+                        (IndicatorFormField::Icon, false) => IndicatorFormField::Id,
+                        (IndicatorFormField::Id, false) => IndicatorFormField::Colors,
+                    };
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
+    pub fn handle_sub_editor_reorder(&mut self, down: bool) -> bool {
+        if let Some(editor) = self.tab_editor.as_mut() {
+            if matches!(editor.mode, TabEditorMode::List) {
+                if down {
+                    editor.move_down();
+                } else {
+                    editor.move_up();
+                }
+                return true;
+            }
+        }
+
+        if let Some(editor) = self.indicator_editor.as_mut() {
+            if matches!(editor.mode, IndicatorEditorMode::List) {
+                if down {
+                    editor.move_down();
+                } else {
+                    editor.move_up();
+                }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn handle_sub_editor_key(&mut self, key_event: TfKeyEvent) -> bool {
+        if let Some(editor) = self.tab_editor.as_mut() {
+            match editor.mode {
+                TabEditorMode::List => match key_event.code {
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        editor.start_add();
+                        return true;
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Enter => {
+                        editor.start_edit();
+                        return true;
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                        editor.delete_selected();
+                        return true;
+                    }
+                    KeyCode::Up => {
+                        if key_event.modifiers.contains_shift() {
+                            editor.move_up();
+                        } else if editor.selected > 0 {
+                            editor.selected -= 1;
+                        }
+                        return true;
+                    }
+                    KeyCode::Down => {
+                        if key_event.modifiers.contains_shift() {
+                            editor.move_down();
+                        } else if editor.selected + 1 < editor.tabs.len() {
+                            editor.selected += 1;
+                        }
+                        return true;
+                    }
+                    KeyCode::Esc => {
+                        self.close_sub_editor();
+                        return true;
+                    }
+                    _ => {}
+                },
+                TabEditorMode::Form => match key_event.code {
+                    KeyCode::Esc => {
+                        editor.cancel_form();
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        editor.save_form();
+                        return true;
+                    }
+                    KeyCode::Tab => {
+                        self.handle_sub_editor_navigation(true);
+                        return true;
+                    }
+                    KeyCode::BackTab => {
+                        self.handle_sub_editor_navigation(false);
+                        return true;
+                    }
+                    KeyCode::Char('t') | KeyCode::Char('T') => {
+                        editor.show_timestamps = !editor.show_timestamps;
+                        return true;
+                    }
+                    _ => {
+                        let ct_code = crossterm_bridge::to_crossterm_keycode(key_event.code);
+                        let ct_mods =
+                            crossterm_bridge::to_crossterm_modifiers(key_event.modifiers);
+                        let key = crossterm::event::KeyEvent::new(ct_code, ct_mods);
+                        let ev = textarea_bridge::to_textarea_event(key);
+                        match editor.form_field {
+                            TabEditorFormField::Name => {
+                                editor.name_input.input(ev);
+                            }
+                            TabEditorFormField::Streams => {
+                                editor.streams_input.input(ev);
+                            }
+                        };
+                        return true;
+                    }
+                },
+            }
+        }
+
+        if let Some(editor) = self.indicator_editor.as_mut() {
+            match editor.mode {
+                IndicatorEditorMode::List => match key_event.code {
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        editor.start_add();
+                        return true;
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Enter => {
+                        editor.start_edit();
+                        return true;
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                        editor.delete_selected();
+                        return true;
+                    }
+                    KeyCode::Up => {
+                        if key_event.modifiers.contains_shift() {
+                            editor.move_up();
+                        } else if editor.selected > 0 {
+                            editor.selected -= 1;
+                        }
+                        return true;
+                    }
+                    KeyCode::Down => {
+                        if key_event.modifiers.contains_shift() {
+                            editor.move_down();
+                        } else if editor.selected + 1 < editor.indicators.len() {
+                            editor.selected += 1;
+                        }
+                        return true;
+                    }
+                    KeyCode::Esc => {
+                        self.close_sub_editor();
+                        return true;
+                    }
+                    _ => {}
+                },
+                IndicatorEditorMode::Form => match key_event.code {
+                    KeyCode::Esc => {
+                        editor.cancel_form();
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        editor.save_form();
+                        return true;
+                    }
+                    KeyCode::Tab => {
+                        self.handle_sub_editor_navigation(true);
+                        return true;
+                    }
+                    KeyCode::BackTab => {
+                        self.handle_sub_editor_navigation(false);
+                        return true;
+                    }
+                    _ => {
+                        let ct_code = crossterm_bridge::to_crossterm_keycode(key_event.code);
+                        let ct_mods =
+                            crossterm_bridge::to_crossterm_modifiers(key_event.modifiers);
+                        let key = crossterm::event::KeyEvent::new(ct_code, ct_mods);
+                        let ev = textarea_bridge::to_textarea_event(key);
+                        match editor.form_field {
+                            IndicatorFormField::Id => {
+                                editor.id_input.input(ev);
+                            }
+                            IndicatorFormField::Icon => {
+                                editor.icon_input.input(ev);
+                            }
+                            IndicatorFormField::Colors => {
+                                editor.colors_input.input(ev);
+                            }
+                        };
+                        return true;
+                    }
+                },
+            }
+        }
+
+        false
+    }
+
     pub fn sync_to_window_def(&mut self) {
+        self.commit_sub_editors();
         self.window_def.base_mut().name = self.name_input.lines()[0].to_string();
         self.window_def.base_mut().title =
             Some(self.title_input.lines()[0].to_string()).filter(|s| !s.is_empty());
@@ -916,6 +2230,223 @@ impl WindowEditor {
                 .filter(|s| !s.is_empty())
                 .collect();
             data.streams = streams;
+            data.buffer_size = self
+                .buffer_size_input
+                .lines()
+                .get(0)
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(data.buffer_size);
+            data.wordwrap = self.text_wordwrap;
+            data.show_timestamps = self.text_show_timestamps;
+        }
+
+        if let crate::config::WindowDef::Inventory { data, .. } = &mut self.window_def {
+            let streams: Vec<String> = self.streams_input.lines()[0]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            data.streams = streams;
+            data.buffer_size = self
+                .buffer_size_input
+                .lines()
+                .get(0)
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(data.buffer_size);
+            data.wordwrap = self.text_wordwrap;
+            data.show_timestamps = self.text_show_timestamps;
+        }
+
+        if let crate::config::WindowDef::TabbedText { data, .. } = &mut self.window_def {
+            data.tab_bar_position = self
+                .tab_bar_position_input
+                .lines()
+                .get(0)
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "top".to_string());
+            data.tab_active_color = self
+                .tab_active_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.tab_inactive_color = self
+                .tab_inactive_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.tab_unread_color = self
+                .tab_unread_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.tab_unread_prefix = self
+                .tab_unread_prefix_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+
+        if let crate::config::WindowDef::Room { data, .. } = &mut self.window_def {
+            data.show_desc = self.show_desc;
+            data.show_objs = self.show_objs;
+            data.show_players = self.show_players;
+            data.show_exits = self.show_exits;
+            data.show_name = self.show_name;
+        }
+
+        if let crate::config::WindowDef::Progress { data, .. } = &mut self.window_def {
+            data.label = self
+                .progress_label_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.color = self
+                .progress_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.numbers_only = self.progress_numbers_only;
+        }
+
+        if let crate::config::WindowDef::Countdown { data, .. } = &mut self.window_def {
+            data.label = self
+                .countdown_label_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.icon = self
+                .countdown_icon_input
+                .lines()
+                .get(0)
+                .and_then(|s| s.chars().next());
+        }
+
+        if let crate::config::WindowDef::Compass { data, .. } = &mut self.window_def {
+            data.active_color = self
+                .compass_active_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.inactive_color = self
+                .compass_inactive_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+
+        if let crate::config::WindowDef::InjuryDoll { data, .. } = &mut self.window_def {
+            data.injury_default_color = self
+                .injury_default_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.injury1_color = self
+                .injury1_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.injury2_color = self
+                .injury2_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.injury3_color = self
+                .injury3_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.scar1_color = self
+                .scar1_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.scar2_color = self
+                .scar2_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.scar3_color = self
+                .scar3_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+
+        if let crate::config::WindowDef::Indicator { data, .. } = &mut self.window_def {
+            data.default_status = self
+                .indicator_default_status_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            data.default_color = self
+                .indicator_default_color_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+
+        if let crate::config::WindowDef::Dashboard { data, .. } = &mut self.window_def {
+            data.layout = self
+                .dashboard_layout_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "horizontal".to_string());
+            data.spacing = self
+                .dashboard_spacing_input
+                .lines()
+                .get(0)
+                .and_then(|s| s.trim().parse::<u16>().ok())
+                .unwrap_or(1);
+            data.hide_inactive = self.dashboard_hide_inactive;
+        }
+
+        if let crate::config::WindowDef::ActiveEffects { data, .. } = &mut self.window_def {
+            data.category = self
+                .active_effects_category_input
+                .lines()
+                .get(0)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "ActiveSpells".to_string());
+        }
+
+        if let crate::config::WindowDef::Performance { data, .. } = &mut self.window_def {
+            data.show_fps = self.perf_show_fps;
+            data.show_frame_times = self.perf_show_frame_times;
+            data.show_render_times = self.perf_show_render_times;
+            data.show_ui_times = self.perf_show_ui_times;
+            data.show_wrap_times = self.perf_show_wrap_times;
+            data.show_net = self.perf_show_net;
+            data.show_parse = self.perf_show_parse;
+            data.show_events = self.perf_show_events;
+            data.show_memory = self.perf_show_memory;
+            data.show_lines = self.perf_show_lines;
+            data.show_uptime = self.perf_show_uptime;
+            data.show_jitter = self.perf_show_jitter;
+            data.show_frame_spikes = self.perf_show_frame_spikes;
+            data.show_event_lag = self.perf_show_event_lag;
+            data.show_memory_delta = self.perf_show_memory_delta;
         }
 
         if let crate::config::WindowDef::CommandInput { data, .. } = &mut self.window_def {
@@ -949,7 +2480,6 @@ impl WindowEditor {
     pub fn handle_mouse(&mut self, mouse_col: u16, mouse_row: u16, mouse_down: bool, area: Rect) {
         if !mouse_down {
             self.dragging = false;
-            self.resizing = false;
             return;
         }
 
@@ -960,30 +2490,13 @@ impl WindowEditor {
             height: self.popup_height,
         };
 
-        // Check if mouse is on the resize handle (bottom-right corner, 3x3 area)
-        let resize_handle_x = self.popup_x + self.popup_width.saturating_sub(3);
-        let resize_handle_y = self.popup_y + self.popup_height.saturating_sub(3);
-        let on_resize_handle = mouse_col >= resize_handle_x
-            && mouse_col < self.popup_x + self.popup_width
-            && mouse_row >= resize_handle_y
-            && mouse_row < self.popup_y + self.popup_height;
-
         // Check if mouse is on the title bar (for dragging)
         let on_title_bar = mouse_row == self.popup_y
             && mouse_col > popup_area.x
             && mouse_col < popup_area.x + popup_area.width.saturating_sub(1);
 
-        // Start resize if on resize handle
-        if on_resize_handle && !self.resizing && !self.dragging {
-            self.resizing = true;
-            self.resize_start_width = self.popup_width;
-            self.resize_start_height = self.popup_height;
-            self.resize_start_mouse_x = mouse_col;
-            self.resize_start_mouse_y = mouse_row;
-        }
-
-        // Start drag if on title bar and not resizing
-        if on_title_bar && !self.dragging && !self.resizing {
+        // Start drag if on title bar
+        if on_title_bar && !self.dragging {
             self.dragging = true;
             self.drag_offset_x = mouse_col.saturating_sub(self.popup_x);
             self.drag_offset_y = mouse_row.saturating_sub(self.popup_y);
@@ -995,20 +2508,6 @@ impl WindowEditor {
             self.popup_y = mouse_row.saturating_sub(self.drag_offset_y);
             self.popup_x = self.popup_x.min(area.width.saturating_sub(self.popup_width));
             self.popup_y = self.popup_y.min(area.height.saturating_sub(self.popup_height));
-        }
-
-        // Handle resizing
-        if self.resizing {
-            let delta_x = (mouse_col as i32) - (self.resize_start_mouse_x as i32);
-            let delta_y = (mouse_row as i32) - (self.resize_start_mouse_y as i32);
-
-            // Calculate new dimensions with minimum constraints
-            let new_width = ((self.resize_start_width as i32) + delta_x).max(40) as u16;
-            let new_height = ((self.resize_start_height as i32) + delta_y).max(20) as u16;
-
-            // Apply maximum constraints based on available screen space
-            self.popup_width = new_width.min(area.width.saturating_sub(self.popup_x));
-            self.popup_height = new_height.min(area.height.saturating_sub(self.popup_y));
         }
     }
 
@@ -1053,212 +2552,1336 @@ impl WindowEditor {
             .style(Style::default().bg(Color::Black).fg(crossterm_bridge::to_ratatui_color(theme.border_color)));
         block.render(popup_area, buf);
 
+        // Draw combined bottom border with footer hints
+        let inner_width = popup_area.width.saturating_sub(2);
+        let help = "[Ctrl+S: Save] [Esc: Cancel]";
+        let pad_len = inner_width.saturating_sub(1 + help.len() as u16) as usize;
+        let pad = "─".repeat(pad_len);
+        let mut interior = String::from("─");
+        interior.push_str(help);
+        interior.push_str(&pad);
+        let mut footer_line = String::new();
+        footer_line.push('└');
+        footer_line.push_str(&interior.chars().take(inner_width as usize).collect::<String>());
+        footer_line.push('┘');
+        buf.set_string(
+            popup_area.x,
+            popup_area.y + popup_area.height.saturating_sub(1),
+            footer_line,
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.border_color)),
+        );
+
         let content = Rect {
             x: popup_area.x + 1,
             y: popup_area.y + 1,
             width: popup_area.width.saturating_sub(2),
-            height: popup_area.height.saturating_sub(3),
+            height: popup_area.height.saturating_sub(2),
         };
 
-        self.render_fields(content, buf, theme);
+        if self.is_sub_editor_active() {
+            self.render_sub_editor(content, buf, theme);
+        } else {
+            self.render_fields(content, buf, theme);
+        }
 
-        // Render resize handle indicator at bottom-right corner
-        let resize_x = self.popup_x + self.popup_width.saturating_sub(2);
-        let resize_y = self.popup_y + self.popup_height.saturating_sub(1);
-        if resize_x < area.width && resize_y < area.height {
-            buf.set_string(
-                resize_x,
-                resize_y,
-                "╬",
-                Style::default().fg(crossterm_bridge::to_ratatui_color(theme.border_color)),
-            );
+    }
+
+    fn render_sub_editor(&mut self, area: Rect, buf: &mut Buffer, theme: &EditorTheme) {
+        if let Some(mut editor) = self.tab_editor.take() {
+            self.render_tab_editor(area, buf, theme, &mut editor);
+            self.tab_editor = Some(editor);
+            return;
+        }
+
+        if let Some(mut editor) = self.indicator_editor.take() {
+            self.render_indicator_editor(area, buf, theme, &mut editor);
+            self.indicator_editor = Some(editor);
+        }
+    }
+
+    fn render_tab_editor(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        editor: &mut TabEditor,
+    ) {
+        let header_style =
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.section_header_color));
+        buf.set_string(area.x + 1, area.y, "Tab Editor", header_style);
+
+        match editor.mode {
+            TabEditorMode::List => {
+                let max_rows = area.height.saturating_sub(2);
+                for (idx, tab) in editor.tabs.iter().enumerate() {
+                    if idx as u16 >= max_rows {
+                        break;
+                    }
+                    let y = area.y + 1 + idx as u16;
+                    let is_sel = idx == editor.selected;
+                    let prefix = if is_sel { "> " } else { "  " };
+                    let color = if is_sel {
+                        crossterm_bridge::to_ratatui_color(theme.focused_label_color)
+                    } else {
+                        crossterm_bridge::to_ratatui_color(theme.label_color)
+                    };
+                    let stream_display = if tab.streams.is_empty() {
+                        "-".to_string()
+                    } else {
+                        tab.streams.join(", ")
+                    };
+                    let mut line = format!("{}{} -> {}", prefix, tab.name, stream_display);
+                    let max_width = area.width.saturating_sub(2) as usize;
+                    if line.chars().count() > max_width {
+                        line = line.chars().take(max_width).collect();
+                    }
+                    buf.set_string(area.x + 1, y, line, Style::default().fg(color));
+                }
+
+                let footer = "↑/↓: Navigate | A: Add | E: Edit | D: Delete | Shift+↑/↓: Reorder | Esc: Back";
+                let footer_style =
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color));
+                buf.set_string(
+                    area.x + 1,
+                    area.y + area.height.saturating_sub(1),
+                    self.truncate_to_width(footer, area.width.saturating_sub(2)),
+                    footer_style,
+                );
+            }
+            TabEditorMode::Form => {
+                let y = area.y + 1;
+                self.render_textarea_compact(
+                    0,
+                    "Name:",
+                    &editor.name_input,
+                    area.x + 1,
+                    y,
+                    area.width as usize - 2,
+                    buf,
+                    theme,
+                    matches!(editor.form_field, TabEditorFormField::Name),
+                );
+                self.render_textarea_compact(
+                    0,
+                    "Streams:",
+                    &editor.streams_input,
+                    area.x + 1,
+                    y + 2,
+                    area.width as usize - 2,
+                    buf,
+                    theme,
+                    matches!(editor.form_field, TabEditorFormField::Streams),
+                );
+
+                let ts_status = if editor.show_timestamps { "On" } else { "Off" };
+                let ts_line = format!("Timestamps: {} (T to toggle)", ts_status);
+                let ts_color =
+                    crossterm_bridge::to_ratatui_color(theme.label_color);
+                buf.set_string(area.x + 1, y + 4, ts_line, Style::default().fg(ts_color));
+
+                let footer = "Enter: Save | Esc: Cancel | Tab/Shift+Tab: Next/Prev | T: Toggle timestamps";
+                let footer_style =
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color));
+                buf.set_string(
+                    area.x + 1,
+                    area.y + area.height.saturating_sub(1),
+                    self.truncate_to_width(footer, area.width.saturating_sub(2)),
+                    footer_style,
+                );
+            }
+        }
+    }
+
+    fn render_indicator_editor(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        editor: &mut IndicatorEditor,
+    ) {
+        let header_style =
+            Style::default().fg(crossterm_bridge::to_ratatui_color(theme.section_header_color));
+        buf.set_string(area.x + 1, area.y, "Indicator Editor", header_style);
+
+        match editor.mode {
+            IndicatorEditorMode::List => {
+                let max_rows = area.height.saturating_sub(2);
+                for (idx, ind) in editor.indicators.iter().enumerate() {
+                    if idx as u16 >= max_rows {
+                        break;
+                    }
+                    let y = area.y + 1 + idx as u16;
+                    let is_sel = idx == editor.selected;
+                    let prefix = if is_sel { "> " } else { "  " };
+                    let color = if is_sel {
+                        crossterm_bridge::to_ratatui_color(theme.focused_label_color)
+                    } else {
+                        crossterm_bridge::to_ratatui_color(theme.label_color)
+                    };
+                    let icon = if ind.icon.is_empty() {
+                        "?"
+                    } else {
+                        &ind.icon
+                    };
+                    let mut line = format!("{}{} {}", prefix, icon, ind.id);
+                    let max_width = area.width.saturating_sub(2) as usize;
+                    if line.chars().count() > max_width {
+                        line = line.chars().take(max_width).collect();
+                    }
+                    buf.set_string(area.x + 1, y, line, Style::default().fg(color));
+                }
+
+                let footer = "↑/↓: Navigate | A: Add | E: Edit | D: Delete | Shift+↑/↓: Reorder | Esc: Back";
+                let footer_style =
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color));
+                buf.set_string(
+                    area.x + 1,
+                    area.y + area.height.saturating_sub(1),
+                    self.truncate_to_width(footer, area.width.saturating_sub(2)),
+                    footer_style,
+                );
+            }
+            IndicatorEditorMode::Form => {
+                let y = area.y + 1;
+                self.render_textarea_compact(
+                    0,
+                    "Id:",
+                    &editor.id_input,
+                    area.x + 1,
+                    y,
+                    area.width as usize - 2,
+                    buf,
+                    theme,
+                    matches!(editor.form_field, IndicatorFormField::Id),
+                );
+                self.render_textarea_compact(
+                    0,
+                    "Icon:",
+                    &editor.icon_input,
+                    area.x + 1,
+                    y + 2,
+                    area.width as usize - 2,
+                    buf,
+                    theme,
+                    matches!(editor.form_field, IndicatorFormField::Icon),
+                );
+                self.render_textarea_compact(
+                    0,
+                    "Colors:",
+                    &editor.colors_input,
+                    area.x + 1,
+                    y + 4,
+                    area.width as usize - 2,
+                    buf,
+                    theme,
+                    matches!(editor.form_field, IndicatorFormField::Colors),
+                );
+                let value = editor
+                    .colors_input
+                    .lines()
+                    .get(0)
+                    .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
+                    .unwrap_or_default();
+                let preview_x =
+                    area.x + 1 + 2 + "Colors:".len() as u16 + 1 + 10;
+                self.render_color_preview(&value, preview_x, y + 4, buf, theme);
+
+                let footer = "Enter: Save | Esc: Cancel | Tab/Shift+Tab: Next/Prev";
+                let footer_style =
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color));
+                buf.set_string(
+                    area.x + 1,
+                    area.y + area.height.saturating_sub(1),
+                    self.truncate_to_width(footer, area.width.saturating_sub(2)),
+                    footer_style,
+                );
+            }
+        }
+    }
+
+    fn truncate_to_width(&self, text: &str, width: u16) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let width_usize = width as usize;
+        if text.chars().count() <= width_usize {
+            text.to_string()
+        } else {
+            text.chars().take(width_usize).collect()
         }
     }
 
     fn render_fields(&mut self, area: Rect, buf: &mut Buffer, theme: &EditorTheme) {
-        let x = area.x;
-        let mut y = area.y + 1; // Start with spacing from top border
+        let left_x = area.x + 1;
+        let right_x = area.x + 38;
+        let geom_x2 = left_x + 16;
+        let column_width = 30;
 
-        if self.current_section == 0 {
-            // Meta section - show Name, Title, and Available Sections list
-            let current_global_field = self.global_fields.get(self.current_field_global);
+        let mut left_y = area.y + 1;
+        let mut right_y = area.y + 1;
 
-            // Render Name field
-            let is_name_focused = current_global_field
-                .map(|gf| gf.field == FieldRef::Name)
-                .unwrap_or(false);
-            self.render_textarea_compact(
-                0,
-                "Name:",
-                &self.name_input,
-                x,
-                y,
-                20,
-                buf,
-                theme,
-                is_name_focused,
-            );
-            y += 2; // Skip one empty row between Name and Title
+        let is_focus = |f: FieldRef, focused: usize| focused == f.legacy_field_id();
 
-            // Render Title field
-            let is_title_focused = current_global_field
-                .map(|gf| gf.field == FieldRef::Title)
-                .unwrap_or(false);
-            self.render_textarea_compact(
-                1,
-                "Title:",
-                &self.title_input,
-                x,
-                y,
-                20,
-                buf,
-                theme,
-                is_title_focused,
-            );
-            y += 3; // Skip two empty rows before "Available Sections:"
+        // Left column: Identity + geometry
+        self.render_textarea_compact(
+            FieldRef::Name.legacy_field_id(),
+            " Name:",
+            &self.name_input,
+            left_x,
+            left_y,
+            24,
+            buf,
+            theme,
+            is_focus(FieldRef::Name, self.focused_field),
+        );
+        left_y += 1;
 
-            // Available Sections header
-            buf.set_string(
-                x,
-                y,
-                "Available Sections:",
-                Style::default().fg(crossterm_bridge::to_ratatui_color(theme.label_color)),
-            );
-            y += 1; // Normal increment to section list
+        self.render_textarea_compact(
+            FieldRef::Title.legacy_field_id(),
+            "Title:",
+            &self.title_input,
+            left_x,
+            left_y,
+            24,
+            buf,
+            theme,
+            is_focus(FieldRef::Title, self.focused_field),
+        );
+        left_y += 2;
 
-            // List sections 1-5 with Ctrl+# shortcuts
-            for (idx, section) in self.sections.iter().enumerate() {
-                if y >= area.y + area.height {
-                    break;
-                }
+        // Row / Col
+        self.render_textarea_compact(
+            FieldRef::Row.legacy_field_id(),
+            "  Row:",
+            &self.row_input,
+            left_x,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::Row, self.focused_field),
+        );
+        self.render_textarea_compact(
+            FieldRef::Col.legacy_field_id(),
+            "  Col:",
+            &self.col_input,
+            geom_x2,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::Col, self.focused_field),
+        );
+        left_y += 1;
 
-                let shortcut = format!("  Ctrl+{}  {}", idx + 1, section.name);
-                buf.set_string(x, y, &shortcut, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
-                y += 1;
+        // Rows / Cols
+        self.render_textarea_compact(
+            FieldRef::Rows.legacy_field_id(),
+            " Rows:",
+            &self.rows_input,
+            left_x,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::Rows, self.focused_field),
+        );
+        self.render_textarea_compact(
+            FieldRef::Cols.legacy_field_id(),
+            " Cols:",
+            &self.cols_input,
+            geom_x2,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::Cols, self.focused_field),
+        );
+        left_y += 1;
+
+        // Min/Max constraints
+        self.render_textarea_compact(
+            FieldRef::MinRows.legacy_field_id(),
+            "  Min:",
+            &self.min_rows_input,
+            left_x,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::MinRows, self.focused_field),
+        );
+        self.render_textarea_compact(
+            FieldRef::MinCols.legacy_field_id(),
+            "  Min:",
+            &self.min_cols_input,
+            geom_x2,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::MinCols, self.focused_field),
+        );
+        left_y += 1;
+
+        self.render_textarea_compact(
+            FieldRef::MaxRows.legacy_field_id(),
+            "  Max:",
+            &self.max_rows_input,
+            left_x,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::MaxRows, self.focused_field),
+        );
+        self.render_textarea_compact(
+            FieldRef::MaxCols.legacy_field_id(),
+            "  Max:",
+            &self.max_cols_input,
+            geom_x2,
+            left_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::MaxCols, self.focused_field),
+        );
+        left_y += 2;
+
+        self.render_dropdown_compact(
+            FieldRef::ContentAlign.legacy_field_id(),
+            "Content Align:",
+            self.current_content_align_value(),
+            left_x,
+            left_y,
+            14,
+            buf,
+            theme,
+            is_focus(FieldRef::ContentAlign, self.focused_field),
+        );
+        left_y += 1;
+
+        self.render_dropdown_compact(
+            FieldRef::BorderStyle.legacy_field_id(),
+            " Border Style:",
+            &self.window_def.base().border_style,
+            left_x,
+            left_y,
+            10,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderStyle, self.focused_field),
+        );
+        left_y += 2;
+
+        // Right column: appearance
+        self.render_checkbox_compact(
+            FieldRef::Locked.legacy_field_id(),
+            "Lock Window",
+            self.window_def.base().locked,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::Locked, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::ShowTitle.legacy_field_id(),
+            "Show Title",
+            self.window_def.base().show_title,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::ShowTitle, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::TransparentBg.legacy_field_id(),
+            "Transparent BG",
+            self.window_def.base().transparent_background,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::TransparentBg, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::ShowBorder.legacy_field_id(),
+            "Show Border",
+            self.window_def.base().show_border,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::ShowBorder, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::BorderTop.legacy_field_id(),
+            "Top Border",
+            self.window_def.base().border_sides.top,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderTop, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::BorderBottom.legacy_field_id(),
+            "Bottom Border",
+            self.window_def.base().border_sides.bottom,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderBottom, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::BorderLeft.legacy_field_id(),
+            "Left Border",
+            self.window_def.base().border_sides.left,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderLeft, self.focused_field),
+        );
+        right_y += 1;
+        self.render_checkbox_compact(
+            FieldRef::BorderRight.legacy_field_id(),
+            "Right Border",
+            self.window_def.base().border_sides.right,
+            right_x,
+            right_y,
+            column_width,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderRight, self.focused_field),
+        );
+        right_y += 1;
+
+        self.render_color_field(
+            FieldRef::BgColor.legacy_field_id(),
+            "BG Color",
+            &self.bg_color_input,
+            right_x,
+            right_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::BgColor, self.focused_field),
+        );
+        right_y += 1;
+
+        self.render_color_field(
+            FieldRef::BorderColor.legacy_field_id(),
+            "Border",
+            &self.border_color_input,
+            right_x,
+            right_y,
+            8,
+            buf,
+            theme,
+            is_focus(FieldRef::BorderColor, self.focused_field),
+        );
+
+        // Special section
+        let special_y = left_y.max(right_y) + 1;
+        let mut special_row = special_y;
+        match &self.window_def {
+            WindowDef::CommandInput { .. } => {
+                self.render_color_field(
+                    FieldRef::TextColor.legacy_field_id(),
+                    "Text Color:",
+                    &self.text_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TextColor, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::CursorColor.legacy_field_id(),
+                    "Cursor FG:",
+                    &self.cursor_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CursorColor, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::CursorBg.legacy_field_id(),
+                    "Cursor BG:",
+                    &self.cursor_bg_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CursorBg, self.focused_field),
+                );
             }
-        } else if let Some(section) = self.sections.get(self.current_section - 1) {
-            // Viewing a numbered section (1-5) - render its fields
-            // Section header
-            let header = format!("--- {} ---", section.name);
-            buf.set_string(x, y, &header, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.section_header_color)));
-            y += 1;
-
-            // Render only fields in the current section
-            for field_ref in &section.fields {
-                if y >= area.y + area.height {
-                    break;
-                }
-
-                // Check if this field is the currently focused field
-                let is_current = self
-                    .global_fields
-                    .get(self.current_field_global)
-                    .map(|gf| gf.field == *field_ref)
-                    .unwrap_or(false);
-                let field_id = field_ref.legacy_field_id();
-
-                // Render based on field type
-                match field_ref {
-                    FieldRef::Name => {
-                        self.render_textarea_compact(field_id, "Name:", &self.name_input, x, y, 20, buf, theme, is_current);
-                    }
-                    FieldRef::Title => {
-                        self.render_textarea_compact(field_id, "Title:", &self.title_input, x, y, 20, buf, theme, is_current);
-                    }
-                    FieldRef::Row => {
-                        self.render_textarea_compact(field_id, "Row:", &self.row_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::Col => {
-                        self.render_textarea_compact(field_id, "Col:", &self.col_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::Rows => {
-                        self.render_textarea_compact(field_id, "Rows:", &self.rows_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::Cols => {
-                        self.render_textarea_compact(field_id, "Cols:", &self.cols_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::MinRows => {
-                        self.render_textarea_compact(field_id, "Min Rows:", &self.min_rows_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::MinCols => {
-                        self.render_textarea_compact(field_id, "Min Cols:", &self.min_cols_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::MaxRows => {
-                        self.render_textarea_compact(field_id, "Max Rows:", &self.max_rows_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::MaxCols => {
-                        self.render_textarea_compact(field_id, "Max Cols:", &self.max_cols_input, x, y, 8, buf, theme, is_current);
-                    }
-                    FieldRef::BgColor => {
-                        self.render_color_field(field_id, "BG Color:", &self.bg_color_input, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::ContentAlign => {
-                        let value = self.current_content_align_value();
-                        self.render_dropdown_compact(
-                            field_id,
-                            "Content Align:",
-                            value,
-                            x,
-                            y,
-                            buf,
-                            theme,
-                            is_current,
-                        );
-                    }
-                    FieldRef::BorderColor => {
-                        self.render_color_field(field_id, "Border Color:", &self.border_color_input, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::BorderStyle => {
-                        self.render_dropdown_compact(field_id, "Style:", &self.window_def.base().border_style, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::Streams => {
-                        self.render_textarea_compact(field_id, "Streams:", &self.streams_input, x, y, 20, buf, theme, is_current);
-                    }
-                    FieldRef::TextColor => {
-                        self.render_color_field(field_id, "Text Color:", &self.text_color_input, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::CursorColor => {
-                        self.render_color_field(field_id, "Cursor FG:", &self.cursor_color_input, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::CursorBg => {
-                        self.render_color_field(field_id, "Cursor BG:", &self.cursor_bg_input, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::ShowTitle => {
-                        self.render_checkbox_compact(field_id, "Show Title", self.window_def.base().show_title, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::Locked => {
-                        self.render_checkbox_compact(field_id, "Locked", self.window_def.base().locked, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::TransparentBg => {
-                        self.render_checkbox_compact(field_id, "Transparent BG", self.window_def.base().transparent_background, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::ShowBorder => {
-                        self.render_checkbox_compact(field_id, "Show Border", self.window_def.base().show_border, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::BorderTop => {
-                        self.render_checkbox_compact(field_id, "Top Border", self.window_def.base().border_sides.top, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::BorderBottom => {
-                        self.render_checkbox_compact(field_id, "Bottom Border", self.window_def.base().border_sides.bottom, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::BorderLeft => {
-                        self.render_checkbox_compact(field_id, "Left Border", self.window_def.base().border_sides.left, x, y, buf, theme, is_current);
-                    }
-                    FieldRef::BorderRight => {
-                        self.render_checkbox_compact(field_id, "Right Border", self.window_def.base().border_sides.right, x, y, buf, theme, is_current);
-                    }
-                }
-                y += 1;
+            WindowDef::Text { .. } | WindowDef::Inventory { .. } => {
+                self.render_textarea_compact(
+                    FieldRef::Streams.legacy_field_id(),
+                    "Streams:",
+                    &self.streams_input,
+                    left_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Streams, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::Wordwrap.legacy_field_id(),
+                    "Wordwrap",
+                    self.text_wordwrap,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Wordwrap, self.focused_field),
+                );
+                special_row += 1;
+                self.render_textarea_compact(
+                    FieldRef::BufferSize.legacy_field_id(),
+                    "Buffer Size:",
+                    &self.buffer_size_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::BufferSize, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::Timestamps.legacy_field_id(),
+                    "Timestamps",
+                    self.text_show_timestamps,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Timestamps, self.focused_field),
+                );
+            }
+            WindowDef::TabbedText { .. } => {
+                let special_left_x = left_x + 2;
+                self.render_dropdown_compact(
+            FieldRef::TabBarPosition.legacy_field_id(),
+            "Tab Bar Pos:",
+            self.tab_bar_position_input
+                .lines()
+                .get(0)
+                        .map(|s| s.as_str())
+                        .unwrap_or("top"),
+                    special_left_x,
+                    special_row,
+                    10,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TabBarPosition, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::TabActiveColor.legacy_field_id(),
+                    "Active",
+                    &self.tab_active_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TabActiveColor, self.focused_field),
+                );
+                special_row += 1;
+                self.render_textarea_compact(
+                    FieldRef::TabUnreadPrefix.legacy_field_id(),
+                    "New Msg Icon:",
+                    &self.tab_unread_prefix_input,
+                    special_left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TabUnreadPrefix, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::TabInactiveColor.legacy_field_id(),
+                    "Inactive",
+                    &self.tab_inactive_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TabInactiveColor, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::TabUnreadColor.legacy_field_id(),
+                    "Unread",
+                    &self.tab_unread_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::TabUnreadColor, self.focused_field),
+                );
+                self.render_button(
+                    FieldRef::EditTabs.legacy_field_id(),
+                    "[ Edit Tabs ]",
+                    special_left_x,
+                    special_row,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::EditTabs, self.focused_field),
+                );
+            }
+            WindowDef::Room { .. } => {
+                self.render_checkbox_compact(
+                    FieldRef::ShowName.legacy_field_id(),
+                    "Show Name",
+                    self.show_name,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ShowName, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::ShowDesc.legacy_field_id(),
+                    "Show Desc",
+                    self.show_desc,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ShowDesc, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::ShowObjs.legacy_field_id(),
+                    "Show Objects",
+                    self.show_objs,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ShowObjs, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::ShowPlayers.legacy_field_id(),
+                    "Show Players",
+                    self.show_players,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ShowPlayers, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::ShowExits.legacy_field_id(),
+                    "Show Exits",
+                    self.show_exits,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ShowExits, self.focused_field),
+                );
+            }
+            WindowDef::Progress { .. } => {
+                self.render_textarea_compact(
+                    FieldRef::ProgressLabel.legacy_field_id(),
+                    "Progress ID:",
+                    &self.progress_label_input,
+                    left_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ProgressLabel, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::ProgressColor.legacy_field_id(),
+                    "Color:",
+                    &self.progress_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ProgressColor, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::ProgressNumbersOnly.legacy_field_id(),
+                    "Numbers Only",
+                    self.progress_numbers_only,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ProgressNumbersOnly, self.focused_field),
+                );
+            }
+            WindowDef::Countdown { .. } => {
+                self.render_textarea_compact(
+                    FieldRef::CountdownLabel.legacy_field_id(),
+                    "Label:",
+                    &self.countdown_label_input,
+                    left_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CountdownLabel, self.focused_field),
+                );
+                self.render_textarea_compact(
+                    FieldRef::CountdownIcon.legacy_field_id(),
+                    "Icon:",
+                    &self.countdown_icon_input,
+                    right_x,
+                    special_row,
+                    4,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CountdownIcon, self.focused_field),
+                );
+            }
+            WindowDef::Compass { .. } => {
+                self.render_color_field(
+                    FieldRef::CompassActiveColor.legacy_field_id(),
+                    "Active Color:",
+                    &self.compass_active_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CompassActiveColor, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::CompassInactiveColor.legacy_field_id(),
+                    "Inactive Color:",
+                    &self.compass_inactive_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::CompassInactiveColor, self.focused_field),
+                );
+            }
+            WindowDef::InjuryDoll { .. } => {
+                self.render_color_field(
+                    FieldRef::InjuryDefaultColor.legacy_field_id(),
+                    "Default:",
+                    &self.injury_default_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::InjuryDefaultColor, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::Injury1Color.legacy_field_id(),
+                    "Inj 1:",
+                    &self.injury1_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Injury1Color, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::Injury2Color.legacy_field_id(),
+                    "Inj 2:",
+                    &self.injury2_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Injury2Color, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::Injury3Color.legacy_field_id(),
+                    "Inj 3:",
+                    &self.injury3_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Injury3Color, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::Scar1Color.legacy_field_id(),
+                    "Scar 1:",
+                    &self.scar1_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Scar1Color, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::Scar2Color.legacy_field_id(),
+                    "Scar 2:",
+                    &self.scar2_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Scar2Color, self.focused_field),
+                );
+                special_row += 1;
+                self.render_color_field(
+                    FieldRef::Scar3Color.legacy_field_id(),
+                    "Scar 3:",
+                    &self.scar3_color_input,
+                    left_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::Scar3Color, self.focused_field),
+                );
+            }
+            WindowDef::Indicator { .. } => {
+                self.render_textarea_compact(
+                    FieldRef::IndicatorDefaultStatus.legacy_field_id(),
+                    "Default Status:",
+                    &self.indicator_default_status_input,
+                    left_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::IndicatorDefaultStatus, self.focused_field),
+                );
+                self.render_color_field(
+                    FieldRef::IndicatorDefaultColor.legacy_field_id(),
+                    "Default Color:",
+                    &self.indicator_default_color_input,
+                    right_x,
+                    special_row,
+                    8,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::IndicatorDefaultColor, self.focused_field),
+                );
+            }
+            WindowDef::Dashboard { .. } => {
+                self.render_dropdown_compact(
+                    FieldRef::DashboardLayout.legacy_field_id(),
+                    "Layout:",
+                    self.dashboard_layout_input
+                        .lines()
+                        .get(0)
+                        .map(|s| s.as_str())
+                        .unwrap_or("horizontal"),
+                    left_x,
+                    special_row,
+                    24,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::DashboardLayout, self.focused_field),
+                );
+                self.render_textarea_compact(
+                    FieldRef::DashboardSpacing.legacy_field_id(),
+                    "Spacing:",
+                    &self.dashboard_spacing_input,
+                    right_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::DashboardSpacing, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::DashboardHideInactive.legacy_field_id(),
+                    "Hide Inactive",
+                    self.dashboard_hide_inactive,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::DashboardHideInactive, self.focused_field),
+                );
+                special_row += 1;
+                self.render_button(
+                    FieldRef::EditIndicators.legacy_field_id(),
+                    "[ Edit Indicators ]",
+                    left_x,
+                    special_row,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::EditIndicators, self.focused_field),
+                );
+            }
+            WindowDef::ActiveEffects { .. } => {
+                self.render_textarea_compact(
+                    FieldRef::ActiveEffectsCategory.legacy_field_id(),
+                    "Category:",
+                    &self.active_effects_category_input,
+                    left_x,
+                    special_row,
+                    column_width as usize,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::ActiveEffectsCategory, self.focused_field),
+                );
+            }
+            WindowDef::Performance { .. } => {
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowFps.legacy_field_id(),
+                    "FPS",
+                    self.perf_show_fps,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowFps, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowRenderTimes.legacy_field_id(),
+                    "Render Times",
+                    self.perf_show_render_times,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowRenderTimes, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowFrameTimes.legacy_field_id(),
+                    "Frame Times",
+                    self.perf_show_frame_times,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowFrameTimes, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowUiTimes.legacy_field_id(),
+                    "UI Times",
+                    self.perf_show_ui_times,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowUiTimes, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowWrapTimes.legacy_field_id(),
+                    "Wrap Times",
+                    self.perf_show_wrap_times,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowWrapTimes, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowNet.legacy_field_id(),
+                    "Network",
+                    self.perf_show_net,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowNet, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowParse.legacy_field_id(),
+                    "Parser",
+                    self.perf_show_parse,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowParse, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowEvents.legacy_field_id(),
+                    "Events",
+                    self.perf_show_events,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowEvents, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowJitter.legacy_field_id(),
+                    "Jitter",
+                    self.perf_show_jitter,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowJitter, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowFrameSpikes.legacy_field_id(),
+                    "Frame Spikes",
+                    self.perf_show_frame_spikes,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowFrameSpikes, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowEventLag.legacy_field_id(),
+                    "Event Lag",
+                    self.perf_show_event_lag,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowEventLag, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowMemory.legacy_field_id(),
+                    "Memory",
+                    self.perf_show_memory,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowMemory, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowMemoryDelta.legacy_field_id(),
+                    "Memory Δ",
+                    self.perf_show_memory_delta,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowMemoryDelta, self.focused_field),
+                );
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowLines.legacy_field_id(),
+                    "Lines/Windows",
+                    self.perf_show_lines,
+                    right_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowLines, self.focused_field),
+                );
+                special_row += 1;
+                self.render_checkbox_compact(
+                    FieldRef::PerfShowUptime.legacy_field_id(),
+                    "Uptime (always tracked)",
+                    self.perf_show_uptime,
+                    left_x,
+                    special_row,
+                    column_width,
+                    buf,
+                    theme,
+                    is_focus(FieldRef::PerfShowUptime, self.focused_field),
+                );
+            }
+            _ => {
+                buf.set_string(
+                    left_x,
+                    special_row,
+                    "No special fields for this widget.",
+                    Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)),
+                );
             }
         }
+
     }
 
     /// Render a text input field (compact format for section-based layout)
     fn render_textarea_compact(
         &self,
-        field_id: usize,
+        _field_id: usize,
         label: &str,
         textarea: &TextArea,
+        x: u16,
+        y: u16,
+        width: usize,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        });
+
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+
+        let label_x = x + 2;
+        buf.set_string(label_x, y, label, Style::default().fg(label_color));
+
+        let raw_value = if textarea.lines().is_empty() {
+            ""
+        } else {
+            &textarea.lines()[0]
+        };
+        let truncated: String = raw_value.chars().take(width).collect();
+        let padded = format!("{:<width$}", truncated, width = width);
+
+        let text_color = crossterm_bridge::to_ratatui_color(if is_current {
+            theme.cursor_color
+        } else {
+            theme.text_color
+        });
+        let input_x = label_x + label.len() as u16 + 1;
+        buf.set_string(input_x, y, padded, Style::default().fg(text_color));
+    }
+
+    /// Render a color field with preview
+    fn render_color_field(
+        &self,
+        _field_id: usize,
+        label: &str,
+        textarea: &TextArea,
+        x: u16,
+        y: u16,
+        input_width: usize,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        });
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+
+        let value = if textarea.lines().is_empty() {
+            ""
+        } else {
+            &textarea.lines()[0]
+        };
+
+        // Color swatch
+        let swatch_x = x + 2;
+        self.render_color_preview(value, swatch_x, y, buf, theme);
+
+        // Label after swatch
+        let label_x = swatch_x + 4 + 1;
+        buf.set_string(label_x, y, label, Style::default().fg(label_color));
+
+        // Input field
+        let truncated: String = value.chars().take(input_width).collect();
+        let padded = format!("{:<width$}", truncated, width = input_width);
+        let text_color = crossterm_bridge::to_ratatui_color(if is_current {
+            theme.cursor_color
+        } else {
+            theme.text_color
+        });
+        let input_x = label_x + label.len() as u16 + 1;
+        buf.set_string(input_x, y, padded, Style::default().fg(text_color));
+    }
+
+    /// Render a checkbox field (compact format)
+    fn render_checkbox_compact(
+        &self,
+        _field_id: usize,
+        label: &str,
+        checked: bool,
+        x: u16,
+        y: u16,
+        _column_width: u16,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_current: bool,
+    ) {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
+            theme.focused_label_color
+        } else {
+            theme.label_color
+        });
+
+        let prefix = if is_current { "→ " } else { "  " };
+        buf.set_string(x, y, prefix, Style::default().fg(label_color));
+
+        let label_x = x + 2;
+        let label_width = usize::max(14, label.len());
+        let padded_label = format!("{:<width$}", label, width = label_width);
+        buf.set_string(label_x, y, padded_label, Style::default().fg(label_color));
+
+        let checkbox = if checked { "[✓]" } else { "[ ]" };
+        let checkbox_x = label_x + label_width as u16 + 2;
+        buf.set_string(checkbox_x, y, checkbox, Style::default().fg(label_color));
+    }
+
+    /// Render a dropdown field (compact format)
+    fn render_dropdown_compact(
+        &self,
+        _field_id: usize,
+        label: &str,
+        value: &str,
         x: u16,
         y: u16,
         width: usize,
@@ -1276,94 +3899,11 @@ impl WindowEditor {
         buf.set_string(x, y, prefix, Style::default().fg(label_color));
         buf.set_string(x + 2, y, label, Style::default().fg(label_color));
 
-        let value = if textarea.lines().is_empty() {
-            ""
-        } else {
-            &textarea.lines()[0]
-        };
-        let text_color = crossterm_bridge::to_ratatui_color(if is_current  {
-            theme.cursor_color
-        } else {
-            theme.text_color
-        });
+        let display_value = format!("{} ▼", value);
+        let truncated: String = display_value.chars().take(width).collect();
+        let padded = format!("{:<width$}", truncated, width = width);
         let input_x = x + 2 + label.len() as u16 + 1;
-        buf.set_string(input_x, y, value, Style::default().fg(text_color));
-    }
-
-    /// Render a color field with preview
-    fn render_color_field(
-        &self,
-        field_id: usize,
-        label: &str,
-        textarea: &TextArea,
-        x: u16,
-        y: u16,
-        buf: &mut Buffer,
-        theme: &EditorTheme,
-        is_current: bool,
-    ) {
-        self.render_textarea_compact(field_id, label, textarea, x, y, 10, buf, theme, is_current);
-
-        let value = if textarea.lines().is_empty() {
-            ""
-        } else {
-            &textarea.lines()[0]
-        };
-        let preview_x = x + 2 + label.len() as u16 + 1 + 10;
-        self.render_color_preview(value, preview_x, y, buf, theme);
-    }
-
-    /// Render a checkbox field (compact format)
-    fn render_checkbox_compact(
-        &self,
-        field_id: usize,
-        label: &str,
-        checked: bool,
-        x: u16,
-        y: u16,
-        buf: &mut Buffer,
-        theme: &EditorTheme,
-        is_current: bool,
-    ) {
-        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
-            theme.focused_label_color
-        } else {
-            theme.label_color
-        });
-
-        let prefix = if is_current { "→ " } else { "  " };
-        buf.set_string(x, y, prefix, Style::default().fg(label_color));
-
-        let checkbox = if checked { "[✓]" } else { "[ ]" };
-        buf.set_string(x + 2, y, checkbox, Style::default().fg(label_color));
-        buf.set_string(x + 5, y, label, Style::default().fg(label_color));
-    }
-
-    /// Render a dropdown field (compact format)
-    fn render_dropdown_compact(
-        &self,
-        field_id: usize,
-        label: &str,
-        value: &str,
-        x: u16,
-        y: u16,
-        buf: &mut Buffer,
-        theme: &EditorTheme,
-        is_current: bool,
-    ) {
-        let label_color = crossterm_bridge::to_ratatui_color(if is_current  {
-            theme.focused_label_color
-        } else {
-            theme.label_color
-        });
-
-        let prefix = if is_current { "→ " } else { "  " };
-        buf.set_string(x, y, prefix, Style::default().fg(label_color));
-        buf.set_string(x + 2, y, label, Style::default().fg(label_color));
-
-        let display = format!("{} ▼", value);
-        let input_x = x + 2 + label.len() as u16 + 1;
-        buf.set_string(input_x, y, &display, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
+        buf.set_string(input_x, y, &padded, Style::default().fg(crossterm_bridge::to_ratatui_color(theme.text_color)));
     }
 
     fn render_textarea(
@@ -1373,7 +3913,7 @@ impl WindowEditor {
         textarea: &TextArea,
         x: u16,
         y: u16,
-        width: usize,
+        _width: usize,
         spacing: u16,
         buf: &mut Buffer,
         theme: &EditorTheme,
@@ -1482,6 +4022,25 @@ impl WindowEditor {
         buf.set_string(checkbox_x, y, checkbox, Style::default().fg(label_color));
     }
 
+    fn render_button(
+        &self,
+        _field_id: usize,
+        label: &str,
+        x: u16,
+        y: u16,
+        buf: &mut Buffer,
+        theme: &EditorTheme,
+        is_focused: bool,
+    ) {
+        let label_color = crossterm_bridge::to_ratatui_color(if is_focused {
+            theme.focused_label_color
+        } else {
+            theme.text_color
+        });
+
+        buf.set_string(x, y, label, Style::default().fg(label_color).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }));
+    }
+
     fn render_dropdown(
         &self,
         field_id: usize,
@@ -1571,31 +4130,4 @@ mod tests {
         let name = if !lines.is_empty() { &lines[0] } else { "" };
         assert_eq!(name, "spacer_2");
     }
-
-    #[test]
-    fn test_build_sections_excludes_border_for_spacer() {
-        // RED: Test that build_sections_for_widget returns sections without Border for spacer
-        let sections = WindowEditor::build_sections_for_widget("spacer".to_string());
-
-        // Should have 4 sections (Identity, Position&Size, Constraints, Special) - NO Border
-        assert_eq!(sections.len(), 4);
-        assert_eq!(sections[0].name, "Identity");
-        assert_eq!(sections[1].name, "Position & Size");
-        assert_eq!(sections[2].name, "Constraints");
-        assert_eq!(sections[3].name, "Special");
-
-        // Verify Border section is not present
-        assert!(!sections.iter().any(|s| s.name == "Border"));
-    }
-
-    #[test]
-    fn test_build_sections_includes_border_for_text_widget() {
-        // RED: Test that build_sections_for_widget includes Border for non-spacer widgets
-        let sections = WindowEditor::build_sections_for_widget("text".to_string());
-
-        // Should have 5 sections including Border
-        assert_eq!(sections.len(), 5);
-        assert!(sections.iter().any(|s| s.name == "Border"));
-    }
 }
-

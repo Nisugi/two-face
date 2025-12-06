@@ -171,7 +171,7 @@ impl KeybindBrowser {
         mouse_col: u16,
         mouse_row: u16,
         mouse_down: bool,
-        area: Rect,
+        _area: Rect,
     ) -> bool {
         let popup_width = 70;
 
@@ -208,7 +208,7 @@ impl KeybindBrowser {
         &mut self,
         area: Rect,
         buf: &mut Buffer,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         theme: &crate::theme::AppTheme,
     ) {
         let width = 70;

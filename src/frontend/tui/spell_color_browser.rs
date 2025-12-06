@@ -105,7 +105,7 @@ impl SpellColorBrowser {
         &mut self,
         area: Rect,
         buf: &mut Buffer,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         theme: &crate::theme::AppTheme,
     ) {
         let popup_width = 70;

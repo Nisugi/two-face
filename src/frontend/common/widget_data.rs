@@ -257,3 +257,423 @@ impl HandData {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===========================================
+    // BorderConfig tests
+    // ===========================================
+
+    #[test]
+    fn test_border_config_default() {
+        let config = BorderConfig::default();
+        assert!(!config.show_border);
+        assert!(config.border_style.is_none());
+        assert!(config.border_color.is_none());
+    }
+
+    #[test]
+    fn test_border_config_with_values() {
+        let config = BorderConfig {
+            show_border: true,
+            border_style: Some("rounded".to_string()),
+            border_color: Some("#FF0000".to_string()),
+        };
+        assert!(config.show_border);
+        assert_eq!(config.border_style, Some("rounded".to_string()));
+        assert_eq!(config.border_color, Some("#FF0000".to_string()));
+    }
+
+    #[test]
+    fn test_border_config_equality() {
+        let config1 = BorderConfig::default();
+        let config2 = BorderConfig::default();
+        assert_eq!(config1, config2);
+    }
+
+    #[test]
+    fn test_border_config_clone() {
+        let config = BorderConfig {
+            show_border: true,
+            border_style: Some("double".to_string()),
+            border_color: None,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.show_border, cloned.show_border);
+        assert_eq!(config.border_style, cloned.border_style);
+    }
+
+    // ===========================================
+    // ColorConfig tests
+    // ===========================================
+
+    #[test]
+    fn test_color_config_default() {
+        let config = ColorConfig::default();
+        assert!(config.foreground.is_none());
+        assert!(config.background.is_none());
+        assert!(config.transparent_background);
+    }
+
+    #[test]
+    fn test_color_config_with_values() {
+        let config = ColorConfig {
+            foreground: Some("#FFFFFF".to_string()),
+            background: Some("#000000".to_string()),
+            transparent_background: false,
+        };
+        assert_eq!(config.foreground, Some("#FFFFFF".to_string()));
+        assert_eq!(config.background, Some("#000000".to_string()));
+        assert!(!config.transparent_background);
+    }
+
+    #[test]
+    fn test_color_config_equality() {
+        let config1 = ColorConfig::default();
+        let config2 = ColorConfig::default();
+        assert_eq!(config1, config2);
+    }
+
+    // ===========================================
+    // ProgressBarData tests
+    // ===========================================
+
+    #[test]
+    fn test_progress_bar_new() {
+        let data = ProgressBarData::new("Health".to_string(), 75, 100, None);
+        assert_eq!(data.label, "Health");
+        assert_eq!(data.current, 75);
+        assert_eq!(data.max, 100);
+        assert_eq!(data.percentage, 75);
+        assert_eq!(data.display_text, "75/100");
+    }
+
+    #[test]
+    fn test_progress_bar_percentage_calculation() {
+        let data = ProgressBarData::new("Test".to_string(), 50, 200, None);
+        assert_eq!(data.percentage, 25); // 50/200 = 25%
+    }
+
+    #[test]
+    fn test_progress_bar_percentage_zero_max() {
+        let data = ProgressBarData::new("Test".to_string(), 50, 0, None);
+        assert_eq!(data.percentage, 0); // Avoid division by zero
+    }
+
+    #[test]
+    fn test_progress_bar_percentage_full() {
+        let data = ProgressBarData::new("Test".to_string(), 100, 100, None);
+        assert_eq!(data.percentage, 100);
+    }
+
+    #[test]
+    fn test_progress_bar_percentage_over() {
+        let data = ProgressBarData::new("Test".to_string(), 150, 100, None);
+        assert_eq!(data.percentage, 150); // Can exceed 100%
+    }
+
+    #[test]
+    fn test_progress_bar_custom_text() {
+        let data = ProgressBarData::new("Health".to_string(), 75, 100, Some("HP: 75%".to_string()));
+        assert_eq!(data.display_text, "HP: 75%");
+        assert_eq!(data.custom_text, Some("HP: 75%".to_string()));
+    }
+
+    #[test]
+    fn test_progress_bar_default_colors() {
+        let data = ProgressBarData::new("Test".to_string(), 50, 100, None);
+        assert_eq!(data.bar_fill_color, Some("#00ff00".to_string())); // Green
+        assert_eq!(data.text_color, Some("#ffffff".to_string())); // White
+        assert!(data.bar_background_color.is_none());
+    }
+
+    #[test]
+    fn test_progress_bar_with_border() {
+        let border = BorderConfig {
+            show_border: true,
+            border_style: Some("rounded".to_string()),
+            border_color: None,
+        };
+        let data = ProgressBarData::new("Test".to_string(), 50, 100, None).with_border(border);
+        assert!(data.border.show_border);
+    }
+
+    #[test]
+    fn test_progress_bar_with_colors() {
+        let data = ProgressBarData::new("Test".to_string(), 50, 100, None)
+            .with_colors(Some("#FF0000".to_string()), Some("#333333".to_string()));
+        assert_eq!(data.bar_fill_color, Some("#FF0000".to_string()));
+        assert_eq!(data.bar_background_color, Some("#333333".to_string()));
+    }
+
+    #[test]
+    fn test_progress_bar_transparent_background() {
+        let data = ProgressBarData::new("Test".to_string(), 50, 100, None);
+        assert!(data.transparent_background);
+    }
+
+    // ===========================================
+    // IndicatorData tests
+    // ===========================================
+
+    #[test]
+    fn test_indicator_new_inactive() {
+        let data = IndicatorData::new("Stun".to_string(), false);
+        assert_eq!(data.label, "Stun");
+        assert!(!data.active);
+    }
+
+    #[test]
+    fn test_indicator_new_active() {
+        let data = IndicatorData::new("Poison".to_string(), true);
+        assert_eq!(data.label, "Poison");
+        assert!(data.active);
+    }
+
+    #[test]
+    fn test_indicator_default_colors() {
+        let data = IndicatorData::new("Test".to_string(), false);
+        assert_eq!(data.off_color, "#555555"); // Dark gray
+        assert_eq!(data.on_color, "#00ff00");   // Green
+    }
+
+    #[test]
+    fn test_indicator_with_colors() {
+        let data = IndicatorData::new("Test".to_string(), true)
+            .with_colors("#333333".to_string(), "#FF0000".to_string());
+        assert_eq!(data.off_color, "#333333");
+        assert_eq!(data.on_color, "#FF0000");
+    }
+
+    #[test]
+    fn test_indicator_transparent_background() {
+        let data = IndicatorData::new("Test".to_string(), false);
+        assert!(data.transparent_background);
+        assert!(data.background_color.is_none());
+    }
+
+    #[test]
+    fn test_indicator_default_border() {
+        let data = IndicatorData::new("Test".to_string(), false);
+        assert!(!data.border.show_border);
+    }
+
+    // ===========================================
+    // CountdownData tests
+    // ===========================================
+
+    #[test]
+    fn test_countdown_new() {
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█');
+        assert_eq!(data.label, "RT");
+        assert_eq!(data.remaining_seconds, 5);
+        assert_eq!(data.icon, '█');
+    }
+
+    #[test]
+    fn test_countdown_display_text_format() {
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█');
+        // Format is right-aligned with space: " 5 "
+        assert_eq!(data.display_text, " 5 ");
+    }
+
+    #[test]
+    fn test_countdown_display_text_double_digit() {
+        let data = CountdownData::new("RT".to_string(), 12, 20, '█');
+        assert_eq!(data.display_text, "12 ");
+    }
+
+    #[test]
+    fn test_countdown_blocks_calculation() {
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█');
+        // Available width = 20, text_width = 3, max_blocks = 17
+        // blocks_to_show = min(5, 17) = 5
+        assert_eq!(data.blocks_to_show, 5);
+    }
+
+    #[test]
+    fn test_countdown_blocks_limited_by_width() {
+        let data = CountdownData::new("RT".to_string(), 100, 10, '█');
+        // Available width = 10, text_width = 3, max_blocks = 7
+        // blocks_to_show = min(100, 7) = 7
+        assert_eq!(data.blocks_to_show, 7);
+    }
+
+    #[test]
+    fn test_countdown_blocks_zero_width() {
+        let data = CountdownData::new("RT".to_string(), 5, 2, '█');
+        // Available width = 2, text_width = 3, so no room for blocks
+        assert_eq!(data.blocks_to_show, 0);
+    }
+
+    #[test]
+    fn test_countdown_with_border() {
+        let border = BorderConfig {
+            show_border: true,
+            border_style: None,
+            border_color: Some("#FFFFFF".to_string()),
+        };
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█').with_border(border);
+        assert!(data.border.show_border);
+        assert_eq!(data.border.border_color, Some("#FFFFFF".to_string()));
+    }
+
+    #[test]
+    fn test_countdown_default_colors() {
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█');
+        assert_eq!(data.text_color, Some("#ffffff".to_string()));
+        assert!(data.background_color.is_none());
+        assert!(data.transparent_background);
+    }
+
+    // ===========================================
+    // HandType tests
+    // ===========================================
+
+    #[test]
+    fn test_hand_type_variants() {
+        assert_eq!(HandType::Left, HandType::Left);
+        assert_eq!(HandType::Right, HandType::Right);
+        assert_eq!(HandType::Spell, HandType::Spell);
+    }
+
+    #[test]
+    fn test_hand_type_inequality() {
+        assert_ne!(HandType::Left, HandType::Right);
+        assert_ne!(HandType::Left, HandType::Spell);
+        assert_ne!(HandType::Right, HandType::Spell);
+    }
+
+    #[test]
+    fn test_hand_type_clone() {
+        let hand = HandType::Left;
+        let cloned = hand;
+        assert_eq!(hand, cloned);
+    }
+
+    // ===========================================
+    // HandData tests
+    // ===========================================
+
+    #[test]
+    fn test_hand_data_left() {
+        let data = HandData::new("Left Hand".to_string(), HandType::Left, "sword".to_string());
+        assert_eq!(data.label, "Left Hand");
+        assert_eq!(data.hand_type, HandType::Left);
+        assert_eq!(data.content, "sword");
+        assert_eq!(data.icon, "L:");
+    }
+
+    #[test]
+    fn test_hand_data_right() {
+        let data = HandData::new("Right Hand".to_string(), HandType::Right, "shield".to_string());
+        assert_eq!(data.hand_type, HandType::Right);
+        assert_eq!(data.icon, "R:");
+    }
+
+    #[test]
+    fn test_hand_data_spell() {
+        let data = HandData::new("Spell".to_string(), HandType::Spell, "fireball".to_string());
+        assert_eq!(data.hand_type, HandType::Spell);
+        assert_eq!(data.icon, "S:");
+    }
+
+    #[test]
+    fn test_hand_data_truncates_long_content() {
+        let long_content = "a".repeat(50);
+        let data = HandData::new("Hand".to_string(), HandType::Left, long_content);
+        assert_eq!(data.content.chars().count(), 24);
+    }
+
+    #[test]
+    fn test_hand_data_short_content_unchanged() {
+        let short_content = "short item";
+        let data = HandData::new("Hand".to_string(), HandType::Left, short_content.to_string());
+        assert_eq!(data.content, "short item");
+    }
+
+    #[test]
+    fn test_hand_data_with_icon() {
+        let data = HandData::new("Hand".to_string(), HandType::Left, "item".to_string())
+            .with_icon("🗡:".to_string());
+        assert_eq!(data.icon, "🗡:");
+    }
+
+    #[test]
+    fn test_hand_data_with_colors() {
+        let data = HandData::new("Hand".to_string(), HandType::Left, "item".to_string())
+            .with_colors(Some("#FFFFFF".to_string()), Some("#00FF00".to_string()));
+        assert_eq!(data.text_color, Some("#FFFFFF".to_string()));
+        assert_eq!(data.content_highlight_color, Some("#00FF00".to_string()));
+    }
+
+    #[test]
+    fn test_hand_data_default_colors() {
+        let data = HandData::new("Hand".to_string(), HandType::Left, "item".to_string());
+        assert!(data.text_color.is_none());
+        assert!(data.content_highlight_color.is_none());
+        assert!(data.background_color.is_none());
+        assert!(data.transparent_background);
+    }
+
+    #[test]
+    fn test_hand_data_default_border() {
+        let data = HandData::new("Hand".to_string(), HandType::Left, "item".to_string());
+        assert!(!data.border.show_border);
+    }
+
+    // ===========================================
+    // Clone and Debug tests
+    // ===========================================
+
+    #[test]
+    fn test_progress_bar_clone() {
+        let data = ProgressBarData::new("Health".to_string(), 75, 100, None);
+        let cloned = data.clone();
+        assert_eq!(cloned.label, data.label);
+        assert_eq!(cloned.current, data.current);
+        assert_eq!(cloned.percentage, data.percentage);
+    }
+
+    #[test]
+    fn test_indicator_clone() {
+        let data = IndicatorData::new("Test".to_string(), true);
+        let cloned = data.clone();
+        assert_eq!(cloned.label, data.label);
+        assert_eq!(cloned.active, data.active);
+    }
+
+    #[test]
+    fn test_countdown_clone() {
+        let data = CountdownData::new("RT".to_string(), 5, 20, '█');
+        let cloned = data.clone();
+        assert_eq!(cloned.remaining_seconds, data.remaining_seconds);
+        assert_eq!(cloned.blocks_to_show, data.blocks_to_show);
+    }
+
+    #[test]
+    fn test_hand_data_clone() {
+        let data = HandData::new("Hand".to_string(), HandType::Left, "item".to_string());
+        let cloned = data.clone();
+        assert_eq!(cloned.label, data.label);
+        assert_eq!(cloned.hand_type, data.hand_type);
+    }
+
+    #[test]
+    fn test_progress_bar_debug() {
+        let data = ProgressBarData::new("Health".to_string(), 75, 100, None);
+        let debug_str = format!("{:?}", data);
+        assert!(debug_str.contains("ProgressBarData"));
+        assert!(debug_str.contains("Health"));
+    }
+
+    #[test]
+    fn test_indicator_debug() {
+        let data = IndicatorData::new("Stun".to_string(), true);
+        let debug_str = format!("{:?}", data);
+        assert!(debug_str.contains("IndicatorData"));
+        assert!(debug_str.contains("Stun"));
+    }
+}

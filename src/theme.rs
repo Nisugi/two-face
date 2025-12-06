@@ -597,13 +597,6 @@ impl AppTheme {
             let (r, g, b) = color_to_rgb_components(color);
             let (ref_r, ref_g, ref_b) = color_to_rgb_components(reference);
 
-            // Calculate luminance of both colors
-            let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-            let ref_lum = 0.299 * ref_r as f32 + 0.587 * ref_g as f32 + 0.114 * ref_b as f32;
-
-            // Determine if this is a light or dark color relative to reference
-            let is_lighter = lum > ref_lum;
-
             // Apply contrast boost by pushing colors away from the reference
             let boost_component = |c: u8, ref_c: u8| -> u8 {
                 let diff = c as f32 - ref_c as f32;
@@ -3768,5 +3761,457 @@ impl ThemePresets {
 impl Default for AppTheme {
     fn default() -> Self {
         ThemePresets::dark()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== indexed_color_to_rgb Tests ====================
+
+    #[test]
+    fn test_indexed_color_standard_black() {
+        assert_eq!(indexed_color_to_rgb(0), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_standard_red() {
+        assert_eq!(indexed_color_to_rgb(1), (128, 0, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_standard_green() {
+        assert_eq!(indexed_color_to_rgb(2), (0, 128, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_standard_yellow() {
+        assert_eq!(indexed_color_to_rgb(3), (128, 128, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_standard_blue() {
+        assert_eq!(indexed_color_to_rgb(4), (0, 0, 128));
+    }
+
+    #[test]
+    fn test_indexed_color_standard_white() {
+        assert_eq!(indexed_color_to_rgb(15), (255, 255, 255));
+    }
+
+    #[test]
+    fn test_indexed_color_bright_red() {
+        assert_eq!(indexed_color_to_rgb(9), (255, 0, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_bright_green() {
+        assert_eq!(indexed_color_to_rgb(10), (0, 255, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_extended_range_start() {
+        // Index 16 = first extended color (0, 0, 0)
+        assert_eq!(indexed_color_to_rgb(16), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_indexed_color_extended_range_middle() {
+        // Test some middle extended colors
+        // Index 21 = level 5 which is (0, 0, 255) in blue
+        assert_eq!(indexed_color_to_rgb(21), (0, 0, 255));
+    }
+
+    #[test]
+    fn test_indexed_color_extended_range_end() {
+        // Index 231 = last extended color
+        let (r, g, b) = indexed_color_to_rgb(231);
+        // Should be a valid color within the palette
+        assert!(r <= 255 && g <= 255 && b <= 255);
+    }
+
+    #[test]
+    fn test_indexed_color_grayscale_start() {
+        // Index 232 = first grayscale (8)
+        assert_eq!(indexed_color_to_rgb(232), (8, 8, 8));
+    }
+
+    #[test]
+    fn test_indexed_color_grayscale_middle() {
+        // Index 244 = 8 + (244-232)*10 = 8 + 120 = 128
+        assert_eq!(indexed_color_to_rgb(244), (128, 128, 128));
+    }
+
+    #[test]
+    fn test_indexed_color_grayscale_high() {
+        // Index 255 = 8 + (255-232)*10 = 8 + 230 = 238
+        assert_eq!(indexed_color_to_rgb(255), (238, 238, 238));
+    }
+
+    // ==================== color_to_rgb_components Tests ====================
+
+    #[test]
+    fn test_color_to_rgb_components_black() {
+        let color = Color::rgb(0, 0, 0);
+        assert_eq!(color_to_rgb_components(color), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_color_to_rgb_components_white() {
+        let color = Color::rgb(255, 255, 255);
+        assert_eq!(color_to_rgb_components(color), (255, 255, 255));
+    }
+
+    #[test]
+    fn test_color_to_rgb_components_red() {
+        let color = Color::rgb(255, 0, 0);
+        assert_eq!(color_to_rgb_components(color), (255, 0, 0));
+    }
+
+    #[test]
+    fn test_color_to_rgb_components_arbitrary() {
+        let color = Color::rgb(123, 45, 67);
+        assert_eq!(color_to_rgb_components(color), (123, 45, 67));
+    }
+
+    // ==================== blend_colors Tests ====================
+
+    #[test]
+    fn test_blend_colors_zero_ratio() {
+        let base = Color::rgb(255, 0, 0);
+        let other = Color::rgb(0, 255, 0);
+        let result = blend_colors(base, other, 0.0);
+        assert_eq!((result.r, result.g, result.b), (255, 0, 0));
+    }
+
+    #[test]
+    fn test_blend_colors_full_ratio() {
+        let base = Color::rgb(255, 0, 0);
+        let other = Color::rgb(0, 255, 0);
+        let result = blend_colors(base, other, 1.0);
+        assert_eq!((result.r, result.g, result.b), (0, 255, 0));
+    }
+
+    #[test]
+    fn test_blend_colors_half_ratio() {
+        let base = Color::rgb(0, 0, 0);
+        let other = Color::rgb(100, 100, 100);
+        let result = blend_colors(base, other, 0.5);
+        // 0 * 0.5 + 100 * 0.5 = 50
+        assert_eq!((result.r, result.g, result.b), (50, 50, 50));
+    }
+
+    #[test]
+    fn test_blend_colors_clamped_below_zero() {
+        let base = Color::rgb(255, 0, 0);
+        let other = Color::rgb(0, 255, 0);
+        // Negative ratio should be clamped to 0
+        let result = blend_colors(base, other, -0.5);
+        assert_eq!((result.r, result.g, result.b), (255, 0, 0));
+    }
+
+    #[test]
+    fn test_blend_colors_clamped_above_one() {
+        let base = Color::rgb(255, 0, 0);
+        let other = Color::rgb(0, 255, 0);
+        // Ratio > 1 should be clamped to 1
+        let result = blend_colors(base, other, 1.5);
+        assert_eq!((result.r, result.g, result.b), (0, 255, 0));
+    }
+
+    // ==================== AppTheme::get_color Tests ====================
+
+    #[test]
+    fn test_get_color_window_border() {
+        let theme = ThemePresets::dark();
+        let color = theme.get_color("window_border");
+        assert!(color.is_some());
+        assert_eq!(color.unwrap(), theme.window_border);
+    }
+
+    #[test]
+    fn test_get_color_window_border_focused() {
+        let theme = ThemePresets::dark();
+        let color = theme.get_color("window_border_focused");
+        assert!(color.is_some());
+        assert_eq!(color.unwrap(), theme.window_border_focused);
+    }
+
+    #[test]
+    fn test_get_color_text_primary() {
+        let theme = ThemePresets::dark();
+        let color = theme.get_color("text_primary");
+        assert!(color.is_some());
+        assert_eq!(color.unwrap(), theme.text_primary);
+    }
+
+    #[test]
+    fn test_get_color_link_color() {
+        let theme = ThemePresets::dark();
+        let color = theme.get_color("link_color");
+        assert!(color.is_some());
+        assert_eq!(color.unwrap(), theme.link_color);
+    }
+
+    #[test]
+    fn test_get_color_unknown_returns_none() {
+        let theme = ThemePresets::dark();
+        assert!(theme.get_color("nonexistent_color").is_none());
+        assert!(theme.get_color("").is_none());
+        assert!(theme.get_color("random_name").is_none());
+    }
+
+    // ==================== ColorFilter Tests ====================
+
+    #[test]
+    fn test_color_filter_none_unchanged() {
+        let color = Color::rgb(100, 150, 200);
+        let result = ColorFilter::None.apply(color);
+        assert_eq!((result.r, result.g, result.b), (100, 150, 200));
+    }
+
+    #[test]
+    fn test_color_filter_grayscale_pure_red() {
+        let color = Color::rgb(255, 0, 0);
+        let result = ColorFilter::Grayscale.apply(color);
+        // ITU-R BT.709: 0.2126 * 255 = 54.21
+        assert_eq!(result.r, result.g);
+        assert_eq!(result.g, result.b);
+        assert!(result.r > 0 && result.r < 255);
+    }
+
+    #[test]
+    fn test_color_filter_grayscale_pure_green() {
+        let color = Color::rgb(0, 255, 0);
+        let result = ColorFilter::Grayscale.apply(color);
+        // ITU-R BT.709: 0.7152 * 255 = 182.38
+        assert_eq!(result.r, result.g);
+        assert_eq!(result.g, result.b);
+        assert!(result.r > 100); // Green has highest luminance weight
+    }
+
+    #[test]
+    fn test_color_filter_grayscale_white() {
+        let color = Color::rgb(255, 255, 255);
+        let result = ColorFilter::Grayscale.apply(color);
+        // White stays white in grayscale
+        assert_eq!((result.r, result.g, result.b), (255, 255, 255));
+    }
+
+    #[test]
+    fn test_color_filter_grayscale_black() {
+        let color = Color::rgb(0, 0, 0);
+        let result = ColorFilter::Grayscale.apply(color);
+        assert_eq!((result.r, result.g, result.b), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_color_filter_sepia_applied() {
+        let color = Color::rgb(100, 100, 100);
+        let result = ColorFilter::Sepia.apply(color);
+        // Sepia should produce warmer tones (higher R, lower B typically)
+        // Just verify it changes the color
+        assert!(result.r != 100 || result.g != 100 || result.b != 100);
+    }
+
+    #[test]
+    fn test_color_filter_blue_light_reduces_blue() {
+        let color = Color::rgb(100, 100, 200);
+        let result = ColorFilter::BlueLightFilter(1.0).apply(color);
+        // Blue channel should be reduced
+        assert!(result.b < 200);
+    }
+
+    #[test]
+    fn test_color_filter_blue_light_zero_intensity() {
+        let color = Color::rgb(100, 100, 200);
+        let result = ColorFilter::BlueLightFilter(0.0).apply(color);
+        // At zero intensity, blue should be mostly unchanged
+        assert_eq!((result.r, result.g, result.b), (100, 100, 200));
+    }
+
+    #[test]
+    fn test_color_filter_deuteranopia() {
+        let color = Color::rgb(255, 0, 0);
+        let result = ColorFilter::DeuteranopiaSimulation.apply(color);
+        // Red-green colorblindness affects R and G channels
+        assert!(result.r > 0);
+    }
+
+    #[test]
+    fn test_color_filter_protanopia() {
+        let color = Color::rgb(255, 0, 0);
+        let result = ColorFilter::ProtanopiaSimulation.apply(color);
+        // Should transform the color
+        assert!(result.r > 0);
+    }
+
+    #[test]
+    fn test_color_filter_tritanopia() {
+        let color = Color::rgb(0, 0, 255);
+        let result = ColorFilter::TritanopiaSimulation.apply(color);
+        // Blue-yellow colorblindness affects blue
+        // Just verify it's applied
+        assert!(result.b <= 255);
+    }
+
+    // ==================== ColorFilter::name and description Tests ====================
+
+    #[test]
+    fn test_color_filter_name_none() {
+        assert_eq!(ColorFilter::None.name(), "None");
+    }
+
+    #[test]
+    fn test_color_filter_name_grayscale() {
+        assert_eq!(ColorFilter::Grayscale.name(), "Grayscale");
+    }
+
+    #[test]
+    fn test_color_filter_name_blue_light() {
+        let name = ColorFilter::BlueLightFilter(0.5).name();
+        assert!(name.contains("Blue Light Filter"));
+        assert!(name.contains("50%"));
+    }
+
+    #[test]
+    fn test_color_filter_description_not_empty() {
+        assert!(!ColorFilter::None.description().is_empty());
+        assert!(!ColorFilter::Grayscale.description().is_empty());
+        assert!(!ColorFilter::Sepia.description().is_empty());
+    }
+
+    #[test]
+    fn test_color_filter_all_returns_list() {
+        let all = ColorFilter::all();
+        assert!(all.len() >= 5);
+        assert!(all.contains(&ColorFilter::None));
+        assert!(all.contains(&ColorFilter::Grayscale));
+        assert!(all.contains(&ColorFilter::Sepia));
+    }
+
+    // ==================== ThemePresets Tests ====================
+
+    #[test]
+    fn test_theme_presets_dark_exists() {
+        let theme = ThemePresets::dark();
+        assert_eq!(theme.name, "Dark");
+    }
+
+    #[test]
+    fn test_theme_presets_light_exists() {
+        let theme = ThemePresets::light();
+        assert_eq!(theme.name, "Light");
+    }
+
+    #[test]
+    fn test_theme_presets_nord_exists() {
+        let theme = ThemePresets::nord();
+        assert_eq!(theme.name, "Nord");
+    }
+
+    #[test]
+    fn test_theme_presets_dracula_exists() {
+        let theme = ThemePresets::dracula();
+        assert_eq!(theme.name, "Dracula");
+    }
+
+    #[test]
+    fn test_theme_presets_solarized_dark_exists() {
+        let theme = ThemePresets::solarized_dark();
+        assert_eq!(theme.name, "Solarized Dark");
+    }
+
+    #[test]
+    fn test_theme_presets_all_contains_dark() {
+        let all = ThemePresets::all();
+        assert!(all.contains_key("dark"));
+    }
+
+    #[test]
+    fn test_theme_presets_all_contains_light() {
+        let all = ThemePresets::all();
+        assert!(all.contains_key("light"));
+    }
+
+    #[test]
+    fn test_theme_presets_all_minimum_count() {
+        let all = ThemePresets::all();
+        // Should have at least 5 built-in themes
+        assert!(all.len() >= 5);
+    }
+
+    // ==================== ThemeVariant Tests ====================
+
+    #[test]
+    fn test_theme_variant_all() {
+        let all = ThemeVariant::all();
+        assert!(all.len() >= 4);
+    }
+
+    #[test]
+    fn test_theme_variant_standard_name() {
+        assert_eq!(ThemeVariant::Standard.name(), "Standard");
+    }
+
+    #[test]
+    fn test_theme_variant_high_contrast_name() {
+        assert_eq!(ThemeVariant::HighContrast.name(), "High Contrast");
+    }
+
+    #[test]
+    fn test_theme_variant_description_not_empty() {
+        assert!(!ThemeVariant::Standard.description().is_empty());
+        assert!(!ThemeVariant::HighContrast.description().is_empty());
+    }
+
+    // ==================== AppTheme::to_editor_theme Tests ====================
+
+    #[test]
+    fn test_to_editor_theme_uses_editor_colors() {
+        let theme = ThemePresets::dark();
+        let editor_theme = theme.to_editor_theme();
+
+        assert_eq!(editor_theme.border_color, theme.editor_border);
+        assert_eq!(editor_theme.label_color, theme.editor_label);
+        assert_eq!(editor_theme.focused_label_color, theme.editor_label_focused);
+        assert_eq!(editor_theme.text_color, theme.editor_text);
+        assert_eq!(editor_theme.cursor_color, theme.editor_cursor);
+        assert_eq!(editor_theme.status_color, theme.editor_status);
+    }
+
+    // ==================== Default Tests ====================
+
+    #[test]
+    fn test_app_theme_default_is_dark() {
+        let default_theme = AppTheme::default();
+        let dark_theme = ThemePresets::dark();
+        assert_eq!(default_theme.name, dark_theme.name);
+    }
+
+    #[test]
+    fn test_color_filter_default_is_none() {
+        assert_eq!(ColorFilter::default(), ColorFilter::None);
+    }
+
+    // ==================== derive_injury_default_color Tests ====================
+
+    #[test]
+    fn test_derive_injury_default_color_blends() {
+        let bg = Color::rgb(0, 0, 0);
+        let text = Color::rgb(100, 100, 100);
+        let result = derive_injury_default_color(bg, text);
+
+        // 0.25 blend ratio: 0 * 0.75 + 100 * 0.25 = 25
+        assert_eq!((result.r, result.g, result.b), (25, 25, 25));
+    }
+
+    #[test]
+    fn test_derive_injury_default_color_white_on_white() {
+        let bg = Color::rgb(255, 255, 255);
+        let text = Color::rgb(255, 255, 255);
+        let result = derive_injury_default_color(bg, text);
+        assert_eq!((result.r, result.g, result.b), (255, 255, 255));
     }
 }

@@ -648,12 +648,6 @@ impl MessageProcessor {
                     }
                 }
             }
-            ParsedElement::SwitchQuickBar { id } => {
-                self.chunk_has_silent_updates = true; // Mark as silent update
-
-                // Switch QuickBar is handled at AppCore level (needs access to layout cache)
-                // This is just a placeholder to prevent the catch-all from triggering
-            }
             _ => {
                 // Other elements handled elsewhere or not yet implemented
             }
@@ -887,7 +881,7 @@ impl MessageProcessor {
     pub fn flush_current_stream_with_tts(
         &mut self,
         ui_state: &mut UiState,
-        tts_manager: Option<&mut crate::tts::TtsManager>,
+        mut tts_manager: Option<&mut crate::tts::TtsManager>,
     ) {
         if self.current_segments.is_empty() {
             return;
@@ -963,7 +957,7 @@ impl MessageProcessor {
         }
 
         // Determine target window based on stream (may be redirected stream)
-        let window_name = self.map_stream_to_window(&self.current_stream);
+        let _window_name = self.map_stream_to_window(&self.current_stream);
 
         // Special handling for room stream - room uses components, not text segments
         // Discard text from room stream (room data flows through components only)
@@ -1035,49 +1029,76 @@ impl MessageProcessor {
             return;
         }
 
-        // Add line to window, fallback to main if target doesn't exist (except for inv/combat/playerlist streams)
-        let mut text_added_to_window = None; // Track (window_name, line_text) for TTS
+        let mut text_added_to_any_window = false;
+        let mut tts_handled = false;
 
-        if let Some(window) = ui_state.get_window_mut(&window_name) {
-            match window.content {
-                WindowContent::Text(ref mut content) => {
-                    content.add_line(line.clone());
-                    text_added_to_window = Some(window_name.clone());
+        // Iterate over all windows to find interested parties
+        for (window_name, window) in ui_state.windows.iter_mut() {
+            let mut added_here = false;
+            match &mut window.content {
+                WindowContent::Text(content) => {
+                    let mapped_name = self.map_stream_to_window(&self.current_stream);
+                    if *window_name == mapped_name {
+                        content.add_line(line.clone());
+                        added_here = true;
+                    }
                 }
-                WindowContent::Inventory(ref mut content) => {
-                    content.add_line(line.clone());
-                    text_added_to_window = Some(window_name.clone());
+                WindowContent::Inventory(content) => {
+                    let mapped_name = self.map_stream_to_window(&self.current_stream);
+                    if mapped_name == "inventory" {
+                        content.add_line(line.clone());
+                        added_here = true;
+                    }
                 }
-                WindowContent::Spells(ref mut content) => {
-                    content.add_line(line.clone());
-                    text_added_to_window = Some(window_name.clone());
+                WindowContent::Spells(content) => {
+                    let mapped_name = self.map_stream_to_window(&self.current_stream);
+                    if mapped_name == "spells" {
+                        content.add_line(line.clone());
+                        added_here = true;
+                    }
                 }
-                _ => {
-                    // Other content types don't support text lines
-                    tracing::trace!(
-                        "Window '{}' doesn't support text content (type: {:?})",
-                        window_name,
-                        std::mem::discriminant(&window.content)
-                    );
+                WindowContent::TabbedText(tab_content) => {
+                    for tab in &mut tab_content.tabs {
+                        if tab
+                            .definition
+                            .streams
+                            .iter()
+                            .any(|s| s.trim() == self.current_stream)
+                        {
+                            tab.content.add_line(line.clone());
+                            added_here = true;
+                            // TODO: Add logic to mark tab as unread
+                        }
+                    }
                 }
+                _ => {}
             }
-        } else if window_name != "main" {
-            // Target window doesn't exist, fallback to main (but NOT for inv stream!)
-            tracing::trace!(
-                "Window '{}' doesn't exist, routing content to main window",
-                window_name
-            );
-            if let Some(main_window) = ui_state.get_window_mut("main") {
-                if let WindowContent::Text(ref mut content) = main_window.content {
-                    content.add_line(line.clone());
-                    text_added_to_window = Some("main".to_string());
+
+            if added_here {
+                text_added_to_any_window = true;
+                if let Some(tts_mgr) = tts_manager.as_deref_mut() {
+                    if !tts_handled {
+                        self.enqueue_tts(tts_mgr, window_name, &line);
+                        tts_handled = true; // Avoid multiple TTS calls for the same line
+                    }
                 }
             }
         }
 
-        // Enqueue for TTS if enabled and text was added to a window
-        if let (Some(window_name), Some(tts_mgr)) = (text_added_to_window, tts_manager) {
-            self.enqueue_tts(tts_mgr, &window_name, &line);
+        // Fallback to main window if no other window handled the stream
+        if !text_added_to_any_window && self.map_stream_to_window(&self.current_stream) != "main" {
+            tracing::trace!(
+                "Window for stream '{}' not found, routing content to main window",
+                self.current_stream
+            );
+            if let Some(main_window) = ui_state.get_window_mut("main") {
+                if let WindowContent::Text(ref mut content) = main_window.content {
+                    content.add_line(line.clone());
+                    if let Some(tts_mgr) = tts_manager.as_deref_mut() {
+                        self.enqueue_tts(tts_mgr, "main", &line);
+                    }
+                }
+            }
         }
 
         // Handle redirect_copy mode: also send to original stream
@@ -1504,5 +1525,260 @@ impl MessageProcessor {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===========================================
+    // Helper function to create minimal processor for testing
+    // ===========================================
+
+    fn create_test_processor() -> MessageProcessor {
+        let config = Config::default();
+        MessageProcessor::new(config)
+    }
+
+    // ===========================================
+    // map_stream_to_window tests - core game streams
+    // ===========================================
+
+    #[test]
+    fn test_map_stream_main() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("main"), "main");
+    }
+
+    #[test]
+    fn test_map_stream_room() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("room"), "room");
+    }
+
+    #[test]
+    fn test_map_stream_inventory() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("inv"), "inventory");
+    }
+
+    #[test]
+    fn test_map_stream_thoughts() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("thoughts"), "thoughts");
+    }
+
+    #[test]
+    fn test_map_stream_speech() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("speech"), "speech");
+    }
+
+    // ===========================================
+    // map_stream_to_window tests - communication streams
+    // ===========================================
+
+    #[test]
+    fn test_map_stream_announcements() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("announcements"), "announcements");
+    }
+
+    #[test]
+    fn test_map_stream_logons() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("logons"), "logons");
+    }
+
+    // ===========================================
+    // map_stream_to_window tests - combat streams
+    // ===========================================
+
+    #[test]
+    fn test_map_stream_combat() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("combat"), "targets");
+    }
+
+    #[test]
+    fn test_map_stream_death() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("death"), "death");
+    }
+
+    #[test]
+    fn test_map_stream_loot() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("loot"), "loot");
+    }
+
+    // ===========================================
+    // map_stream_to_window tests - misc streams
+    // ===========================================
+
+    #[test]
+    fn test_map_stream_spells() {
+        let processor = create_test_processor();
+        // Note: case-sensitive - "Spells" not "spells"
+        assert_eq!(processor.map_stream_to_window("Spells"), "spells");
+    }
+
+    #[test]
+    fn test_map_stream_familiar() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("familiar"), "familiar");
+    }
+
+    #[test]
+    fn test_map_stream_ambients() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("ambients"), "ambients");
+    }
+
+    #[test]
+    fn test_map_stream_bounty() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("bounty"), "bounty");
+    }
+
+    #[test]
+    fn test_map_stream_playerlist() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("playerlist"), "players");
+    }
+
+    // ===========================================
+    // map_stream_to_window tests - unknown streams default to main
+    // ===========================================
+
+    #[test]
+    fn test_map_stream_unknown_defaults_to_main() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("unknown_stream"), "main");
+    }
+
+    #[test]
+    fn test_map_stream_empty_defaults_to_main() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window(""), "main");
+    }
+
+    #[test]
+    fn test_map_stream_random_text_defaults_to_main() {
+        let processor = create_test_processor();
+        assert_eq!(processor.map_stream_to_window("xyz123"), "main");
+    }
+
+    #[test]
+    fn test_map_stream_case_sensitive_spells() {
+        let processor = create_test_processor();
+        // "spells" (lowercase) should default to main, not "spells" window
+        // Only "Spells" (capital S) maps to spells window
+        assert_eq!(processor.map_stream_to_window("spells"), "main");
+    }
+
+    // ===========================================
+    // MessageProcessor construction tests
+    // ===========================================
+
+    #[test]
+    fn test_new_processor_has_main_stream() {
+        let processor = create_test_processor();
+        assert_eq!(processor.current_stream, "main");
+    }
+
+    #[test]
+    fn test_new_processor_segments_empty() {
+        let processor = create_test_processor();
+        assert!(processor.current_segments.is_empty());
+    }
+
+    #[test]
+    fn test_new_processor_buffers_empty() {
+        let processor = create_test_processor();
+        assert!(processor.inventory_buffer.is_empty());
+        assert!(processor.combat_buffer.is_empty());
+        assert!(processor.playerlist_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_new_processor_not_discarding() {
+        let processor = create_test_processor();
+        assert!(!processor.discard_current_stream);
+    }
+
+    #[test]
+    fn test_new_processor_server_time_offset_zero() {
+        let processor = create_test_processor();
+        assert_eq!(processor.server_time_offset, 0);
+    }
+
+    #[test]
+    fn test_new_processor_squelch_enabled_by_default() {
+        let processor = create_test_processor();
+        // Squelch enabled by default (ignores_enabled = true in config)
+        assert!(processor.squelch_enabled);
+    }
+
+    // ===========================================
+    // clear_inventory_cache tests
+    // ===========================================
+
+    #[test]
+    fn test_clear_inventory_cache() {
+        let mut processor = create_test_processor();
+        // Add some fake previous inventory
+        processor.previous_inventory = vec![vec![TextSegment {
+            text: "test item".to_string(),
+            fg: None,
+            bg: None,
+            bold: false,
+            span_type: SpanType::Normal,
+            link_data: None,
+        }]];
+        assert!(!processor.previous_inventory.is_empty());
+
+        // Clear cache
+        processor.clear_inventory_cache();
+        assert!(processor.previous_inventory.is_empty());
+    }
+
+    // ===========================================
+    // Stream mapping completeness tests
+    // ===========================================
+
+    #[test]
+    fn test_all_known_streams_mapped_correctly() {
+        let processor = create_test_processor();
+
+        // Test all documented stream -> window mappings
+        let expected_mappings = [
+            ("main", "main"),
+            ("room", "room"),
+            ("inv", "inventory"),
+            ("thoughts", "thoughts"),
+            ("speech", "speech"),
+            ("announcements", "announcements"),
+            ("loot", "loot"),
+            ("death", "death"),
+            ("logons", "logons"),
+            ("familiar", "familiar"),
+            ("ambients", "ambients"),
+            ("bounty", "bounty"),
+            ("Spells", "spells"),
+            ("combat", "targets"),
+            ("playerlist", "players"),
+        ];
+
+        for (stream, expected_window) in expected_mappings {
+            assert_eq!(
+                processor.map_stream_to_window(stream),
+                expected_window,
+                "Stream '{}' should map to window '{}'",
+                stream,
+                expected_window
+            );
+        }
     }
 }

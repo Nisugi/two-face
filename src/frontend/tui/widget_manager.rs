@@ -6,8 +6,6 @@
 ///! - Widget initialization and updates
 
 use std::collections::HashMap;
-use crate::core::AppCore;
-use crate::theme::AppTheme;
 
 /// Widget manager handles all widget caches and synchronization
 pub struct WidgetManager {
@@ -45,10 +43,8 @@ pub struct WidgetManager {
     pub compass_widgets: HashMap<String, super::compass::Compass>,
     /// Cache of InjuryDoll widgets per window name
     pub injury_doll_widgets: HashMap<String, super::injury_doll::InjuryDoll>,
-    /// Cache of QuickBar widgets per window name
-    pub quickbar_widgets: HashMap<String, super::quickbar::QuickBar>,
-    /// Performance stats widget (singleton overlay)
-    pub performance_stats_widget: Option<super::performance_stats::PerformanceStatsWidget>,
+    /// Cache of Performance widgets per window name
+    pub performance_widgets: HashMap<String, super::performance_stats::PerformanceStatsWidget>,
     /// Track last synced generation per text window to know what's new
     /// Using generation instead of line count to handle buffer rotation at max_lines
     pub last_synced_generation: HashMap<String, u64>,
@@ -75,8 +71,7 @@ impl WidgetManager {
             tabbed_text_windows: HashMap::new(),
             compass_widgets: HashMap::new(),
             injury_doll_widgets: HashMap::new(),
-            quickbar_widgets: HashMap::new(),
-            performance_stats_widget: None,
+            performance_widgets: HashMap::new(),
             last_synced_generation: HashMap::new(),
         }
     }

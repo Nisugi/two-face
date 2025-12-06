@@ -92,9 +92,6 @@ pub enum ParsedElement {
     ClearStream {
         id: String,
     },
-    SwitchQuickBar {
-        id: String,
-    },
     ClearDialogData {
         id: String,
     },
@@ -429,8 +426,6 @@ impl XmlParser {
             self.current_stream = "main".to_string();
         } else if tag.starts_with("<clearStream ") {
             self.handle_clear_stream(tag, elements);
-        } else if tag.starts_with("<switchQuickBar ") {
-            self.handle_switch_quickbar(tag, elements);
         } else if tag.starts_with("<prompt ") {
             self.handle_prompt(tag, elements);
         } else if tag.starts_with("<roundTime ") {
@@ -571,13 +566,6 @@ impl XmlParser {
         // <clearStream id='room'/>
         if let Some(id) = Self::extract_attribute(tag, "id") {
             elements.push(ParsedElement::ClearStream { id });
-        }
-    }
-
-    fn handle_switch_quickbar(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
-        // <switchQuickBar id='quick'/>
-        if let Some(id) = Self::extract_attribute(tag, "id") {
-            elements.push(ParsedElement::SwitchQuickBar { id });
         }
     }
 
@@ -768,7 +756,7 @@ impl XmlParser {
 
                 // Extract all <image> tags for injuries
                 let mut remaining = tag;
-                let mut count = 0;
+                let mut _count = 0;
                 while let Some(img_start) = remaining.find("<image ") {
                     if let Some(img_end) = remaining[img_start..].find("/>") {
                         let img_tag = &remaining[img_start..img_start + img_end + 2];
@@ -777,7 +765,7 @@ impl XmlParser {
                         if let Some(body_id) = Self::extract_attribute(img_tag, "id") {
                             if let Some(name) = Self::extract_attribute(img_tag, "name") {
                                 elements.push(ParsedElement::InjuryImage { id: body_id, name });
-                                count += 1;
+                                _count += 1;
                             }
                         }
 
@@ -812,7 +800,7 @@ impl XmlParser {
 
                 // Extract all progressBar tags for this category
                 let mut remaining = tag;
-                let mut count = 0;
+                let mut _count = 0;
                 while let Some(pb_start) = remaining.find("<progressBar ") {
                     if let Some(pb_end) = remaining[pb_start..].find("/>") {
                         let pb_tag = &remaining[pb_start..pb_start + pb_end + 2];
@@ -832,7 +820,7 @@ impl XmlParser {
                                     text,
                                     time,
                                 });
-                                count += 1;
+                                _count += 1;
                             }
                         }
 
@@ -1427,5 +1415,406 @@ impl XmlParser {
 impl Default for XmlParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a parser with common presets for testing
+    fn test_parser() -> XmlParser {
+        let presets = vec![
+            ("speech".to_string(), Some("#53a684".to_string()), None),
+            ("links".to_string(), Some("#477ab3".to_string()), None),
+            ("commands".to_string(), Some("#477ab3".to_string()), None),
+            ("monsterbold".to_string(), Some("#a29900".to_string()), None),
+            ("roomName".to_string(), Some("#9BA2B2".to_string()), Some("#395573".to_string())),
+        ];
+        XmlParser::with_presets(presets, std::collections::HashMap::new())
+    }
+
+    // ==================== Basic Text Parsing ====================
+
+    #[test]
+    fn test_plain_text_no_tags() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("Hello, world!");
+
+        assert_eq!(elements.len(), 1);
+        if let ParsedElement::Text { content, span_type, .. } = &elements[0] {
+            assert_eq!(content, "Hello, world!");
+            assert_eq!(*span_type, SpanType::Normal);
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    #[test]
+    fn test_text_with_html_entities() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("&lt;test&gt; &amp; &quot;quoted&quot;");
+
+        assert_eq!(elements.len(), 1);
+        if let ParsedElement::Text { content, .. } = &elements[0] {
+            assert_eq!(content, "<test> & \"quoted\"");
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== Preset Tag Parsing ====================
+
+    #[test]
+    fn test_preset_speech_applies_color() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<preset id='speech'>Someone says, \"Hello\"</preset>");
+
+        // Should have one text element with speech color
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, fg_color, span_type, .. } = &text_elements[0] {
+            assert_eq!(content, "Someone says, \"Hello\"");
+            assert_eq!(fg_color.as_deref(), Some("#53a684"));
+            assert_eq!(*span_type, SpanType::Speech);
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== Color Tag Parsing ====================
+
+    #[test]
+    fn test_explicit_color_tag() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<color fg='#FF0000'>Red text</color>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, fg_color, .. } = &text_elements[0] {
+            assert_eq!(content, "Red text");
+            assert_eq!(fg_color.as_deref(), Some("#FF0000"));
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    #[test]
+    fn test_color_tag_with_background() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<color fg='#FFFFFF' bg='#0000FF'>White on blue</color>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, fg_color, bg_color, .. } = &text_elements[0] {
+            assert_eq!(content, "White on blue");
+            assert_eq!(fg_color.as_deref(), Some("#FFFFFF"));
+            assert_eq!(bg_color.as_deref(), Some("#0000FF"));
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== Bold Tag Parsing ====================
+
+    #[test]
+    fn test_pushbold_popbold() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<pushBold/>A goblin<popBold/> attacks!");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 2);
+
+        // First text should be bold (monsterbold)
+        if let ParsedElement::Text { content, bold, span_type, .. } = &text_elements[0] {
+            assert_eq!(content, "A goblin");
+            assert!(*bold);
+            assert_eq!(*span_type, SpanType::Monsterbold);
+        } else {
+            panic!("Expected Text element");
+        }
+
+        // Second text should not be bold
+        if let ParsedElement::Text { content, bold, span_type, .. } = &text_elements[1] {
+            assert_eq!(content, " attacks!");
+            assert!(!*bold);
+            assert_eq!(*span_type, SpanType::Normal);
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== GemStone IV Link Parsing (<a> tags) ====================
+
+    #[test]
+    fn test_a_tag_link_with_exist_noun() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<a exist='12345' noun='sword'>a rusty sword</a>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, span_type, link_data, .. } = &text_elements[0] {
+            assert_eq!(content, "a rusty sword");
+            assert_eq!(*span_type, SpanType::Link);
+
+            let link = link_data.as_ref().expect("Should have link_data");
+            assert_eq!(link.exist_id, "12345");
+            assert_eq!(link.noun, "sword");
+            assert_eq!(link.text, "a rusty sword");
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    #[test]
+    fn test_a_tag_with_coord() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<a exist='67890' noun='chest' coord='1234,5678'>an iron chest</a>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { link_data, .. } = &text_elements[0] {
+            let link = link_data.as_ref().expect("Should have link_data");
+            assert_eq!(link.coord.as_deref(), Some("1234,5678"));
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== DragonRealms Link Parsing (<d> tags) ====================
+
+    #[test]
+    fn test_d_cmd_tag_direct_command() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<d cmd='get #123'>Some item</d>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, span_type, link_data, .. } = &text_elements[0] {
+            assert_eq!(content, "Some item");
+            assert_eq!(*span_type, SpanType::Link);
+
+            let link = link_data.as_ref().expect("Should have link_data for <d> tag");
+            assert_eq!(link.exist_id, "_direct_");
+            assert_eq!(link.noun, "get #123");
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    #[test]
+    fn test_d_cmd_tag_with_complex_command() {
+        let mut parser = test_parser();
+        // This is the exact format from DragonRealms inventory search
+        let elements = parser.parse_line("<d cmd='get #8735861 in #8735860 in watery portal'>Some arzumodine cloth</d> is in a lumpy canvas sack.");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 2); // Link text + rest of line
+
+        // First element should be the link
+        if let ParsedElement::Text { content, span_type, link_data, .. } = &text_elements[0] {
+            assert_eq!(content, "Some arzumodine cloth");
+            assert_eq!(*span_type, SpanType::Link);
+
+            let link = link_data.as_ref().expect("Should have link_data");
+            assert_eq!(link.exist_id, "_direct_");
+            assert_eq!(link.noun, "get #8735861 in #8735860 in watery portal");
+        } else {
+            panic!("Expected Text element for link");
+        }
+
+        // Second element should be normal text
+        if let ParsedElement::Text { content, span_type, link_data, .. } = &text_elements[1] {
+            assert_eq!(content, " is in a lumpy canvas sack.");
+            assert_eq!(*span_type, SpanType::Normal);
+            assert!(link_data.is_none());
+        } else {
+            panic!("Expected Text element for trailing text");
+        }
+    }
+
+    #[test]
+    fn test_d_tag_without_cmd_uses_text() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<d>SKILLS BASE</d>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, span_type, link_data, .. } = &text_elements[0] {
+            assert_eq!(content, "SKILLS BASE");
+            assert_eq!(*span_type, SpanType::Link);
+
+            let link = link_data.as_ref().expect("Should have link_data");
+            assert_eq!(link.exist_id, "_direct_");
+            // NOTE: In current implementation, noun is empty when cmd is not specified
+            // because link_data is cloned to ParsedElement before </d> close updates it.
+            // The text content is stored in link.text instead.
+            assert_eq!(link.noun, "");
+            assert_eq!(link.text, "SKILLS BASE");
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== Prompt Parsing ====================
+
+    #[test]
+    fn test_prompt_parsing() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<prompt time='1234567890'>&gt;</prompt>");
+
+        let prompt_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Prompt { .. })).collect();
+        assert_eq!(prompt_elements.len(), 1);
+
+        if let ParsedElement::Prompt { time, text } = &prompt_elements[0] {
+            assert_eq!(time, "1234567890");
+            assert_eq!(text, ">");
+        } else {
+            panic!("Expected Prompt element");
+        }
+    }
+
+    // ==================== RoundTime Parsing ====================
+
+    #[test]
+    fn test_roundtime_parsing() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<roundTime value='1764904999'/>");
+
+        let rt_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::RoundTime { .. })).collect();
+        assert_eq!(rt_elements.len(), 1);
+
+        if let ParsedElement::RoundTime { value } = &rt_elements[0] {
+            assert_eq!(*value, 1764904999);
+        } else {
+            panic!("Expected RoundTime element");
+        }
+    }
+
+    // ==================== Stream Parsing ====================
+
+    #[test]
+    fn test_push_stream() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<pushStream id='inv'/>");
+
+        let stream_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StreamPush { .. })).collect();
+        assert_eq!(stream_elements.len(), 1);
+
+        if let ParsedElement::StreamPush { id } = &stream_elements[0] {
+            assert_eq!(id, "inv");
+        } else {
+            panic!("Expected StreamPush element");
+        }
+    }
+
+    #[test]
+    fn test_pop_stream() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<popStream/>");
+
+        assert!(elements.iter().any(|e| matches!(e, ParsedElement::StreamPop)));
+    }
+
+    // ==================== Compass Parsing ====================
+
+    #[test]
+    fn test_compass_directions() {
+        let mut parser = test_parser();
+        // Note: The regex uses double quotes for dir value matching
+        let elements = parser.parse_line("<compass><dir value=\"n\"/><dir value=\"e\"/><dir value=\"out\"/></compass>");
+
+        let compass_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Compass { .. })).collect();
+        assert_eq!(compass_elements.len(), 1);
+
+        if let ParsedElement::Compass { directions } = &compass_elements[0] {
+            assert_eq!(directions.len(), 3);
+            assert!(directions.contains(&"n".to_string()));
+            assert!(directions.contains(&"e".to_string()));
+            assert!(directions.contains(&"out".to_string()));
+        } else {
+            panic!("Expected Compass element");
+        }
+    }
+
+    // ==================== Complex Scenarios ====================
+
+    #[test]
+    fn test_mixed_text_and_links() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("You see <a exist='1' noun='goblin'>a goblin</a> and <a exist='2' noun='orc'>an orc</a> here.");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        // 5 text elements: "You see ", "a goblin", " and ", "an orc", " here."
+        assert_eq!(text_elements.len(), 5);
+
+        // Verify exactly 2 links exist with correct data
+        let links: Vec<_> = text_elements.iter().filter(|e| {
+            if let ParsedElement::Text { link_data, .. } = e {
+                link_data.is_some()
+            } else {
+                false
+            }
+        }).collect();
+        assert_eq!(links.len(), 2);
+    }
+
+    #[test]
+    fn test_nested_color_and_link() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<color fg='#FF0000'><a exist='123' noun='item'>glowing item</a></color>");
+
+        let text_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Text { .. })).collect();
+        assert_eq!(text_elements.len(), 1);
+
+        if let ParsedElement::Text { content, fg_color, span_type, link_data, .. } = &text_elements[0] {
+            assert_eq!(content, "glowing item");
+            // Link should still work inside color
+            assert_eq!(*span_type, SpanType::Link);
+            assert!(link_data.is_some());
+            // NOTE: The <a> tag pushes the "links" preset color on top of the color stack,
+            // so the actual color is the links preset (#477ab3) not the outer color (#FF0000)
+            assert_eq!(fg_color.as_deref(), Some("#477ab3"));
+        } else {
+            panic!("Expected Text element");
+        }
+    }
+
+    // ==================== Attribute Extraction ====================
+
+    #[test]
+    fn test_extract_attribute_double_quotes() {
+        let tag = r#"<a exist="12345" noun="sword">"#;
+        assert_eq!(XmlParser::extract_attribute(tag, "exist"), Some("12345".to_string()));
+        assert_eq!(XmlParser::extract_attribute(tag, "noun"), Some("sword".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attribute_single_quotes() {
+        let tag = "<a exist='12345' noun='sword'>";
+        assert_eq!(XmlParser::extract_attribute(tag, "exist"), Some("12345".to_string()));
+        assert_eq!(XmlParser::extract_attribute(tag, "noun"), Some("sword".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attribute_with_special_chars() {
+        // DragonRealms style command with # and spaces
+        let tag = "<d cmd='get #8735861 in #8735860 in watery portal'>";
+        let cmd = XmlParser::extract_attribute(tag, "cmd");
+        assert_eq!(cmd, Some("get #8735861 in #8735860 in watery portal".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attribute_missing() {
+        let tag = "<a exist='12345'>";
+        assert_eq!(XmlParser::extract_attribute(tag, "noun"), None);
+        assert_eq!(XmlParser::extract_attribute(tag, "nonexistent"), None);
     }
 }

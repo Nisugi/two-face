@@ -185,7 +185,7 @@ impl UIColorEditor {
         &mut self,
         area: Rect,
         buf: &mut Buffer,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         theme: &crate::theme::AppTheme,
     ) {
         const POPUP_WIDTH: u16 = 52;
@@ -656,7 +656,7 @@ impl UIColorsBrowser {
         &mut self,
         area: Rect,
         buf: &mut Buffer,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         theme: &crate::theme::AppTheme,
     ) {
         // Center on first render

@@ -13,6 +13,13 @@ use std::fs;
 use std::path::PathBuf;
 
 pub mod menu_keybind_validator;
+mod highlights;
+mod keybinds;
+
+pub use highlights::{EventAction, EventPattern, HighlightPattern, RedirectMode};
+pub use keybinds::{
+    parse_key_string, GlobalKeybinds, KeyAction, KeyBindAction, MacroAction, MenuKeybinds,
+};
 
 // Embed default configuration files at compile time
 const DEFAULT_CONFIG: &str = include_str!("../defaults/config.toml");
@@ -36,6 +43,7 @@ pub enum WidgetCategory {
     Countdown,
     Hand,
     ActiveEffects,
+    Entity,
     Other,
 }
 
@@ -47,6 +55,7 @@ impl WidgetCategory {
             Self::Countdown => "Countdowns",
             Self::Hand => "Hands",
             Self::ActiveEffects => "Active Effects",
+            Self::Entity => "Entity",
             Self::Other => "Other",
         }
     }
@@ -59,6 +68,7 @@ impl WidgetCategory {
             "countdown" => Self::Countdown,
             "hand" => Self::Hand,
             "active_effects" => Self::ActiveEffects,
+            "targets" | "players" => Self::Entity,
             _ => Self::Other,
         }
     }
@@ -324,263 +334,6 @@ impl Config {
         trimmed.to_string()
     }
 
-    /// Load common (global) highlights that apply to all characters
-    /// Returns: HashMap of global highlights, or empty if file doesn't exist
-    pub fn load_common_highlights() -> Result<HashMap<String, HighlightPattern>> {
-        let path = Self::common_highlights_path()?;
-
-        if !path.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read common highlights: {:?}", path))?;
-
-        let highlights: HashMap<String, HighlightPattern> = toml::from_str(&contents)
-            .context("Failed to parse common highlights TOML")?;
-
-        Ok(highlights)
-    }
-
-    /// Load highlights for a character, merging global + character-specific
-    /// Character-specific highlights override global ones with the same name
-    pub fn load_highlights(character: Option<&str>) -> Result<HashMap<String, HighlightPattern>> {
-        // Start with global/common highlights
-        let mut highlights = Self::load_common_highlights()?;
-
-        // Load character-specific highlights
-        let highlights_path = Self::highlights_path(character)?;
-
-        if highlights_path.exists() {
-            let contents =
-                fs::read_to_string(&highlights_path).context("Failed to read highlights.toml")?;
-            let character_highlights: HashMap<String, HighlightPattern> =
-                toml::from_str(&contents).context("Failed to parse highlights.toml")?;
-
-            // Character highlights override global (HashMap::extend)
-            highlights.extend(character_highlights);
-        } else if highlights.is_empty() {
-            // No global and no character highlights - use embedded defaults
-            highlights = toml::from_str(DEFAULT_HIGHLIGHTS).unwrap_or_default();
-        }
-
-        // Compile all regex patterns for performance
-        Self::compile_highlight_patterns(&mut highlights);
-
-        Ok(highlights)
-    }
-
-    /// Compile regex patterns for all highlights (performance optimization)
-    pub fn compile_highlight_patterns(highlights: &mut HashMap<String, HighlightPattern>) {
-        for (name, pattern) in highlights.iter_mut() {
-            if !pattern.fast_parse {
-                // Only compile regex for non-fast_parse patterns
-                match regex::Regex::new(&pattern.pattern) {
-                    Ok(regex) => {
-                        pattern.compiled_regex = Some(regex);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to compile regex for highlight '{}': {}", name, e);
-                        pattern.compiled_regex = None;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Save highlights to highlights.toml for a character
-    fn save_highlights(&self, character: Option<&str>) -> Result<()> {
-        let highlights_path = Self::highlights_path(character)?;
-        let contents =
-            toml::to_string_pretty(&self.highlights).context("Failed to serialize highlights")?;
-        fs::write(&highlights_path, contents).context("Failed to write highlights.toml")?;
-        Ok(())
-    }
-
-    /// Save a highlight to common (global) highlights file
-    /// This makes the highlight available to all characters
-    pub fn save_common_highlight(name: &str, pattern: &HighlightPattern) -> Result<()> {
-        // Ensure global directory exists
-        let global_dir = Self::global_dir()?;
-        fs::create_dir_all(&global_dir)
-            .with_context(|| format!("Failed to create global directory: {:?}", global_dir))?;
-
-        // Load existing common highlights
-        let mut highlights = Self::load_common_highlights()?;
-
-        // Add or update the pattern
-        highlights.insert(name.to_string(), pattern.clone());
-
-        // Write back to file
-        let path = Self::common_highlights_path()?;
-        let toml = toml::to_string_pretty(&highlights)
-            .context("Failed to serialize common highlights")?;
-
-        fs::write(&path, toml)
-            .with_context(|| format!("Failed to write common highlights: {:?}", path))?;
-
-        Ok(())
-    }
-
-    /// Delete a highlight from common (global) highlights file
-    pub fn delete_common_highlight(name: &str) -> Result<()> {
-        let mut highlights = Self::load_common_highlights()?;
-        highlights.remove(name);
-
-        let path = Self::common_highlights_path()?;
-        let toml = toml::to_string_pretty(&highlights)
-            .context("Failed to serialize common highlights")?;
-
-        fs::write(&path, toml)
-            .with_context(|| format!("Failed to write common highlights: {:?}", path))?;
-
-        Ok(())
-    }
-
-    /// Load keybinds from [user] section of keybinds.toml for a character
-    pub fn load_keybinds(character: Option<&str>) -> Result<HashMap<String, KeyBindAction>> {
-        let keybinds_path = Self::keybinds_path(character)?;
-
-        if keybinds_path.exists() {
-            let contents =
-                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
-
-            // Parse the entire TOML file to get the [user] section
-            let toml_value: toml::Value = toml::from_str(&contents)
-                .context("Failed to parse keybinds.toml")?;
-
-            // Extract [user] section if it exists
-            if let Some(user_section) = toml_value.get("user") {
-                let keybinds: HashMap<String, KeyBindAction> = user_section.clone().try_into()
-                    .context("Failed to parse [user] section")?;
-                Ok(keybinds)
-            } else {
-                // No [user] section - return defaults
-                Ok(default_keybinds())
-            }
-        } else {
-            // Return defaults from embedded file
-            Ok(toml::from_str(DEFAULT_KEYBINDS).unwrap_or_else(|_| default_keybinds()))
-        }
-    }
-
-    /// Save keybinds to keybinds.toml for a character
-    fn save_keybinds(&self, character: Option<&str>) -> Result<()> {
-        let keybinds_path = Self::keybinds_path(character)?;
-        let contents =
-            toml::to_string_pretty(&self.keybinds).context("Failed to serialize keybinds")?;
-        fs::write(&keybinds_path, contents).context("Failed to write keybinds.toml")?;
-        Ok(())
-    }
-
-    /// Validate global keybinds and log warnings for any issues
-    fn validate_global_keybinds(keybinds: &GlobalKeybinds) {
-        // Check each critical global keybind
-        if keybinds.quit.is_empty() {
-            tracing::warn!("Global keybind 'quit' is empty - application may be difficult to exit");
-        } else if parse_key_string(&keybinds.quit).is_none() {
-            tracing::warn!("Global keybind 'quit' has invalid value: '{}' - using default 'ctrl+c'", keybinds.quit);
-        }
-
-        if keybinds.start_search.is_empty() {
-            tracing::warn!("Global keybind 'start_search' is empty - search feature disabled");
-        } else if parse_key_string(&keybinds.start_search).is_none() {
-            tracing::warn!("Global keybind 'start_search' has invalid value: '{}'", keybinds.start_search);
-        }
-
-        if keybinds.close_window.is_empty() {
-            tracing::warn!("Global keybind 'close_window' is empty - may not be able to close dialogs");
-        } else if parse_key_string(&keybinds.close_window).is_none() {
-            tracing::warn!("Global keybind 'close_window' has invalid value: '{}'", keybinds.close_window);
-        }
-
-        if keybinds.next_search_match.is_empty() {
-            tracing::debug!("Global keybind 'next_search_match' is empty");
-        } else if parse_key_string(&keybinds.next_search_match).is_none() {
-            tracing::warn!("Global keybind 'next_search_match' has invalid value: '{}'", keybinds.next_search_match);
-        }
-
-        if keybinds.prev_search_match.is_empty() {
-            tracing::debug!("Global keybind 'prev_search_match' is empty");
-        } else if parse_key_string(&keybinds.prev_search_match).is_none() {
-            tracing::warn!("Global keybind 'prev_search_match' has invalid value: '{}'", keybinds.prev_search_match);
-        }
-    }
-
-    /// Load global keybinds from [global] section of keybinds.toml
-    pub fn load_global_keybinds(character: Option<&str>) -> Result<GlobalKeybinds> {
-        let keybinds_path = Self::keybinds_path(character)?;
-
-        if keybinds_path.exists() {
-            let contents =
-                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
-
-            // Parse the entire TOML file to get the [global] section
-            let toml_value: toml::Value = toml::from_str(&contents)
-                .context("Failed to parse keybinds.toml")?;
-
-            // Extract [global] section if it exists
-            if let Some(global_section) = toml_value.get("global") {
-                let global_keybinds: GlobalKeybinds = global_section.clone().try_into()
-                    .context("Failed to parse [global] section")?;
-
-                // Validate global keybinds and warn about any issues
-                Self::validate_global_keybinds(&global_keybinds);
-
-                Ok(global_keybinds)
-            } else {
-                // No [global] section - use defaults
-                tracing::warn!("No [global] section in keybinds.toml, using default global keybinds");
-                Ok(GlobalKeybinds::default())
-            }
-        } else {
-            // No keybinds file - use defaults
-            Ok(GlobalKeybinds::default())
-        }
-    }
-
-    /// Load menu keybinds from [menu] section of keybinds.toml
-    pub fn load_menu_keybinds(character: Option<&str>) -> Result<MenuKeybinds> {
-        tracing::info!("🔑 load_menu_keybinds() called for character: {:?}", character);
-        let keybinds_path = Self::keybinds_path(character)?;
-        tracing::info!("   Keybinds path: {}", keybinds_path.display());
-
-        if keybinds_path.exists() {
-            let contents =
-                fs::read_to_string(&keybinds_path).context("Failed to read keybinds.toml")?;
-
-            // Parse the entire TOML file to get the [menu] section
-            let toml_value: toml::Value = toml::from_str(&contents)
-                .context("Failed to parse keybinds.toml")?;
-
-            // Extract [menu] section if it exists
-            if let Some(menu_section) = toml_value.get("menu") {
-                tracing::info!("   Found [menu] section, parsing...");
-                let menu_keybinds: MenuKeybinds = menu_section.clone().try_into()
-                    .context("Failed to parse [menu] section")?;
-
-                // Log loaded values
-                tracing::info!("   ✓ Loaded menu keybinds:");
-                tracing::info!("     - navigate_up: {}", menu_keybinds.navigate_up);
-                tracing::info!("     - navigate_down: {}", menu_keybinds.navigate_down);
-                tracing::info!("     - next_field: {}", menu_keybinds.next_field);
-                tracing::info!("     - previous_field: {}", menu_keybinds.previous_field);
-                tracing::info!("     - select: {}", menu_keybinds.select);
-                tracing::info!("     - cancel: {}", menu_keybinds.cancel);
-                tracing::info!("     - save: {}", menu_keybinds.save);
-
-                Ok(menu_keybinds)
-            } else {
-                // No [menu] section - use defaults
-                tracing::warn!("   ⚠ No [menu] section in keybinds.toml, using default menu keybinds");
-                Ok(MenuKeybinds::default())
-            }
-        } else {
-            // No keybinds file - use defaults
-            tracing::warn!("   ⚠ No keybinds file found, using default menu keybinds");
-            Ok(MenuKeybinds::default())
-        }
-    }
 }
 
 /// Border sides configuration - which borders to show
@@ -798,6 +551,10 @@ pub struct TextWidgetData {
     pub streams: Vec<String>,
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
+    #[serde(default = "default_true")]
+    pub wordwrap: bool,
+    #[serde(default)]
+    pub show_timestamps: bool,
 }
 
 /// Room widget specific data
@@ -842,6 +599,10 @@ pub struct InventoryWidgetData {
     pub streams: Vec<String>,
     #[serde(default)]
     pub buffer_size: usize,
+    #[serde(default = "default_true")]
+    pub wordwrap: bool,
+    #[serde(default)]
+    pub show_timestamps: bool,
 }
 
 /// TabbedText widget specific data
@@ -853,6 +614,14 @@ pub struct TabbedTextWidgetData {
     pub buffer_size: usize,
     #[serde(default = "default_tab_bar_position")]
     pub tab_bar_position: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_active_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_inactive_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_unread_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_unread_prefix: Option<String>,
 }
 
 fn default_tab_bar_position() -> String {
@@ -947,7 +716,42 @@ pub struct IndicatorWidgetData {
 /// Dashboard widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DashboardWidgetData {
-    // No extra fields currently - displays character stats
+    /// Layout direction: "horizontal", "vertical", or "grid:RxC"
+    #[serde(default = "default_dashboard_layout", rename = "dashboard_layout")]
+    pub layout: String,
+    /// Spacing between indicators (characters)
+    #[serde(default = "default_dashboard_spacing", rename = "dashboard_spacing")]
+    pub spacing: u16,
+    /// Hide inactive indicators (value = 0)
+    #[serde(
+        default = "default_dashboard_hide_inactive",
+        rename = "dashboard_hide_inactive"
+    )]
+    pub hide_inactive: bool,
+    /// Indicator definitions (id/icon/colors)
+    #[serde(default, rename = "dashboard_indicators")]
+    pub indicators: Vec<DashboardIndicatorDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardIndicatorDef {
+    pub id: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub colors: Vec<String>,
+}
+
+fn default_dashboard_layout() -> String {
+    "horizontal".to_string()
+}
+
+fn default_dashboard_spacing() -> u16 {
+    1
+}
+
+fn default_dashboard_hide_inactive() -> bool {
+    false
 }
 
 /// Hand widget specific data
@@ -960,6 +764,41 @@ pub struct HandWidgetData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveEffectsWidgetData {
     pub category: String, // "Buffs", "Debuffs", "Cooldowns", "ActiveSpells"
+}
+
+/// Performance widget specific data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceWidgetData {
+    #[serde(default = "default_true")]
+    pub show_fps: bool,
+    #[serde(default = "default_true")]
+    pub show_frame_times: bool,
+    #[serde(default = "default_true")]
+    pub show_render_times: bool,
+    #[serde(default = "default_true")]
+    pub show_ui_times: bool,
+    #[serde(default = "default_true")]
+    pub show_wrap_times: bool,
+    #[serde(default = "default_true")]
+    pub show_net: bool,
+    #[serde(default = "default_true")]
+    pub show_parse: bool,
+    #[serde(default = "default_true")]
+    pub show_events: bool,
+    #[serde(default = "default_true")]
+    pub show_memory: bool,
+    #[serde(default = "default_true")]
+    pub show_lines: bool,
+    #[serde(default = "default_true")]
+    pub show_uptime: bool,
+    #[serde(default = "default_true")]
+    pub show_jitter: bool,
+    #[serde(default = "default_true")]
+    pub show_frame_spikes: bool,
+    #[serde(default = "default_true")]
+    pub show_event_lag: bool,
+    #[serde(default = "default_true")]
+    pub show_memory_delta: bool,
 }
 
 /// Targets widget specific data
@@ -984,30 +823,6 @@ pub struct SpacerWidgetData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpellsWidgetData {
     // No extra fields currently - uses "spells" stream
-}
-
-/// QuickBar widget specific data
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QuickBarWidgetData {
-    /// Currently active bar ("quick", "quick-combat", "quick-simu", or custom name)
-    #[serde(default = "default_quick_bar")]
-    pub active_bar: String,
-
-    /// Stored bar variations (bar_id -> raw content)
-    #[serde(default)]
-    pub bars: std::collections::HashMap<String, String>,
-
-    /// Default bar to use when active_bar is empty or invalid
-    #[serde(default = "default_quick_bar")]
-    pub default_bar: String,
-
-    /// Current scroll offset (which wrapped row is at top of viewport)
-    #[serde(default)]
-    pub scroll_offset: usize,
-}
-
-fn default_quick_bar() -> String {
-    "quick".to_string()
 }
 
 /// Window definition - enum with widget-specific variants
@@ -1117,6 +932,13 @@ pub enum WindowDef {
         #[serde(flatten)]
         data: ActiveEffectsWidgetData,
     },
+    #[serde(rename = "performance")]
+    Performance {
+        #[serde(flatten)]
+        base: WindowBase,
+        #[serde(flatten)]
+        data: PerformanceWidgetData,
+    },
 
     #[serde(rename = "targets")]
     Targets {
@@ -1149,14 +971,6 @@ pub enum WindowDef {
         #[serde(flatten)]
         data: SpellsWidgetData,
     },
-
-    #[serde(rename = "quickbar")]
-    QuickBar {
-        #[serde(flatten)]
-        base: WindowBase,
-        #[serde(flatten)]
-        data: QuickBarWidgetData,
-    },
 }
 
 impl WindowDef {
@@ -1176,11 +990,11 @@ impl WindowDef {
             WindowDef::InjuryDoll { base, .. } => &base.name,
             WindowDef::Hand { base, .. } => &base.name,
             WindowDef::ActiveEffects { base, .. } => &base.name,
+            WindowDef::Performance { base, .. } => &base.name,
             WindowDef::Targets { base, .. } => &base.name,
             WindowDef::Players { base, .. } => &base.name,
             WindowDef::Spacer { base, .. } => &base.name,
             WindowDef::Spells { base, .. } => &base.name,
-            WindowDef::QuickBar { base, .. } => &base.name,
         }
     }
 
@@ -1200,11 +1014,11 @@ impl WindowDef {
             WindowDef::InjuryDoll { .. } => "injury_doll",
             WindowDef::Hand { .. } => "hand",
             WindowDef::ActiveEffects { .. } => "active_effects",
+            WindowDef::Performance { .. } => "performance",
             WindowDef::Targets { .. } => "targets",
             WindowDef::Players { .. } => "players",
             WindowDef::Spacer { .. } => "spacer",
             WindowDef::Spells { .. } => "spells",
-            WindowDef::QuickBar { .. } => "quickbar",
         }
     }
 
@@ -1224,11 +1038,11 @@ impl WindowDef {
             WindowDef::InjuryDoll { base, .. } => base,
             WindowDef::Hand { base, .. } => base,
             WindowDef::ActiveEffects { base, .. } => base,
+            WindowDef::Performance { base, .. } => base,
             WindowDef::Targets { base, .. } => base,
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
-            WindowDef::QuickBar { base, .. } => base,
         }
     }
 
@@ -1248,11 +1062,11 @@ impl WindowDef {
             WindowDef::InjuryDoll { base, .. } => base,
             WindowDef::Hand { base, .. } => base,
             WindowDef::ActiveEffects { base, .. } => base,
+            WindowDef::Performance { base, .. } => base,
             WindowDef::Targets { base, .. } => base,
             WindowDef::Players { base, .. } => base,
             WindowDef::Spacer { base, .. } => base,
             WindowDef::Spells { base, .. } => base,
-            WindowDef::QuickBar { base, .. } => base,
         }
     }
 }
@@ -1420,89 +1234,6 @@ impl ContentAlign {
         (row_offset, col_offset)
     }
 }
-
-/// Redirect mode for highlight patterns
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RedirectMode {
-    /// Send only to redirect window (remove from original)
-    #[serde(rename = "redirect_only")]
-    RedirectOnly,
-    /// Send to both original window and redirect window (duplicate)
-    #[serde(rename = "redirect_copy")]
-    RedirectCopy,
-}
-
-impl Default for RedirectMode {
-    fn default() -> Self {
-        RedirectMode::RedirectOnly
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HighlightPattern {
-    pub pattern: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bg: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub bold: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub color_entire_line: bool, // If true, apply colors to entire line, not just matched text
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub fast_parse: bool, // If true, split pattern on | and use Aho-Corasick for literal matching
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>, // Sound file to play when pattern matches
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sound_volume: Option<f32>, // Volume override for this sound (0.0 to 1.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>, // Category for grouping highlights (e.g., "Combat", "Healing", "Death")
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub squelch: bool, // If true, completely hide lines matching this pattern (ignore/filter)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redirect_to: Option<String>, // Window name to redirect matching lines to
-    #[serde(default)]
-    pub redirect_mode: RedirectMode, // How to handle redirect: only or copy
-
-    // Performance optimization: cache compiled regex (not serialized)
-    #[serde(skip)]
-    pub compiled_regex: Option<regex::Regex>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventPattern {
-    pub pattern: String,     // Regex pattern to match
-    pub event_type: String,  // Event type: "stun", "webbed", "prone", etc.
-    pub action: EventAction, // Action to perform: set/clear/increment
-    #[serde(default)]
-    pub duration: u32, // Duration in seconds (0 = don't change)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_capture: Option<usize>, // Regex capture group for duration (1-based)
-    #[serde(default = "default_duration_multiplier")]
-    pub duration_multiplier: f32, // Multiply captured duration (e.g., 5.0 for rounds->seconds)
-    #[serde(default = "default_enabled")]
-    pub enabled: bool, // Can disable without deleting
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum EventAction {
-    #[default]
-    Set,       // Set state/timer (e.g., start stun countdown)
-    Clear,     // Clear state/timer (e.g., recover from stun)
-    Increment, // Add to existing value (future use)
-}
-
-
-fn default_duration_multiplier() -> f32 {
-    1.0
-}
-fn default_enabled() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoundConfig {
     #[serde(default = "default_sound_enabled")]
@@ -1599,633 +1330,6 @@ impl Default for TtsConfig {
     }
 }
 
-// Helper function for serde skip_serializing_if
-fn is_false(b: &bool) -> bool {
-    !b
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum KeyBindAction {
-    Action(String),     // Just an action: "cursor_word_left"
-    Macro(MacroAction), // A macro with text
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MacroAction {
-    pub macro_text: String, // e.g., "sw\r" for southwest movement
-}
-
-/// Global keybinds that work across all modes or are mode-specific
-/// These are checked in Layer 1 of the keybind dispatch system (before menu and game keybinds)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalKeybinds {
-    /// Quit the application (default: "ctrl+c")
-    #[serde(default = "default_quit_keybind")]
-    pub quit: String,
-
-    /// Start search mode (default: "ctrl+f")
-    #[serde(default = "default_start_search_keybind")]
-    pub start_search: String,
-
-    /// Next search match - only works in Search mode (default: "ctrl+pagedown")
-    #[serde(default = "default_next_search_match_keybind")]
-    pub next_search_match: String,
-
-    /// Previous search match - only works in Search mode (default: "ctrl+pageup")
-    #[serde(default = "default_prev_search_match_keybind")]
-    pub prev_search_match: String,
-
-    /// Close priority windows (menus, browsers, forms) and exit modes (default: "esc")
-    #[serde(default = "default_close_window_keybind")]
-    pub close_window: String,
-}
-
-fn default_quit_keybind() -> String {
-    "ctrl+c".to_string()
-}
-
-fn default_start_search_keybind() -> String {
-    "ctrl+f".to_string()
-}
-
-fn default_next_search_match_keybind() -> String {
-    "ctrl+pagedown".to_string()
-}
-
-fn default_prev_search_match_keybind() -> String {
-    "ctrl+pageup".to_string()
-}
-
-fn default_close_window_keybind() -> String {
-    "esc".to_string()
-}
-
-impl Default for GlobalKeybinds {
-    fn default() -> Self {
-        Self {
-            quit: default_quit_keybind(),
-            start_search: default_start_search_keybind(),
-            next_search_match: default_next_search_match_keybind(),
-            prev_search_match: default_prev_search_match_keybind(),
-            close_window: default_close_window_keybind(),
-        }
-    }
-}
-
-/// Actions that can be bound to keys
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyAction {
-    // Command input actions
-    SendCommand,
-    CursorLeft,
-    CursorRight,
-    CursorWordLeft,
-    CursorWordRight,
-    CursorHome,
-    CursorEnd,
-    CursorBackspace,
-    CursorDelete,
-    CursorDeleteWord,  // Delete from cursor to end of word
-    CursorClearLine,   // Clear entire command line
-
-    // History actions
-    PreviousCommand,
-    NextCommand,
-    SendLastCommand,
-    SendSecondLastCommand,
-
-    // Window actions
-    SwitchCurrentWindow,
-    ScrollCurrentWindowUpOne,
-    ScrollCurrentWindowDownOne,
-    ScrollCurrentWindowUpPage,
-    ScrollCurrentWindowDownPage,
-    ScrollCurrentWindowHome,  // Scroll to top of window
-    ScrollCurrentWindowEnd,   // Scroll to bottom of window
-
-    // Search actions (already implemented)
-    StartSearch,
-    NextSearchMatch,
-    PrevSearchMatch,
-    ClearSearch,
-
-    // Tab navigation (for TabbedText widgets)
-    NextTab,           // Switch to next tab
-    PrevTab,           // Switch to previous tab
-    NextUnreadTab,     // Jump to next tab with unread messages
-
-    // Clipboard actions
-    Copy,              // Copy selected text to clipboard
-    Paste,             // Paste from clipboard
-    SelectAll,         // Select all text in command input
-
-    // System toggles
-    TogglePerformanceStats,  // Show/hide performance overlay
-    ToggleIgnores,           // Enable/disable squelch patterns globally
-    ToggleSounds,            // Enable/disable sound system
-
-    // TTS (Text-to-Speech) actions - Accessibility
-    TtsNext,           // Next message (sequential, includes read)
-    TtsPrevious,       // Previous message (sequential, includes read)
-    TtsNextUnread,     // Skip to next unread message
-    TtsStop,           // Stop current speech (keeps position)
-    TtsMuteToggle,     // Toggle TTS mute on/off
-    TtsIncreaseRate,   // Increase speech rate by 0.1
-    TtsDecreaseRate,   // Decrease speech rate by 0.1
-    TtsIncreaseVolume, // Increase volume by 0.1
-    TtsDecreaseVolume, // Decrease volume by 0.1
-
-    // Macro - send literal text
-    SendMacro(String),
-}
-
-/// Keybinds for menu system (popups, browsers, forms, editors)
-/// These are separate from game keybinds and only active when menus have focus
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MenuKeybinds {
-    // Navigation
-    #[serde(default = "default_navigate_up")]
-    pub navigate_up: String,
-    #[serde(default = "default_navigate_down")]
-    pub navigate_down: String,
-    #[serde(default = "default_navigate_left")]
-    pub navigate_left: String,
-    #[serde(default = "default_navigate_right")]
-    pub navigate_right: String,
-    #[serde(default = "default_page_up")]
-    pub page_up: String,
-    #[serde(default = "default_page_down")]
-    pub page_down: String,
-    #[serde(default = "default_home")]
-    pub home: String,
-    #[serde(default = "default_end")]
-    pub end: String,
-
-    // Field Navigation
-    #[serde(default = "default_next_field")]
-    pub next_field: String,
-    #[serde(default = "default_previous_field")]
-    pub previous_field: String,
-
-    // Actions
-    #[serde(default = "default_select")]
-    pub select: String,
-    #[serde(default = "default_cancel")]
-    pub cancel: String,
-    #[serde(default = "default_save")]
-    pub save: String,
-    #[serde(default = "default_delete")]
-    pub delete: String,
-
-    // Text Editing (Clipboard)
-    #[serde(default = "default_select_all")]
-    pub select_all: String,
-    #[serde(default = "default_copy")]
-    pub copy: String,
-    #[serde(default = "default_cut")]
-    pub cut: String,
-    #[serde(default = "default_paste")]
-    pub paste: String,
-
-    // Toggles/Cycling
-    #[serde(default = "default_toggle")]
-    pub toggle: String,
-    #[serde(default = "default_toggle_filter")]
-    pub toggle_filter: String,
-    #[serde(default = "default_cycle_forward")]
-    pub cycle_forward: String,
-    #[serde(default = "default_cycle_backward")]
-    pub cycle_backward: String,
-
-    // Reordering (WindowEditor)
-    #[serde(default = "default_move_up")]
-    pub move_up: String,
-    #[serde(default = "default_move_down")]
-    pub move_down: String,
-
-    // List Management (WindowEditor)
-    #[serde(default = "default_add")]
-    pub add: String,
-    #[serde(default = "default_edit")]
-    pub edit: String,
-}
-
-// Default keybind functions
-fn default_navigate_up() -> String {
-    "Up".to_string()
-}
-fn default_navigate_down() -> String {
-    "Down".to_string()
-}
-fn default_navigate_left() -> String {
-    "Left".to_string()
-}
-fn default_navigate_right() -> String {
-    "Right".to_string()
-}
-fn default_page_up() -> String {
-    "PageUp".to_string()
-}
-fn default_page_down() -> String {
-    "PageDown".to_string()
-}
-fn default_home() -> String {
-    "Home".to_string()
-}
-fn default_end() -> String {
-    "End".to_string()
-}
-fn default_next_field() -> String {
-    "Tab".to_string()
-}
-fn default_previous_field() -> String {
-    "Shift+Tab".to_string()
-}
-fn default_select() -> String {
-    "Enter".to_string()
-}
-fn default_cancel() -> String {
-    "Esc".to_string()
-}
-fn default_save() -> String {
-    "Ctrl+s".to_string()
-}
-fn default_delete() -> String {
-    "Delete".to_string()
-}
-fn default_select_all() -> String {
-    "Ctrl+A".to_string()
-}
-fn default_copy() -> String {
-    "Ctrl+C".to_string()
-}
-fn default_cut() -> String {
-    "Ctrl+X".to_string()
-}
-fn default_paste() -> String {
-    "Ctrl+V".to_string()
-}
-fn default_toggle() -> String {
-    "Space".to_string()
-}
-fn default_toggle_filter() -> String {
-    "F".to_string()
-}
-fn default_cycle_forward() -> String {
-    "Right".to_string()
-}
-fn default_cycle_backward() -> String {
-    "Left".to_string()
-}
-fn default_move_up() -> String {
-    "Shift+Up".to_string()
-}
-fn default_move_down() -> String {
-    "Shift+Down".to_string()
-}
-fn default_add() -> String {
-    "A".to_string()
-}
-fn default_edit() -> String {
-    "E".to_string()
-}
-
-impl Default for MenuKeybinds {
-    fn default() -> Self {
-        Self {
-            navigate_up: default_navigate_up(),
-            navigate_down: default_navigate_down(),
-            navigate_left: default_navigate_left(),
-            navigate_right: default_navigate_right(),
-            page_up: default_page_up(),
-            page_down: default_page_down(),
-            home: default_home(),
-            end: default_end(),
-            next_field: default_next_field(),
-            previous_field: default_previous_field(),
-            select: default_select(),
-            cancel: default_cancel(),
-            save: default_save(),
-            delete: default_delete(),
-            select_all: default_select_all(),
-            copy: default_copy(),
-            cut: default_cut(),
-            paste: default_paste(),
-            toggle: default_toggle(),
-            toggle_filter: default_toggle_filter(),
-            cycle_forward: default_cycle_forward(),
-            cycle_backward: default_cycle_backward(),
-            move_up: default_move_up(),
-            move_down: default_move_down(),
-            add: default_add(),
-            edit: default_edit(),
-        }
-    }
-}
-
-impl MenuKeybinds {
-    /// Resolve a KeyEvent to a MenuAction based on the current context
-    pub fn resolve_action(
-        &self,
-        key: &crate::frontend::common::KeyEvent,
-        context: crate::core::menu_actions::ActionContext,
-    ) -> crate::core::menu_actions::MenuAction {
-        use crate::core::menu_actions::{key_event_to_string, ActionContext, MenuAction};
-
-        let key_str = key_event_to_string(*key);
-        let key_lower = key_str.to_lowercase();
-
-        // DEBUG: Log what we're resolving
-        tracing::debug!("🔍 resolve_action: key_str='{}', context={:?}", key_str, context);
-        tracing::debug!("   Config values: navigate_up='{}', navigate_down='{}', select='{}', cancel='{}'",
-                       self.navigate_up, self.navigate_down, self.select, self.cancel);
-
-        // Special handling for BackTab (Shift+Tab)
-        if matches!(key.code, KeyCode::BackTab)
-            && (key_lower == self.previous_field.to_lowercase() || key_lower == "shift+tab") {
-                return MenuAction::PreviousField;
-            }
-
-        // Context-specific bindings first (override general bindings)
-        match context {
-            ActionContext::Dropdown => {
-                // In dropdown, Up/Down cycle through options instead of navigating
-                if key_lower == self.navigate_up.to_lowercase() {
-                    return MenuAction::NavigateUp; // Will be interpreted as cycle prev
-                }
-                if key_lower == self.navigate_down.to_lowercase() {
-                    return MenuAction::NavigateDown; // Will be interpreted as cycle next
-                }
-            }
-            ActionContext::TextInput => {
-                // Clipboard operations only valid in text input
-                if key_lower == self.select_all.to_lowercase() {
-                    return MenuAction::SelectAll;
-                }
-                if key_lower == self.copy.to_lowercase() {
-                    return MenuAction::Copy;
-                }
-                if key_lower == self.cut.to_lowercase() {
-                    return MenuAction::Cut;
-                }
-                if key_lower == self.paste.to_lowercase() {
-                    return MenuAction::Paste;
-                }
-            }
-            _ => {}
-        }
-
-        // Global menu keybindings
-        if key_lower == self.cancel.to_lowercase() {
-            return MenuAction::Cancel;
-        }
-        if key_lower == self.save.to_lowercase() {
-            return MenuAction::Save;
-        }
-        if key_lower == self.select.to_lowercase() {
-            return MenuAction::Select;
-        }
-        if key_lower == self.delete.to_lowercase() {
-            return MenuAction::Delete;
-        }
-
-        if key_lower == self.navigate_up.to_lowercase() {
-            return MenuAction::NavigateUp;
-        }
-        if key_lower == self.navigate_down.to_lowercase() {
-            return MenuAction::NavigateDown;
-        }
-        if key_lower == self.navigate_left.to_lowercase() {
-            return MenuAction::NavigateLeft;
-        }
-        if key_lower == self.navigate_right.to_lowercase() {
-            return MenuAction::NavigateRight;
-        }
-        if key_lower == self.page_up.to_lowercase() {
-            return MenuAction::PageUp;
-        }
-        if key_lower == self.page_down.to_lowercase() {
-            return MenuAction::PageDown;
-        }
-        if key_lower == self.home.to_lowercase() {
-            return MenuAction::Home;
-        }
-        if key_lower == self.end.to_lowercase() {
-            return MenuAction::End;
-        }
-
-        if key_lower == self.next_field.to_lowercase() {
-            return MenuAction::NextField;
-        }
-        if key_lower == self.previous_field.to_lowercase() {
-            return MenuAction::PreviousField;
-        }
-
-        if key_lower == self.toggle.to_lowercase() {
-            return MenuAction::Toggle;
-        }
-
-        if key_lower == self.move_up.to_lowercase() {
-            return MenuAction::MoveUp;
-        }
-        if key_lower == self.move_down.to_lowercase() {
-            return MenuAction::MoveDown;
-        }
-
-        // Browser-only actions (don't trigger in forms where text input is needed)
-        if matches!(context, ActionContext::Browser) {
-            if key_lower == self.add.to_lowercase() {
-                return MenuAction::Add;
-            }
-            if key_lower == self.edit.to_lowercase() {
-                return MenuAction::Edit;
-            }
-            if key_lower == self.toggle_filter.to_lowercase() {
-                return MenuAction::ToggleFilter;
-            }
-        }
-
-        if key_lower == self.cycle_forward.to_lowercase() {
-            return MenuAction::CycleForward;
-        }
-        if key_lower == self.cycle_backward.to_lowercase() {
-            return MenuAction::CycleBackward;
-        }
-
-        // No matching keybind
-        MenuAction::None
-    }
-}
-
-impl KeyAction {
-    pub fn from_str(action: &str) -> Option<Self> {
-        match action {
-            "send_command" => Some(Self::SendCommand),
-            "cursor_left" => Some(Self::CursorLeft),
-            "cursor_right" => Some(Self::CursorRight),
-            "cursor_word_left" => Some(Self::CursorWordLeft),
-            "cursor_word_right" => Some(Self::CursorWordRight),
-            "cursor_home" => Some(Self::CursorHome),
-            "cursor_end" => Some(Self::CursorEnd),
-            "cursor_backspace" => Some(Self::CursorBackspace),
-            "cursor_delete" => Some(Self::CursorDelete),
-            "cursor_delete_word" => Some(Self::CursorDeleteWord),
-            "cursor_clear_line" => Some(Self::CursorClearLine),
-            "previous_command" => Some(Self::PreviousCommand),
-            "next_command" => Some(Self::NextCommand),
-            "send_last_command" => Some(Self::SendLastCommand),
-            "send_second_last_command" => Some(Self::SendSecondLastCommand),
-            "switch_current_window" => Some(Self::SwitchCurrentWindow),
-            "scroll_current_window_up_one" => Some(Self::ScrollCurrentWindowUpOne),
-            "scroll_current_window_down_one" => Some(Self::ScrollCurrentWindowDownOne),
-            "scroll_current_window_up_page" => Some(Self::ScrollCurrentWindowUpPage),
-            "scroll_current_window_down_page" => Some(Self::ScrollCurrentWindowDownPage),
-            "scroll_current_window_home" => Some(Self::ScrollCurrentWindowHome),
-            "scroll_current_window_end" => Some(Self::ScrollCurrentWindowEnd),
-            "start_search" => Some(Self::StartSearch),
-            "next_search_match" => Some(Self::NextSearchMatch),
-            "prev_search_match" => Some(Self::PrevSearchMatch),
-            "clear_search" => Some(Self::ClearSearch),
-            "next_tab" => Some(Self::NextTab),
-            "prev_tab" => Some(Self::PrevTab),
-            "next_unread_tab" => Some(Self::NextUnreadTab),
-            "copy" => Some(Self::Copy),
-            "paste" => Some(Self::Paste),
-            "select_all" => Some(Self::SelectAll),
-            "toggle_performance_stats" => Some(Self::TogglePerformanceStats),
-            "toggle_ignores" => Some(Self::ToggleIgnores),
-            "toggle_sounds" => Some(Self::ToggleSounds),
-            "tts_next" => Some(Self::TtsNext),
-            "tts_previous" => Some(Self::TtsPrevious),
-            "tts_next_unread" => Some(Self::TtsNextUnread),
-            "tts_stop" => Some(Self::TtsStop),
-            "tts_pause_resume" => Some(Self::TtsStop), // Legacy support
-            "tts_mute_toggle" => Some(Self::TtsMuteToggle),
-            "tts_increase_rate" => Some(Self::TtsIncreaseRate),
-            "tts_decrease_rate" => Some(Self::TtsDecreaseRate),
-            "tts_increase_volume" => Some(Self::TtsIncreaseVolume),
-            "tts_decrease_volume" => Some(Self::TtsDecreaseVolume),
-            _ => None,
-        }
-    }
-}
-
-/// Parse a key string like "ctrl+f" or "num_1" into KeyCode and KeyModifiers
-pub fn parse_key_string(key_str: &str) -> Option<(KeyCode, KeyModifiers)> {
-    // Normalize to lowercase for consistent comparisons
-    let key_str_lower = key_str.to_lowercase();
-    let key_str = key_str_lower.as_str();
-
-    // Special case: "num_+" contains a '+' but it's not a modifier separator
-    // If the string is exactly a numpad key (no modifiers), handle it first
-    if key_str.starts_with("num_")
-        && !key_str.contains("shift+")
-        && !key_str.contains("ctrl+")
-        && !key_str.contains("alt+")
-    {
-        let key_code = match key_str {
-            "num_0" => KeyCode::Keypad0,
-            "num_1" => KeyCode::Keypad1,
-            "num_2" => KeyCode::Keypad2,
-            "num_3" => KeyCode::Keypad3,
-            "num_4" => KeyCode::Keypad4,
-            "num_5" => KeyCode::Keypad5,
-            "num_6" => KeyCode::Keypad6,
-            "num_7" => KeyCode::Keypad7,
-            "num_8" => KeyCode::Keypad8,
-            "num_9" => KeyCode::Keypad9,
-            "num_." => KeyCode::KeypadPeriod,
-            "num_+" => KeyCode::KeypadPlus,
-            "num_-" => KeyCode::KeypadMinus,
-            "num_*" => KeyCode::KeypadMultiply,
-            "num_/" => KeyCode::KeypadDivide,
-            _ => return None,
-        };
-        return Some((key_code, KeyModifiers::NONE));
-    }
-
-    // For keys with modifiers, we need to carefully parse
-    // Split by + but be aware that num_+ contains a literal +
-    let parts: Vec<&str> = key_str.split('+').collect();
-    let mut modifiers = KeyModifiers::NONE;
-    let mut key_part = key_str;
-
-    // Parse modifiers
-    if parts.len() > 1 {
-        for part in &parts[..parts.len() - 1] {
-            match part.to_lowercase().as_str() {
-                "ctrl" | "control" => modifiers.ctrl = true,
-                "alt" => modifiers.alt = true,
-                "shift" => modifiers.shift = true,
-                _ => return None,
-            }
-        }
-        key_part = parts[parts.len() - 1];
-    }
-
-    // Parse the actual key
-    let key_code = match key_part {
-        // Special keys
-        "enter" => KeyCode::Enter,
-        "backspace" => KeyCode::Backspace,
-        "delete" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        "tab" => KeyCode::Tab,
-        "esc" | "escape" => KeyCode::Esc,
-        "space" => KeyCode::Char(' '),
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "page_up" | "pageup" => KeyCode::PageUp,
-        "page_down" | "pagedown" => KeyCode::PageDown,
-
-        // Numpad keys (when used with modifiers like shift+num_1)
-        "num_0" => KeyCode::Keypad0,
-        "num_1" => KeyCode::Keypad1,
-        "num_2" => KeyCode::Keypad2,
-        "num_3" => KeyCode::Keypad3,
-        "num_4" => KeyCode::Keypad4,
-        "num_5" => KeyCode::Keypad5,
-        "num_6" => KeyCode::Keypad6,
-        "num_7" => KeyCode::Keypad7,
-        "num_8" => KeyCode::Keypad8,
-        "num_9" => KeyCode::Keypad9,
-        "num_." => KeyCode::KeypadPeriod,
-        "num_+" => KeyCode::KeypadPlus,
-        "num_-" => KeyCode::KeypadMinus,
-        "num_*" => KeyCode::KeypadMultiply,
-        "num_/" => KeyCode::KeypadDivide,
-
-        // Function keys
-        "f1" => KeyCode::F(1),
-        "f2" => KeyCode::F(2),
-        "f3" => KeyCode::F(3),
-        "f4" => KeyCode::F(4),
-        "f5" => KeyCode::F(5),
-        "f6" => KeyCode::F(6),
-        "f7" => KeyCode::F(7),
-        "f8" => KeyCode::F(8),
-        "f9" => KeyCode::F(9),
-        "f10" => KeyCode::F(10),
-        "f11" => KeyCode::F(11),
-        "f12" => KeyCode::F(12),
-
-        // Single character
-        s if s.len() == 1 => {
-            let ch = s.chars().next().unwrap();
-            KeyCode::Char(ch)
-        }
-
-        _ => return None,
-    };
-
-    Some((key_code, modifiers))
-}
-
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -2258,6 +1362,14 @@ fn default_border_style() -> String {
     "single".to_string()
 }
 
+fn default_countdown_icon() -> String {
+    "\u{f0c8}".to_string() // Nerd Font square icon
+}
+
+fn default_poll_timeout_ms() -> u64 {
+    16 // 16ms = ~60 FPS, 8ms = ~120 FPS, 4ms = ~240 FPS
+}
+
 fn default_background_color() -> String {
     "-".to_string() // transparent/no background
 }
@@ -2270,205 +1382,6 @@ fn default_startup_music_file() -> String {
     "wizard_music".to_string() // Default to wizard_music for nostalgia
 }
 
-/// Get default keybindings (based on ProfanityFE defaults)
-pub fn default_keybinds() -> HashMap<String, KeyBindAction> {
-    let mut map = HashMap::new();
-
-    // Basic command input
-    map.insert(
-        "enter".to_string(),
-        KeyBindAction::Action("send_command".to_string()),
-    );
-    map.insert(
-        "left".to_string(),
-        KeyBindAction::Action("cursor_left".to_string()),
-    );
-    map.insert(
-        "right".to_string(),
-        KeyBindAction::Action("cursor_right".to_string()),
-    );
-    map.insert(
-        "ctrl+left".to_string(),
-        KeyBindAction::Action("cursor_word_left".to_string()),
-    );
-    map.insert(
-        "ctrl+right".to_string(),
-        KeyBindAction::Action("cursor_word_right".to_string()),
-    );
-    map.insert(
-        "home".to_string(),
-        KeyBindAction::Action("cursor_home".to_string()),
-    );
-    map.insert(
-        "end".to_string(),
-        KeyBindAction::Action("cursor_end".to_string()),
-    );
-    map.insert(
-        "backspace".to_string(),
-        KeyBindAction::Action("cursor_backspace".to_string()),
-    );
-    map.insert(
-        "delete".to_string(),
-        KeyBindAction::Action("cursor_delete".to_string()),
-    );
-
-    // Window management
-    map.insert(
-        "tab".to_string(),
-        KeyBindAction::Action("switch_current_window".to_string()),
-    );
-    map.insert(
-        "alt+page_up".to_string(),
-        KeyBindAction::Action("scroll_current_window_up_one".to_string()),
-    );
-    map.insert(
-        "alt+page_down".to_string(),
-        KeyBindAction::Action("scroll_current_window_down_one".to_string()),
-    );
-    map.insert(
-        "page_up".to_string(),
-        KeyBindAction::Action("scroll_current_window_up_page".to_string()),
-    );
-    map.insert(
-        "page_down".to_string(),
-        KeyBindAction::Action("scroll_current_window_down_page".to_string()),
-    );
-
-    // Command history
-    map.insert(
-        "up".to_string(),
-        KeyBindAction::Action("previous_command".to_string()),
-    );
-    map.insert(
-        "down".to_string(),
-        KeyBindAction::Action("next_command".to_string()),
-    );
-
-    // Search
-    map.insert(
-        "ctrl+f".to_string(),
-        KeyBindAction::Action("start_search".to_string()),
-    );
-    map.insert(
-        "ctrl+page_up".to_string(),
-        KeyBindAction::Action("prev_search_match".to_string()),
-    );
-    map.insert(
-        "ctrl+page_down".to_string(),
-        KeyBindAction::Action("next_search_match".to_string()),
-    );
-
-    // Debug/Performance
-    map.insert(
-        "f12".to_string(),
-        KeyBindAction::Action("toggle_performance_stats".to_string()),
-    );
-
-    // Numpad movement macros
-    map.insert(
-        "num_1".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "sw\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_2".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "s\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_3".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "se\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_4".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "w\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_5".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "out\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_6".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "e\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_7".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "nw\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_8".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "n\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_9".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "ne\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_0".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "down\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_.".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "up\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_+".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "look\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_-".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "info\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_*".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "exp\r".to_string(),
-        }),
-    );
-    map.insert(
-        "num_/".to_string(),
-        KeyBindAction::Macro(MacroAction {
-            macro_text: "health\r".to_string(),
-        }),
-    );
-
-    // Note: Shift+numpad doesn't work on Windows - the OS doesn't report SHIFT modifier for numpad numeric keys
-    // If you want peer keybinds, use alt+numpad or ctrl+numpad instead (those modifiers work with numpad)
-
-    map
-}
-
-fn default_countdown_icon() -> String {
-    "\u{f0c8}".to_string() // Nerd Font square icon
-}
-
-fn default_poll_timeout_ms() -> u64 {
-    16 // 16ms = ~60 FPS, 8ms = ~120 FPS, 4ms = ~240 FPS
-}
 
 fn default_selection_enabled() -> bool {
     true
@@ -2562,7 +1475,7 @@ impl Layout {
     ) -> Result<(Self, Option<String>)> {
         let profile_dir = Config::profile_dir(character)?;
         let default_profile_dir = Config::profile_dir(None)?; // ~/.two-face/default/
-        let shared_layouts_dir = Config::layouts_dir()?; // ~/.two-face/layouts/ (templates only)
+        let _shared_layouts_dir = Config::layouts_dir()?; // ~/.two-face/layouts/ (templates only)
 
         // 1. Try character auto-save layout: ~/.two-face/{character}/layout.toml
         let auto_layout_path = profile_dir.join("layout.toml");
@@ -3149,6 +2062,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["main".to_string()],
                     buffer_size: 10000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3183,6 +2098,8 @@ impl Config {
                 data: InventoryWidgetData {
                     streams: vec!["inv".to_string()],
                     buffer_size: 0, // No scrollback for inventory (content replaced each update)
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3217,6 +2134,36 @@ impl Config {
                     label: Some("Health".to_string()),
                     color: Some("#6e0202".to_string()), // Dark red
                     numbers_only: false,
+                },
+            }),
+            "performance" => Some(WindowDef::Performance {
+                base: WindowBase {
+                    name: "performance".to_string(),
+                    title: Some("Performance Stats".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40,
+                    min_rows: Some(4),
+                    min_cols: Some(20),
+                    ..base_defaults.clone()
+                },
+                data: PerformanceWidgetData {
+                    show_fps: false,
+                    show_frame_times: false,
+                    show_render_times: false,
+                    show_ui_times: false,
+                    show_wrap_times: false,
+                    show_net: false,
+                    show_parse: false,
+                    show_events: false,
+                    show_memory: false,
+                    show_lines: false,
+                    show_uptime: true,
+                    show_jitter: false,
+                    show_frame_spikes: false,
+                    show_event_lag: false,
+                    show_memory_delta: false,
                 },
             }),
 
@@ -3258,6 +2205,34 @@ impl Config {
                     color: Some("#bd7b00".to_string()), // Orange
                     numbers_only: false,
                 },
+            }),
+            "targets" => Some(WindowDef::Targets {
+                base: WindowBase {
+                    name: "targets".to_string(),
+                    title: Some("Targets".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40,
+                    min_rows: Some(4),
+                    min_cols: Some(20),
+                    ..base_defaults.clone()
+                },
+                data: TargetsWidgetData {},
+            }),
+            "players" => Some(WindowDef::Players {
+                base: WindowBase {
+                    name: "players".to_string(),
+                    title: Some("Players".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40,
+                    min_rows: Some(4),
+                    min_cols: Some(20),
+                    ..base_defaults.clone()
+                },
+                data: PlayersWidgetData {},
             }),
 
             "spirit" => Some(WindowDef::Progress {
@@ -3583,6 +2558,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["thoughts".to_string()],
                     buffer_size: 1000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3599,6 +2576,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["speech".to_string()],
                     buffer_size: 1000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3615,6 +2594,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["announcements".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3631,6 +2612,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["loot".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3647,6 +2630,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["death".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3663,6 +2648,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["logons".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3679,6 +2666,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["familiar".to_string()],
                     buffer_size: 1000,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3695,6 +2684,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["ambients".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3711,6 +2702,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["bounty".to_string()],
                     buffer_size: 0, // VellumFE uses 0 - content is cleared and replaced
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3727,6 +2720,8 @@ impl Config {
                 data: TextWidgetData {
                     streams: vec!["society".to_string()],
                     buffer_size: 500,
+                    wordwrap: true,
+                    show_timestamps: false,
                 },
             }),
 
@@ -3741,36 +2736,6 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: SpellsWidgetData {},
-            }),
-
-            "quickbar" => Some(WindowDef::QuickBar {
-                base: WindowBase {
-                    name: "quickbar".to_string(),
-                    title: None, // No title bar for QuickBar
-                    rows: 1, // Default 1 row
-                    cols: 80,
-                    show_border: true,
-                    show_title: false, // Explicitly no title
-                    min_rows: Some(1),
-                    max_rows: Some(1),
-                    ..base_defaults
-                },
-                data: QuickBarWidgetData {
-                    active_bar: "quick".to_string(),
-                    bars: {
-                        let mut bars = std::collections::HashMap::new();
-                        // Pre-populate with default bar content from GemStone IV
-                        bars.insert("quick".to_string(),
-                            "[look] [roleplay...] [actions...] [search] [inventory] [character sheet] [skill goals] [directions] [get assistance] [society] [SimuCoins]".to_string());
-                        bars.insert("quick-combat".to_string(),
-                            "[look] [attack] [ambush] [aim] [target] [fire] [multistrike] [targeted multistrike] [maneuvers]".to_string());
-                        bars.insert("quick-simu".to_string(),
-                            "[policy] [news] [calendar] [documentation] [premium] [platinum] [maps] [Discord] [version notes] [SimuCoins Store]".to_string());
-                        bars
-                    },
-                    default_bar: "quick".to_string(),
-                    scroll_offset: 0,
-                },
             }),
 
             "chat" => Some(WindowDef::TabbedText {
@@ -3817,6 +2782,10 @@ impl Config {
                     ],
                     buffer_size: 5000,
                     tab_bar_position: "top".to_string(),
+                    tab_active_color: None,
+                    tab_inactive_color: None,
+                    tab_unread_color: None,
+                    tab_unread_prefix: None,
                 },
             }),
 
@@ -3864,8 +2833,9 @@ impl Config {
             "society",
             // Tabbed text windows
             "chat",
-            // Special widgets
-            "quickbar",
+            // Entity
+            "targets",
+            "players",
             // Countdowns
             "roundtime",
             "casttime",
@@ -3886,6 +2856,7 @@ impl Config {
             "compass",
             "injuries",
             "spacer",
+            "performance",
             // command_input is NOT in this list - it's always present and can't be added/removed
         ]
     }
@@ -4375,59 +3346,6 @@ impl Config {
         Ok(layouts_dir.join(format!("{}.toml", name)))
     }
 
-    /// List all saved highlight profiles
-    pub fn list_saved_highlights() -> Result<Vec<String>> {
-        let highlights_dir = Self::highlights_dir()?;
-
-        if !highlights_dir.exists() {
-            return Ok(vec![]);
-        }
-
-        let mut profiles = vec![];
-        for entry in fs::read_dir(highlights_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                    profiles.push(name.to_string());
-                }
-            }
-        }
-
-        profiles.sort();
-        Ok(profiles)
-    }
-
-    /// Save current highlights to a named profile
-    /// Returns path to saved highlights
-    pub fn save_highlights_as(&self, name: &str) -> Result<PathBuf> {
-        let highlights_dir = Self::highlights_dir()?;
-        fs::create_dir_all(&highlights_dir)?;
-
-        let highlights_path = highlights_dir.join(format!("{}.toml", name));
-        let contents =
-            toml::to_string_pretty(&self.highlights).context("Failed to serialize highlights")?;
-        fs::write(&highlights_path, contents).context("Failed to write highlights profile")?;
-
-        Ok(highlights_path)
-    }
-
-    /// Load highlights from a named profile
-    pub fn load_highlights_from(name: &str) -> Result<HashMap<String, HighlightPattern>> {
-        let highlights_dir = Self::highlights_dir()?;
-        let highlights_path = highlights_dir.join(format!("{}.toml", name));
-
-        if !highlights_path.exists() {
-            return Err(anyhow::anyhow!("Highlight profile '{}' not found", name));
-        }
-
-        let contents =
-            fs::read_to_string(&highlights_path).context("Failed to read highlights profile")?;
-        let highlights: HashMap<String, HighlightPattern> =
-            toml::from_str(&contents).context("Failed to parse highlights profile")?;
-
-        Ok(highlights)
-    }
 
     /// List all saved keybind profiles
     pub fn list_saved_keybinds() -> Result<Vec<String>> {
@@ -4968,6 +3886,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 1000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 
@@ -5025,6 +3945,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 1000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 
@@ -5078,6 +4000,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 1000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 
@@ -5135,6 +4059,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 1000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 
@@ -5201,6 +4127,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 5000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 
@@ -5258,6 +4186,8 @@ visible = true
             data: TextWidgetData {
                 streams: vec!["status".to_string()],
                 buffer_size: 100,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
 

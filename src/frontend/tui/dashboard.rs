@@ -18,6 +18,32 @@ pub enum DashboardLayout {
     Horizontal,
     Vertical,
     Grid { rows: usize, cols: usize },
+    Flow,
+}
+
+impl DashboardLayout {
+    pub fn from_str(value: &str) -> Self {
+        let lower = value.to_lowercase();
+        if lower.starts_with("grid") {
+            if let Some(spec) = lower.split(':').nth(1) {
+                let parts: Vec<_> = spec.split('x').collect();
+                if parts.len() == 2 {
+                    if let (Ok(r), Ok(c)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                        if r > 0 && c > 0 {
+                            return DashboardLayout::Grid { rows: r, cols: c };
+                        }
+                    }
+                }
+            }
+        }
+
+        match lower.as_str() {
+            "vertical" => DashboardLayout::Vertical,
+            "flow" => DashboardLayout::Flow,
+            "horizontal" => DashboardLayout::Horizontal,
+            _ => DashboardLayout::Horizontal,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +117,10 @@ impl Dashboard {
         self.hide_inactive = hide;
     }
 
+    pub fn set_layout(&mut self, layout: DashboardLayout) {
+        self.layout = layout;
+    }
+
     pub fn set_content_align(&mut self, align: Option<String>) {
         self.content_align = align;
     }
@@ -111,6 +141,11 @@ impl Dashboard {
 
     pub fn set_transparent_background(&mut self, transparent: bool) {
         self.transparent_background = transparent;
+    }
+
+    pub fn clear_indicators(&mut self) {
+        self.indicators.clear();
+        self.indicator_map.clear();
     }
 
     fn parse_color(hex: &str) -> Color {
@@ -197,6 +232,7 @@ impl Dashboard {
             DashboardLayout::Grid { rows, cols } => {
                 self.render_grid(&visible_indicators, rows, cols, inner_area, buf)
             }
+            DashboardLayout::Flow => self.render_flow(&visible_indicators, inner_area, buf),
         }
     }
 
@@ -226,6 +262,67 @@ impl Dashboard {
             }
 
             x += self.spacing;
+        }
+    }
+
+    fn render_flow(&self, indicators: &[&DashboardIndicator], area: Rect, buf: &mut Buffer) {
+        if indicators.is_empty() {
+            return;
+        }
+
+        let mut rows: Vec<Vec<&DashboardIndicator>> = Vec::new();
+        let available_width = area.width as usize;
+        let spacing = self.spacing as usize;
+
+        let mut current_row: Vec<&DashboardIndicator> = Vec::new();
+        let mut current_width: usize = 0;
+
+        for ind in indicators {
+            let icon_width = ind.icon.chars().count();
+            let extra_spacing = if current_row.is_empty() { 0 } else { spacing };
+            if !current_row.is_empty() && current_width + extra_spacing + icon_width > available_width {
+                rows.push(current_row);
+                current_row = Vec::new();
+                current_width = 0;
+            }
+            if !current_row.is_empty() {
+                current_width += spacing;
+            }
+            current_row.push(ind);
+            current_width += icon_width;
+        }
+        if !current_row.is_empty() {
+            rows.push(current_row);
+        }
+
+        let total_height = rows.len() + (rows.len().saturating_sub(1)) * spacing;
+        let start_y = self.calculate_vertical_offset(total_height, area.height as usize, area.y);
+
+        let mut y = start_y;
+        for row in rows {
+            if y >= area.bottom() {
+                break;
+            }
+            let row_width: usize = row
+                .iter()
+                .map(|ind| ind.icon.chars().count())
+                .sum::<usize>()
+                + (row.len().saturating_sub(1)) * spacing;
+            let mut x = self.calculate_horizontal_offset(row_width, area.width as usize, area.x);
+            for ind in row {
+                let color_index =
+                    (ind.value as usize).min(ind.colors.len().saturating_sub(1));
+                let color = Self::parse_color(&ind.colors[color_index]);
+                for ch in ind.icon.chars() {
+                    if x >= area.right() {
+                        break;
+                    }
+                    buf[(x, y)].set_char(ch).set_fg(color);
+                    x += 1;
+                }
+                x = x.saturating_add(self.spacing);
+            }
+            y = y.saturating_add(1 + self.spacing);
         }
     }
 

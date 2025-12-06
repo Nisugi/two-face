@@ -266,10 +266,10 @@ impl ThemeData {
 
         let injury_default_color = Self::parse_color(&self.injury_default_color)?;
 
-        let border_color = Self::parse_color(&self.border_color)?;
-        let label_color = Self::parse_color(&self.label_color)?;
-        let focused_label_color = Self::parse_color(&self.focused_label_color)?;
-        let text_color = Self::parse_color(&self.text_color)?;
+        let _border_color = Self::parse_color(&self.border_color)?;
+        let _label_color = Self::parse_color(&self.label_color)?;
+        let _focused_label_color = Self::parse_color(&self.focused_label_color)?;
+        let _text_color = Self::parse_color(&self.text_color)?;
 
         Some(AppTheme {
             name: self.name.clone(),
@@ -482,5 +482,452 @@ impl ThemeData {
         let contents = fs::read_to_string(path)?;
         let theme_data: ThemeData = toml::from_str(&contents)?;
         Ok(theme_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===========================================
+    // parse_color tests - valid inputs
+    // ===========================================
+
+    #[test]
+    fn test_parse_color_with_hash() {
+        let color = ThemeData::parse_color("#ff0000").unwrap();
+        assert_eq!(color.r, 255);
+        assert_eq!(color.g, 0);
+        assert_eq!(color.b, 0);
+    }
+
+    #[test]
+    fn test_parse_color_without_hash() {
+        let color = ThemeData::parse_color("00ff00").unwrap();
+        assert_eq!(color.r, 0);
+        assert_eq!(color.g, 255);
+        assert_eq!(color.b, 0);
+    }
+
+    #[test]
+    fn test_parse_color_blue() {
+        let color = ThemeData::parse_color("#0000ff").unwrap();
+        assert_eq!(color.r, 0);
+        assert_eq!(color.g, 0);
+        assert_eq!(color.b, 255);
+    }
+
+    #[test]
+    fn test_parse_color_white() {
+        let color = ThemeData::parse_color("#ffffff").unwrap();
+        assert_eq!(color.r, 255);
+        assert_eq!(color.g, 255);
+        assert_eq!(color.b, 255);
+    }
+
+    #[test]
+    fn test_parse_color_black() {
+        let color = ThemeData::parse_color("#000000").unwrap();
+        assert_eq!(color.r, 0);
+        assert_eq!(color.g, 0);
+        assert_eq!(color.b, 0);
+    }
+
+    #[test]
+    fn test_parse_color_mixed() {
+        let color = ThemeData::parse_color("#1a2b3c").unwrap();
+        assert_eq!(color.r, 0x1a);
+        assert_eq!(color.g, 0x2b);
+        assert_eq!(color.b, 0x3c);
+    }
+
+    #[test]
+    fn test_parse_color_uppercase() {
+        let color = ThemeData::parse_color("#AABBCC").unwrap();
+        assert_eq!(color.r, 0xaa);
+        assert_eq!(color.g, 0xbb);
+        assert_eq!(color.b, 0xcc);
+    }
+
+    #[test]
+    fn test_parse_color_mixed_case() {
+        let color = ThemeData::parse_color("#AaBbCc").unwrap();
+        assert_eq!(color.r, 0xaa);
+        assert_eq!(color.g, 0xbb);
+        assert_eq!(color.b, 0xcc);
+    }
+
+    // ===========================================
+    // parse_color tests - invalid inputs
+    // ===========================================
+
+    #[test]
+    fn test_parse_color_too_short() {
+        assert!(ThemeData::parse_color("#fff").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_too_long() {
+        assert!(ThemeData::parse_color("#fffffff").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_empty() {
+        assert!(ThemeData::parse_color("").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_only_hash() {
+        assert!(ThemeData::parse_color("#").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_invalid_hex() {
+        assert!(ThemeData::parse_color("#gggggg").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_invalid_chars() {
+        assert!(ThemeData::parse_color("#zzzzzz").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_with_spaces() {
+        // Has 6 chars but invalid
+        assert!(ThemeData::parse_color("ff 000").is_none());
+    }
+
+    // ===========================================
+    // color_to_hex tests (via from_theme)
+    // ===========================================
+
+    #[test]
+    fn test_color_to_hex_red() {
+        let color = Color::rgb(255, 0, 0);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#ff0000");
+    }
+
+    #[test]
+    fn test_color_to_hex_green() {
+        let color = Color::rgb(0, 255, 0);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#00ff00");
+    }
+
+    #[test]
+    fn test_color_to_hex_blue() {
+        let color = Color::rgb(0, 0, 255);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#0000ff");
+    }
+
+    #[test]
+    fn test_color_to_hex_white() {
+        let color = Color::rgb(255, 255, 255);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#ffffff");
+    }
+
+    #[test]
+    fn test_color_to_hex_black() {
+        let color = Color::rgb(0, 0, 0);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#000000");
+    }
+
+    #[test]
+    fn test_color_to_hex_leading_zeros() {
+        let color = Color::rgb(1, 2, 3);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#010203");
+    }
+
+    #[test]
+    fn test_color_to_hex_mixed() {
+        let color = Color::rgb(0x1a, 0x2b, 0x3c);
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, "#1a2b3c");
+    }
+
+    // ===========================================
+    // Round-trip tests (parse -> hex -> parse)
+    // ===========================================
+
+    #[test]
+    fn test_roundtrip_parse_to_hex() {
+        let original = "#abcdef";
+        let color = ThemeData::parse_color(original).unwrap();
+        let hex = ThemeData::color_to_hex(&color);
+        assert_eq!(hex, original);
+    }
+
+    #[test]
+    fn test_roundtrip_hex_to_parse() {
+        let original = Color::rgb(123, 45, 67);
+        let hex = ThemeData::color_to_hex(&original);
+        let parsed = ThemeData::parse_color(&hex).unwrap();
+        assert_eq!(parsed.r, original.r);
+        assert_eq!(parsed.g, original.g);
+        assert_eq!(parsed.b, original.b);
+    }
+
+    #[test]
+    fn test_roundtrip_all_possible_values() {
+        // Test a few interesting values
+        for r in [0u8, 1, 127, 128, 254, 255] {
+            for g in [0u8, 127, 255] {
+                for b in [0u8, 127, 255] {
+                    let original = Color::rgb(r, g, b);
+                    let hex = ThemeData::color_to_hex(&original);
+                    let parsed = ThemeData::parse_color(&hex).unwrap();
+                    assert_eq!(parsed.r, r, "Red mismatch for ({}, {}, {})", r, g, b);
+                    assert_eq!(parsed.g, g, "Green mismatch for ({}, {}, {})", r, g, b);
+                    assert_eq!(parsed.b, b, "Blue mismatch for ({}, {}, {})", r, g, b);
+                }
+            }
+        }
+    }
+
+    // ===========================================
+    // ThemeData::default tests
+    // ===========================================
+
+    #[test]
+    fn test_default_creates_valid_theme() {
+        let theme_data = ThemeData::default();
+        // Should have a name
+        assert!(!theme_data.name.is_empty());
+        // All colors should be valid hex
+        assert!(ThemeData::parse_color(&theme_data.window_border).is_some());
+        assert!(ThemeData::parse_color(&theme_data.text_primary).is_some());
+        assert!(ThemeData::parse_color(&theme_data.background_primary).is_some());
+    }
+
+    #[test]
+    fn test_default_has_dark_theme() {
+        let theme_data = ThemeData::default();
+        // Default should be dark theme
+        assert!(
+            theme_data.name.to_lowercase().contains("dark"),
+            "Default theme should be dark"
+        );
+    }
+
+    #[test]
+    fn test_default_all_colors_parseable() {
+        let theme_data = ThemeData::default();
+        // Test all window colors
+        assert!(ThemeData::parse_color(&theme_data.window_border).is_some());
+        assert!(ThemeData::parse_color(&theme_data.window_border_focused).is_some());
+        assert!(ThemeData::parse_color(&theme_data.window_background).is_some());
+        assert!(ThemeData::parse_color(&theme_data.window_title).is_some());
+        // Test all text colors
+        assert!(ThemeData::parse_color(&theme_data.text_primary).is_some());
+        assert!(ThemeData::parse_color(&theme_data.text_secondary).is_some());
+        assert!(ThemeData::parse_color(&theme_data.text_disabled).is_some());
+        assert!(ThemeData::parse_color(&theme_data.text_selected).is_some());
+        // Test background colors
+        assert!(ThemeData::parse_color(&theme_data.background_primary).is_some());
+        assert!(ThemeData::parse_color(&theme_data.background_secondary).is_some());
+        assert!(ThemeData::parse_color(&theme_data.background_selected).is_some());
+        assert!(ThemeData::parse_color(&theme_data.background_hover).is_some());
+    }
+
+    // ===========================================
+    // from_theme / to_app_theme round-trip tests
+    // ===========================================
+
+    #[test]
+    fn test_from_theme_preserves_name() {
+        let app_theme = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&app_theme);
+        assert_eq!(theme_data.name, app_theme.name);
+    }
+
+    #[test]
+    fn test_from_theme_preserves_description() {
+        let app_theme = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&app_theme);
+        assert_eq!(theme_data.description, app_theme.description);
+    }
+
+    #[test]
+    fn test_from_theme_converts_window_colors() {
+        let app_theme = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&app_theme);
+
+        // Parse the hex back and compare
+        let parsed = ThemeData::parse_color(&theme_data.window_border).unwrap();
+        assert_eq!(parsed.r, app_theme.window_border.r);
+        assert_eq!(parsed.g, app_theme.window_border.g);
+        assert_eq!(parsed.b, app_theme.window_border.b);
+    }
+
+    #[test]
+    fn test_to_app_theme_succeeds_with_valid_data() {
+        let theme_data = ThemeData::default();
+        let result = theme_data.to_app_theme();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_to_app_theme_preserves_name() {
+        let original = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&original);
+        let converted = theme_data.to_app_theme().unwrap();
+        assert_eq!(converted.name, original.name);
+    }
+
+    #[test]
+    fn test_roundtrip_dark_theme() {
+        let original = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&original);
+        let converted = theme_data.to_app_theme().unwrap();
+
+        // Compare a sampling of colors
+        assert_eq!(converted.window_border.r, original.window_border.r);
+        assert_eq!(converted.window_border.g, original.window_border.g);
+        assert_eq!(converted.window_border.b, original.window_border.b);
+
+        assert_eq!(converted.text_primary.r, original.text_primary.r);
+        assert_eq!(converted.text_primary.g, original.text_primary.g);
+        assert_eq!(converted.text_primary.b, original.text_primary.b);
+
+        assert_eq!(converted.background_primary.r, original.background_primary.r);
+        assert_eq!(converted.background_primary.g, original.background_primary.g);
+        assert_eq!(converted.background_primary.b, original.background_primary.b);
+    }
+
+    #[test]
+    fn test_roundtrip_light_theme() {
+        let original = crate::theme::ThemePresets::light();
+        let theme_data = ThemeData::from_theme(&original);
+        let converted = theme_data.to_app_theme().unwrap();
+
+        assert_eq!(converted.name, original.name);
+        assert_eq!(converted.description, original.description);
+
+        // Spot check colors
+        assert_eq!(converted.menu_border.r, original.menu_border.r);
+        assert_eq!(converted.form_error.g, original.form_error.g);
+        assert_eq!(converted.status_success.b, original.status_success.b);
+    }
+
+    // ===========================================
+    // to_app_theme failure cases
+    // ===========================================
+
+    #[test]
+    fn test_to_app_theme_fails_with_invalid_color() {
+        let mut theme_data = ThemeData::default();
+        theme_data.window_border = "invalid".to_string();
+        assert!(theme_data.to_app_theme().is_none());
+    }
+
+    #[test]
+    fn test_to_app_theme_fails_with_empty_color() {
+        let mut theme_data = ThemeData::default();
+        theme_data.text_primary = "".to_string();
+        assert!(theme_data.to_app_theme().is_none());
+    }
+
+    #[test]
+    fn test_to_app_theme_fails_with_short_color() {
+        let mut theme_data = ThemeData::default();
+        theme_data.background_primary = "#fff".to_string();
+        assert!(theme_data.to_app_theme().is_none());
+    }
+
+    // ===========================================
+    // TOML serialization tests
+    // ===========================================
+
+    #[test]
+    fn test_serialize_to_toml() {
+        let theme_data = ThemeData::default();
+        let toml_string = toml::to_string(&theme_data);
+        assert!(toml_string.is_ok());
+    }
+
+    #[test]
+    fn test_serialize_deserialize_roundtrip() {
+        let original = ThemeData::default();
+        let toml_string = toml::to_string(&original).unwrap();
+        let deserialized: ThemeData = toml::from_str(&toml_string).unwrap();
+
+        assert_eq!(deserialized.name, original.name);
+        assert_eq!(deserialized.description, original.description);
+        assert_eq!(deserialized.window_border, original.window_border);
+        assert_eq!(deserialized.text_primary, original.text_primary);
+    }
+
+    #[test]
+    fn test_toml_contains_expected_fields() {
+        let theme_data = ThemeData::default();
+        let toml_string = toml::to_string(&theme_data).unwrap();
+
+        assert!(toml_string.contains("name"));
+        assert!(toml_string.contains("description"));
+        assert!(toml_string.contains("window_border"));
+        assert!(toml_string.contains("text_primary"));
+        assert!(toml_string.contains("background_primary"));
+    }
+
+    // ===========================================
+    // Clone and Debug trait tests
+    // ===========================================
+
+    #[test]
+    fn test_theme_data_clone() {
+        let original = ThemeData::default();
+        let cloned = original.clone();
+        assert_eq!(cloned.name, original.name);
+        assert_eq!(cloned.window_border, original.window_border);
+    }
+
+    #[test]
+    fn test_theme_data_debug() {
+        let theme_data = ThemeData::default();
+        let debug_str = format!("{:?}", theme_data);
+        assert!(debug_str.contains("ThemeData"));
+        assert!(debug_str.contains("name"));
+    }
+
+    // ===========================================
+    // Edge case tests
+    // ===========================================
+
+    #[test]
+    fn test_parse_color_boundary_values() {
+        // Minimum values
+        let min = ThemeData::parse_color("#000000").unwrap();
+        assert_eq!(min.r, 0);
+        assert_eq!(min.g, 0);
+        assert_eq!(min.b, 0);
+
+        // Maximum values
+        let max = ThemeData::parse_color("#ffffff").unwrap();
+        assert_eq!(max.r, 255);
+        assert_eq!(max.g, 255);
+        assert_eq!(max.b, 255);
+    }
+
+    #[test]
+    fn test_from_theme_handles_all_color_fields() {
+        let app_theme = crate::theme::ThemePresets::dark();
+        let theme_data = ThemeData::from_theme(&app_theme);
+
+        // Verify all fields are non-empty and parseable
+        assert!(!theme_data.window_border.is_empty());
+        assert!(!theme_data.browser_border.is_empty());
+        assert!(!theme_data.form_border.is_empty());
+        assert!(!theme_data.editor_border.is_empty());
+        assert!(!theme_data.menu_border.is_empty());
+        assert!(!theme_data.status_info.is_empty());
+        assert!(!theme_data.button_normal.is_empty());
+        assert!(!theme_data.command_echo.is_empty());
+        assert!(!theme_data.injury_default_color.is_empty());
+        assert!(!theme_data.border_color.is_empty()); // legacy field
     }
 }
