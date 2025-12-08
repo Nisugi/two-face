@@ -27,6 +27,8 @@ pub struct RoomWindow {
     border_sides: config::BorderSides,
     background_color: Option<Color>,
     default_text_color: Option<Color>,
+    title_fg_hex: Option<String>,
+    title_bg_hex: Option<String>,
     show_inline_title: bool,
 
     /// Component buffers (id -> styled lines)
@@ -70,6 +72,8 @@ impl RoomWindow {
             border_sides: config::BorderSides::default(),
             background_color: None,
             default_text_color: None,
+            title_fg_hex: None,
+            title_bg_hex: None,
             show_inline_title: false,
             components: HashMap::new(),
             component_visibility,
@@ -382,8 +386,8 @@ impl RoomWindow {
         if self.show_inline_title && !self.title.is_empty() {
             all_lines.push(vec![TextSegment {
                 text: self.title.clone(),
-                fg: None,
-                bg: None,
+                fg: self.title_fg_hex.clone(),
+                bg: self.title_bg_hex.clone(),
                 bold: true,
                 span_type: SpanType::Normal,
                 link_data: None,
@@ -461,6 +465,12 @@ impl RoomWindow {
     /// Set title
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+        self.needs_rewrap = true;
+    }
+
+    pub fn set_title_colors(&mut self, fg_hex: Option<String>, bg_hex: Option<String>) {
+        self.title_fg_hex = fg_hex;
+        self.title_bg_hex = bg_hex;
         self.needs_rewrap = true;
     }
 
@@ -573,7 +583,26 @@ impl RoomWindow {
         // Create border block
         let mut block = if self.show_border {
             let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
-            Block::default().title(self.title.as_str()).borders(borders)
+
+            // Use styled title with roomName preset if provided
+            let title_line = if self.title_fg_hex.is_some() || self.title_bg_hex.is_some() {
+                let mut style = Style::default();
+                if let Some(ref fg) = self.title_fg_hex {
+                    if let Some(color) = parse_hex_color(fg) {
+                        style = style.fg(color);
+                    }
+                }
+                if let Some(ref bg) = self.title_bg_hex {
+                    if let Some(color) = parse_hex_color(bg) {
+                        style = style.bg(color);
+                    }
+                }
+                Line::from(Span::styled(self.title.clone(), style.add_modifier(Modifier::BOLD)))
+            } else {
+                Line::from(self.title.as_str())
+            };
+
+            Block::default().title(title_line).borders(borders)
         } else {
             Block::default()
         };

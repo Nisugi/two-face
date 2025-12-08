@@ -20,6 +20,7 @@ pub struct Countdown {
     border_style: Option<String>,
     border_color: Option<String>,
     text_color: Option<String>,
+    background_color: Option<String>,
     transparent_background: bool,
     icon: char, // Character to use for countdown blocks
 }
@@ -33,7 +34,8 @@ impl Countdown {
             border_style: None,
             border_color: None,
             text_color: None,
-            transparent_background: true,
+            background_color: None,
+            transparent_background: false,
             icon: '█', // Default to filled block
         }
     }
@@ -61,6 +63,10 @@ impl Countdown {
         self.text_color = color;
     }
 
+    pub fn set_background_color(&mut self, color: Option<String>) {
+        self.background_color = color;
+    }
+
     pub fn set_transparent_background(&mut self, transparent: bool) {
         self.transparent_background = transparent;
     }
@@ -81,17 +87,17 @@ impl Countdown {
     }
 
     /// Parse a hex color string to ratatui Color
-    fn parse_color(hex: &str) -> Color {
+    fn parse_color_opt(hex: &str) -> Option<Color> {
         let hex = hex.trim_start_matches('#');
         if hex.len() != 6 {
-            return Color::White;
+            return None;
         }
 
         let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
         let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
         let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
 
-        Color::Rgb(r, g, b)
+        Some(Color::Rgb(r, g, b))
     }
 
     pub fn render(
@@ -105,10 +111,22 @@ impl Countdown {
             return;
         }
 
+        // Determine background color - use theme background if not transparent
+        let bg_color = if self.transparent_background {
+            None
+        } else if let Some(ref color) = self.background_color {
+            Some(
+                Self::parse_color_opt(color)
+                    .unwrap_or_else(|| crossterm_bridge::to_ratatui_color(theme.window_background)),
+            )
+        } else {
+            Some(crossterm_bridge::to_ratatui_color(theme.window_background))
+        };
+
         let border_color = self
             .border_color
             .as_ref()
-            .map(|c| Self::parse_color(c))
+            .and_then(|c| Self::parse_color_opt(c))
             .unwrap_or(Color::White);
 
         let inner_area: Rect;
@@ -129,6 +147,10 @@ impl Countdown {
             }
 
             block = block.border_style(Style::default().fg(border_color));
+            if let Some(bg) = bg_color {
+                // Match border background to the window background for consistency
+                block = block.style(Style::default().bg(bg));
+            }
             block = block.title(self.label.as_str());
 
             inner_area = block.inner(area);
@@ -146,15 +168,8 @@ impl Countdown {
         let text_color = self
             .text_color
             .as_ref()
-            .map(|c| Self::parse_color(c))
+            .and_then(|c| Self::parse_color_opt(c))
             .unwrap_or(Color::White);
-
-        // Determine background color - use theme background if not transparent
-        let bg_color = if !self.transparent_background {
-            Some(crossterm_bridge::to_ratatui_color(theme.window_background))
-        } else {
-            None
-        };
 
         // Clear the bar area with appropriate background
         let y = inner_area.y;
@@ -221,3 +236,4 @@ impl Countdown {
         }
     }
 }
+

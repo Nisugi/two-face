@@ -4,13 +4,14 @@
 //! actual text rendering to the existing `TextWindow`.
 
 use super::text_window::TextWindow;
+use super::title_position::{self, TitlePosition};
 use crate::selection::SelectionState;
 use crate::theme::AppTheme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Widget},
+    widgets::{Block, BorderType},
 };
 
 use super::crossterm_bridge;
@@ -36,6 +37,7 @@ struct TabInfo {
     window: TextWindow,
     has_unread: bool,
     unread_count: usize,
+    ignore_activity: bool,
 }
 
 pub struct TabbedTextWindow {
@@ -54,6 +56,8 @@ pub struct TabbedTextWindow {
     tab_inactive_color: Option<String>,
     tab_unread_color: Option<String>,
     tab_unread_prefix: String,
+    show_tab_separator: bool,
+    title_position: TitlePosition,
 }
 
 impl TabbedTextWindow {
@@ -67,24 +71,32 @@ impl TabbedTextWindow {
             border_color: Some("#808080".to_string()),
             border_sides: crate::config::BorderSides::default(),
             title: title.to_string(),
-            transparent_background: true,
+            transparent_background: false,
             background_color: None,
             content_text_color: None,
             tab_active_color: Some("#FFFF00".to_string()), // Yellow
             tab_inactive_color: Some("#808080".to_string()), // Gray
             tab_unread_color: Some("#FFFFFF".to_string()), // White
             tab_unread_prefix: "* ".to_string(),
+            show_tab_separator: false,
+            title_position: TitlePosition::TopLeft,
         }
     }
 
     pub fn with_tabs(
         title: &str,
-        tabs: Vec<(String, Vec<String>, bool)>,
+        tabs: Vec<(String, Vec<String>, bool, bool)>,
         max_lines_per_tab: usize,
     ) -> Self {
         let mut window = Self::new(title, TabBarPosition::Top);
-        for (name, streams, show_timestamps) in tabs {
-            window.add_tab(name, streams, max_lines_per_tab, show_timestamps);
+        for (name, streams, show_timestamps, ignore_activity) in tabs {
+            window.add_tab(
+                name,
+                streams,
+                max_lines_per_tab,
+                show_timestamps,
+                ignore_activity,
+            );
         }
         window
     }
@@ -103,6 +115,11 @@ impl TabbedTextWindow {
 
     pub fn with_tab_bar_position(mut self, position: TabBarPosition) -> Self {
         self.set_tab_bar_position(position);
+        self
+    }
+
+    pub fn with_title_position(mut self, position: TitlePosition) -> Self {
+        self.title_position = position;
         self
     }
 
@@ -142,9 +159,30 @@ impl TabbedTextWindow {
         self.tab_unread_prefix = prefix;
     }
 
+    pub fn set_title_position(&mut self, position: TitlePosition) {
+        self.title_position = position;
+    }
+    pub fn set_title(&mut self, title: String) {
+        self.title = title;
+    }
+
+    pub fn set_tab_separator(&mut self, show: bool) {
+        self.show_tab_separator = show;
+    }
+
     pub fn set_content_align(&mut self, align: Option<String>) {
         for tab in &mut self.tabs {
             tab.window.set_content_align(align.clone());
+        }
+    }
+
+    pub fn set_tab_ignore_activity(&mut self, index: usize, ignore: bool) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.ignore_activity = ignore;
+            if ignore {
+                tab.has_unread = false;
+                tab.unread_count = 0;
+            }
         }
     }
 
@@ -177,6 +215,7 @@ impl TabbedTextWindow {
         streams: Vec<String>,
         max_lines: usize,
         show_timestamps: bool,
+        ignore_activity: bool,
     ) {
         let mut window = TextWindow::new(&name, max_lines);
         window.set_show_timestamps(show_timestamps);
@@ -190,6 +229,7 @@ impl TabbedTextWindow {
             window,
             has_unread: false,
             unread_count: 0,
+            ignore_activity,
         });
     }
 
@@ -332,7 +372,7 @@ impl TabbedTextWindow {
     /// Mark a tab as having unread content, incrementing its counter by `count`
     pub fn mark_tab_unread(&mut self, index: usize, count: usize) {
         if let Some(tab) = self.tabs.get_mut(index) {
-            if count > 0 {
+            if count > 0 && !tab.ignore_activity {
                 tab.has_unread = true;
                 tab.unread_count = tab.unread_count.saturating_add(count);
             }
@@ -345,7 +385,7 @@ impl TabbedTextWindow {
                 tab.window.add_text(styled.clone());
 
                 // Mark as unread if not active tab
-                if idx != self.active_tab_index {
+                if idx != self.active_tab_index && !tab.ignore_activity {
                     tab.has_unread = true;
                     tab.unread_count += 1;
                 }
@@ -371,7 +411,7 @@ impl TabbedTextWindow {
             tab.window.add_text(styled);
 
             // Mark as unread if not active tab
-            if idx != self.active_tab_index {
+            if idx != self.active_tab_index && !tab.ignore_activity {
                 tab.has_unread = true;
                 tab.unread_count += 1;
             }
@@ -574,49 +614,53 @@ impl TabbedTextWindow {
             return;
         }
 
-        // Create border block if enabled
-        let inner_area = if self.show_border {
-            let mut block = Block::default();
-
-            let border_type = match self.border_style.as_deref() {
-                Some("double") => BorderType::Double,
-                Some("rounded") => BorderType::Rounded,
-                Some("thick") => BorderType::Thick,
-                Some("single") => BorderType::Plain, // closest available thin border
-                _ => BorderType::Plain,
-            };
-
-            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
-
-            block = block.borders(borders).border_type(border_type);
-
-            let mut border_style = Style::default();
-            if let Some(ref color_str) = self.border_color {
-                let color = Self::parse_color(color_str);
-                border_style = border_style.fg(color);
-            }
-
-            if focused {
-                border_style = border_style
-                    .fg(crossterm_bridge::to_ratatui_color(theme.window_border_focused))
-                    .add_modifier(Modifier::BOLD);
-            }
-
-            block = block.border_style(border_style);
-
-            if !self.title.is_empty() {
-                block = block.title(self.title.clone());
-            }
-
-            let inner = block.inner(area);
-            block.render(area, buf);
-            inner
-        } else {
-            area
+        let border_type = match self.border_style.as_deref() {
+            Some("double") => BorderType::Double,
+            Some("rounded") => BorderType::Rounded,
+            Some("thick") => BorderType::Thick,
+            Some("single") => BorderType::Plain, // closest available thin border
+            _ => BorderType::Plain,
         };
 
+        let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
+
+        let mut border_style = Style::default();
+        if let Some(ref color_str) = self.border_color {
+            let color = Self::parse_color(color_str);
+            border_style = border_style.fg(color);
+        }
+
+        if focused {
+            border_style = border_style
+                .fg(crossterm_bridge::to_ratatui_color(theme.window_border_focused))
+                .add_modifier(Modifier::BOLD);
+        }
+
+        let bg_color = if self.transparent_background {
+            None
+        } else if let Some(ref bg_hex) = self.background_color {
+            Some(Self::parse_color(bg_hex))
+        } else {
+            Some(crossterm_bridge::to_ratatui_color(theme.window_background))
+        };
+        if let Some(bg) = bg_color {
+            border_style = border_style.bg(bg);
+        }
+
+        let inner_area = title_position::render_block_with_title(
+            area,
+            buf,
+            self.show_border,
+            borders,
+            &self.border_sides,
+            border_type,
+            border_style,
+            &self.title,
+            self.title_position,
+        );
+
         // Split inner area for tab bar and content
-        let (tab_bar_area, content_area) = match self.tab_bar_position {
+        let (tab_bar_area, mut content_area) = match self.tab_bar_position {
             TabBarPosition::Top => {
                 let tab_bar = Rect {
                     x: inner_area.x,
@@ -649,28 +693,69 @@ impl TabbedTextWindow {
             }
         };
 
-        // Paint background for tab bar and content when not transparent
-        if !self.transparent_background {
-            if let Some(ref bg_hex) = self.background_color {
-                let bg = Self::parse_color(bg_hex);
+        // Optional separator between tab bar and content
+        let mut separator_area: Option<Rect> = None;
+        if self.show_tab_separator && content_area.height > 0 {
+            match self.tab_bar_position {
+                TabBarPosition::Top => {
+                    separator_area = Some(Rect {
+                        x: content_area.x,
+                        y: content_area.y,
+                        width: content_area.width,
+                        height: 1,
+                    });
+                    content_area.y = content_area.y.saturating_add(1);
+                    content_area.height = content_area.height.saturating_sub(1);
+                }
+                TabBarPosition::Bottom => {
+                    separator_area = Some(Rect {
+                        x: content_area.x,
+                        y: content_area
+                            .y
+                            .saturating_add(content_area.height.saturating_sub(1)),
+                        width: content_area.width,
+                        height: 1,
+                    });
+                    content_area.height = content_area.height.saturating_sub(1);
+                }
+            }
+        }
 
-                // Tab bar row
-                for dx in 0..tab_bar_area.width {
-                    let x = tab_bar_area.x + dx;
-                    let y = tab_bar_area.y;
+        // Paint background for tab bar and content (use theme fallback when needed)
+        let bg_color = if self.transparent_background {
+            None
+        } else if let Some(ref bg_hex) = self.background_color {
+            Some(Self::parse_color(bg_hex))
+        } else {
+            Some(crossterm_bridge::to_ratatui_color(theme.window_background))
+        };
+        if let Some(bg) = bg_color {
+            // Tab bar row
+            for dx in 0..tab_bar_area.width {
+                let x = tab_bar_area.x + dx;
+                let y = tab_bar_area.y;
+                if x < buf.area().width && y < buf.area().height {
+                    buf[(x, y)].set_bg(bg);
+                }
+            }
+
+            // Content area
+            for dx in 0..content_area.width {
+                for dy in 0..content_area.height {
+                    let x = content_area.x + dx;
+                    let y = content_area.y + dy;
                     if x < buf.area().width && y < buf.area().height {
                         buf[(x, y)].set_bg(bg);
                     }
                 }
+            }
 
-                // Content area
-                for dx in 0..content_area.width {
-                    for dy in 0..content_area.height {
-                        let x = content_area.x + dx;
-                        let y = content_area.y + dy;
-                        if x < buf.area().width && y < buf.area().height {
-                            buf[(x, y)].set_bg(bg);
-                        }
+            if let Some(sep) = separator_area {
+                for dx in 0..sep.width {
+                    let x = sep.x + dx;
+                    let y = sep.y;
+                    if x < buf.area().width && y < buf.area().height {
+                        buf[(x, y)].set_bg(bg);
                     }
                 }
             }
@@ -678,6 +763,31 @@ impl TabbedTextWindow {
 
         // Render tab bar
         self.render_tab_bar(tab_bar_area, buf);
+
+        // Render separator line if enabled and space remains
+        if let Some(sep) = separator_area {
+            if sep.width > 0 && sep.y < buf.area().height {
+                let sep_color = self
+                    .border_color
+                    .as_ref()
+                    .map(|c| Self::parse_color(c))
+                    .or_else(|| {
+                        self.tab_inactive_color
+                            .as_ref()
+                            .map(|c| Self::parse_color(c))
+                    })
+                    .unwrap_or(Color::DarkGray);
+
+                for dx in 0..sep.width {
+                    let x = sep.x + dx;
+                    if x < buf.area().width {
+                        buf[(x, sep.y)]
+                            .set_char('-')
+                            .set_style(Style::default().fg(sep_color));
+                    }
+                }
+            }
+        }
 
         // Render active tab content
         if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
@@ -724,6 +834,7 @@ impl TabbedTextWindow {
             }
 
             // Determine tab text and style
+            let ignore_activity = tab.ignore_activity;
             let (raw_text, style) = if idx == self.active_tab_index {
                 (
                     tab.name.clone(),
@@ -731,7 +842,7 @@ impl TabbedTextWindow {
                         .fg(active_color)
                         .add_modifier(Modifier::BOLD),
                 )
-            } else if tab.has_unread {
+            } else if tab.has_unread && !ignore_activity {
                 (
                     format!("{}{}", self.tab_unread_prefix, tab.name),
                     Style::default().fg(unread_color),
@@ -796,3 +907,4 @@ impl TabbedTextWindow {
         }
     }
 }
+

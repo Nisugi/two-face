@@ -58,7 +58,7 @@ impl Compass {
             inactive_color: Some(Color::Rgb(51, 51, 51)),
             content_align: None,
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -236,3 +236,4 @@ impl Compass {
         }
     }
 }
+

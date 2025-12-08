@@ -19,6 +19,7 @@ pub struct Hand {
     hand_type: HandType,
     content: String,
     icon: String, // Configurable icon (e.g., "L:", "R:", "S:")
+    icon_color: Option<Color>,
     show_border: bool,
     border_style: Option<String>,
     border_color: Option<Color>,
@@ -50,6 +51,7 @@ impl Hand {
             hand_type,
             content: String::new(),
             icon: default_icon.to_string(),
+            icon_color: None,
             show_border: false,
             border_style: None,
             border_color: None,
@@ -57,7 +59,7 @@ impl Hand {
             text_color: None, // Will use global default
             content_highlight_color: None,
             background_color: None,
-            transparent_background: true, // Default to transparent
+            transparent_background: false, // Default to transparent
             link_data: None,
         }
     }
@@ -83,6 +85,10 @@ impl Hand {
 
     pub fn set_icon(&mut self, icon: String) {
         self.icon = icon;
+    }
+
+    pub fn set_icon_color(&mut self, color: Option<String>) {
+        self.icon_color = color.and_then(|c| Self::parse_color(&c));
     }
 
     pub fn set_content(&mut self, content: String) {
@@ -226,6 +232,7 @@ impl Hand {
 
         // Trust that text_color is always set by window manager from config resolution
         let base_text_color = self.text_color.unwrap_or(Color::Reset);
+        let icon_color = self.icon_color.unwrap_or(base_text_color);
         let content_color = self.content_highlight_color.unwrap_or(base_text_color);
 
         let y = inner_area.y;
@@ -236,7 +243,7 @@ impl Hand {
             if x < inner_area.x + inner_area.width && x < buf.area().width && y < buf.area().height
             {
                 buf[(x, y)].set_char(ch);
-                buf[(x, y)].set_fg(base_text_color);
+                buf[(x, y)].set_fg(icon_color);
                 if let Some(bg_color) = fill_bg {
                     buf[(x, y)].set_bg(bg_color);
                 }
@@ -285,3 +292,4 @@ impl Hand {
         self.render(area, buf);
     }
 }
+

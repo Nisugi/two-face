@@ -3,7 +3,7 @@
 //! Responsible for buffering, wrapping, highlighting, search, and selection
 //! logic in a way that mirrors Profanity/Vellum's behavior.
 
-use crate::frontend::tui::crossterm_bridge;
+use crate::frontend::tui::{crossterm_bridge, title_position::{self, TitlePosition}};
 use crate::config::HighlightPattern;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use ratatui::{
@@ -94,6 +94,7 @@ pub struct TextWindow {
     last_visible_height: usize,     // Track the visible height from last render
     last_render_range: Option<(usize, usize)>, // Track last (start_line, end_line) to detect content changes
     title: String,
+    title_position: TitlePosition,
     last_width: u16,
     needs_rewrap: bool, // Flag to trigger re-wrapping
     // Border configuration
@@ -135,6 +136,7 @@ impl Clone for TextWindow {
             last_visible_height: self.last_visible_height,
             last_render_range: self.last_render_range,
             title: self.title.clone(),
+            title_position: self.title_position,
             last_width: self.last_width,
             needs_rewrap: self.needs_rewrap,
             show_border: self.show_border,
@@ -169,6 +171,7 @@ impl TextWindow {
             max_lines,
             scroll_offset: 0,
             title: title.into(),
+            title_position: TitlePosition::TopLeft,
             last_width: 0,
             needs_rewrap: false,
             last_render_range: None,
@@ -289,6 +292,11 @@ impl TextWindow {
     /// Update the window title
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+        self.needs_rewrap = true;
+    }
+
+    pub fn set_title_position(&mut self, position: TitlePosition) {
+        self.title_position = position;
     }
 
     pub fn set_show_timestamps(&mut self, show: bool) {
@@ -414,9 +422,10 @@ impl TextWindow {
             return;
         }
 
-        // STEP 1: Build character-by-character style map from current spans
+        // STEP 1: Build character-by-character style and link maps from current spans
         let mut char_styles: Vec<CharStyle> = Vec::new();
-        for (content, style, span_type, _link) in &self.current_line_spans {
+        let mut char_links: Vec<Option<LinkData>> = Vec::new();
+        for (content, style, span_type, link) in &self.current_line_spans {
             for _ in content.chars() {
                 char_styles.push(CharStyle {
                     fg: style.fg,
@@ -424,6 +433,7 @@ impl TextWindow {
                     bold: style.add_modifier.contains(Modifier::BOLD),
                     span_type: *span_type,
                 });
+                char_links.push(link.clone());
             }
         }
 
@@ -432,26 +442,33 @@ impl TextWindow {
         }
 
         // STEP 2: Build full text for pattern matching
-        let full_text: String = self
+        let mut full_text: String = self
             .current_line_spans
             .iter()
             .map(|(content, _, _, _)| content.as_str())
             .collect();
 
         // STEP 3: Find all highlight matches (both Aho-Corasick and regex)
-        let mut matches: Vec<(usize, usize, Option<Color>, Option<Color>, bool, bool)> = Vec::new();
-        // Format: (start, end, fg, bg, bold, color_entire_line)
+        #[derive(Clone)]
+        struct MatchInfo {
+            start_byte: usize,
+            end_byte: usize,
+            fg: Option<Color>,
+            bg: Option<Color>,
+            bold: bool,
+            color_entire_line: bool,
+            replace: Option<String>,
+        }
+
+        let mut matches: Vec<MatchInfo> = Vec::new();
 
         // Try Aho-Corasick fast patterns (with word boundary checking)
         if let Some(ref matcher) = self.fast_matcher {
             for mat in matcher.find_iter(&full_text) {
-                // Check word boundaries to prevent substring matches
-                // Note: mat.start()/end() return byte indices
                 let start = mat.start();
                 let end = mat.end();
                 let bytes = full_text.as_bytes();
 
-                // Check character before match
                 let is_word_start = start == 0 || {
                     bytes.get(start - 1).is_none_or(|&b| {
                         let c = b as char;
@@ -459,7 +476,6 @@ impl TextWindow {
                     })
                 };
 
-                // Check character after match
                 let is_word_end = end >= bytes.len() || {
                     bytes.get(end).is_none_or(|&b| {
                         let c = b as char;
@@ -467,7 +483,6 @@ impl TextWindow {
                     })
                 };
 
-                // Only match if both boundaries are satisfied (whole word match)
                 if is_word_start && is_word_end {
                     if let Some(&highlight_idx) =
                         self.fast_pattern_map.get(mat.pattern().as_usize())
@@ -475,14 +490,15 @@ impl TextWindow {
                         if let Some(highlight) = self.highlights.get(highlight_idx) {
                             let fg = highlight.fg.as_ref().and_then(|h| Self::parse_hex_color(h));
                             let bg = highlight.bg.as_ref().and_then(|h| Self::parse_hex_color(h));
-                            matches.push((
-                                start,
-                                end,
+                            matches.push(MatchInfo {
+                                start_byte: start,
+                                end_byte: end,
                                 fg,
                                 bg,
-                                highlight.bold,
-                                highlight.color_entire_line,
-                            ));
+                                bold: highlight.bold,
+                                color_entire_line: highlight.color_entire_line,
+                                replace: highlight.replace.clone(),
+                            });
                         }
                     }
                 }
@@ -496,122 +512,162 @@ impl TextWindow {
             }
 
             if let Some(Some(regex)) = self.highlight_regexes.get(i) {
-                if let Some(captures) = regex.captures(&full_text) {
-                    if let Some(m) = captures.get(0) {
-                        let fg = highlight.fg.as_ref().and_then(|h| Self::parse_hex_color(h));
-                        let bg = highlight.bg.as_ref().and_then(|h| Self::parse_hex_color(h));
-                        matches.push((
-                            m.start(),
-                            m.end(),
-                            fg,
-                            bg,
-                            highlight.bold,
-                            highlight.color_entire_line,
-                        ));
-                    }
+                for m in regex.find_iter(&full_text) {
+                    let fg = highlight.fg.as_ref().and_then(|h| Self::parse_hex_color(h));
+                    let bg = highlight.bg.as_ref().and_then(|h| Self::parse_hex_color(h));
+                    matches.push(MatchInfo {
+                        start_byte: m.start(),
+                        end_byte: m.end(),
+                        fg,
+                        bg,
+                        bold: highlight.bold,
+                        color_entire_line: highlight.color_entire_line,
+                        replace: highlight.replace.clone(),
+                    });
                 }
             }
         }
 
-        // STEP 4: Apply highlight matches to char_styles with priority layering
-        for (start, end, fg, bg, bold, color_entire_line) in matches {
-            if color_entire_line {
-                tracing::debug!(
-                    "Applying color_entire_line highlight: fg={:?}, bg={:?}, bold={}",
-                    fg,
-                    bg,
-                    bold
-                );
-                tracing::debug!(
-                    "Line has {} chars, {} original spans",
-                    char_styles.len(),
-                    self.current_line_spans.len()
-                );
+        if !matches.is_empty() {
+            use std::collections::HashMap;
 
-                // Debug: show original spans
-                for (idx, (content, style, span_type, _link)) in
-                    self.current_line_spans.iter().enumerate()
-                {
-                    tracing::debug!(
-                        "  original_span[{}]: content='{}', fg={:?}, span_type={:?}",
-                        idx,
-                        content,
-                        style.fg,
-                        span_type
-                    );
+            // Map byte offsets to char indices
+            let mut byte_to_char: HashMap<usize, usize> = HashMap::new();
+            for (idx, (byte, _ch)) in full_text.char_indices().enumerate() {
+                byte_to_char.insert(byte, idx);
+            }
+
+            let full_text_chars: Vec<char> = full_text.chars().collect();
+            matches.sort_by_key(|m| m.start_byte);
+
+            let mut new_text = String::new();
+            let mut new_styles: Vec<CharStyle> = Vec::new();
+            let mut new_links: Vec<Option<LinkData>> = Vec::new();
+            let mut new_match_ranges: Vec<(usize, usize, MatchInfo)> = Vec::new();
+
+            let mut last_char_idx = 0usize;
+            for m in matches {
+                let start_char = *byte_to_char.get(&m.start_byte).unwrap_or(&last_char_idx);
+                let end_char = *byte_to_char.get(&m.end_byte).unwrap_or(&full_text_chars.len());
+                if start_char < last_char_idx {
+                    continue; // overlapping; skip
                 }
 
-                // Whole line: highlight base → links → monsterbold
-                for char_style in char_styles.iter_mut() {
-                    // For links/monsterbold: preserve original foreground, apply highlight background
-                    // For normal text: apply full highlight (fg + bg + bold)
-                    if char_style.span_type == SpanType::Link
-                        || char_style.span_type == SpanType::Monsterbold
-                    {
-                        // Keep original foreground color for links/monsterbold
-                        tracing::debug!(
-                            "Preserving link/monsterbold fg color: {:?}, span_type={:?}",
-                            char_style.fg,
-                            char_style.span_type
-                        );
-                        // Apply only highlight background
-                        if let Some(color) = bg {
-                            char_style.bg = Some(color);
-                        }
-                        // Keep original bold state for links
-                    } else {
-                        // Normal text: apply full highlight
-                        if let Some(color) = fg {
-                            char_style.fg = Some(color);
-                        }
-                        if let Some(color) = bg {
-                            char_style.bg = Some(color);
-                        }
-                        if bold {
-                            char_style.bold = true;
-                        }
+                // Copy untouched region
+                for i in last_char_idx..start_char {
+                    new_text.push(full_text_chars[i]);
+                    new_styles.push(char_styles.get(i).cloned().unwrap_or(CharStyle {
+                        fg: None,
+                        bg: None,
+                        bold: false,
+                        span_type: SpanType::Normal,
+                    }));
+                    new_links.push(char_links.get(i).cloned().unwrap_or(None));
+                }
+
+                let new_start = new_styles.len();
+
+                // Replacement or original segment
+                if let Some(ref repl) = m.replace {
+                    let base_style = char_styles
+                        .get(start_char)
+                        .cloned()
+                        .unwrap_or(CharStyle {
+                            fg: None,
+                            bg: None,
+                            bold: false,
+                            span_type: SpanType::Normal,
+                        });
+                    for ch in repl.chars() {
+                        new_text.push(ch);
+                        new_styles.push(base_style);
+                        new_links.push(None);
+                    }
+                } else {
+                    for i in start_char..end_char {
+                        new_text.push(full_text_chars[i]);
+                        new_styles.push(char_styles.get(i).cloned().unwrap_or(CharStyle {
+                            fg: None,
+                            bg: None,
+                            bold: false,
+                            span_type: SpanType::Normal,
+                        }));
+                        new_links.push(char_links.get(i).cloned().unwrap_or(None));
                     }
                 }
 
-                // Debug: show final char_styles after highlight+restore
-                for (i, cs) in char_styles.iter().enumerate().take(10) {
-                    tracing::debug!(
-                        "char_styles[{}]: fg={:?}, bg={:?}, span_type={:?}",
-                        i,
-                        cs.fg,
-                        cs.bg,
-                        cs.span_type
-                    );
-                }
+                let new_end = new_styles.len();
+                new_match_ranges.push((
+                    new_start,
+                    new_end,
+                    MatchInfo {
+                        start_byte: m.start_byte,
+                        end_byte: m.end_byte,
+                        fg: m.fg,
+                        bg: m.bg,
+                        bold: m.bold,
+                        color_entire_line: m.color_entire_line,
+                        replace: m.replace,
+                    },
+                ));
 
-                // Only apply first whole-line match
-                break;
-            } else {
-                // Partial line: existing → links → monsterbold → highlights (highest priority)
-                for i in start..end.min(char_styles.len()) {
-                    // Custom highlights override everything for partial matches
-                    if let Some(color) = fg {
-                        char_styles[i].fg = Some(color);
+                last_char_idx = end_char;
+            }
+
+            // Tail
+            for i in last_char_idx..full_text_chars.len() {
+                new_text.push(full_text_chars[i]);
+                new_styles.push(char_styles.get(i).cloned().unwrap_or(CharStyle {
+                    fg: None,
+                    bg: None,
+                    bold: false,
+                    span_type: SpanType::Normal,
+                }));
+                new_links.push(char_links.get(i).cloned().unwrap_or(None));
+            }
+
+            // Apply highlight styling on rewritten text
+            for (start, end, info) in &new_match_ranges {
+                if info.color_entire_line {
+                    for cs in new_styles.iter_mut() {
+                        if cs.span_type == SpanType::Link || cs.span_type == SpanType::Monsterbold {
+                            if let Some(color) = info.bg {
+                                cs.bg = Some(color);
+                            }
+                        } else {
+                            if let Some(color) = info.fg {
+                                cs.fg = Some(color);
+                            }
+                            if let Some(color) = info.bg {
+                                cs.bg = Some(color);
+                            }
+                            if info.bold {
+                                cs.bold = true;
+                            }
+                        }
                     }
-                    if let Some(color) = bg {
-                        char_styles[i].bg = Some(color);
-                    }
-                    if bold {
-                        char_styles[i].bold = true;
+                    break; // only first whole-line match applies
+                } else {
+                    for idx in *start..(*end).min(new_styles.len()) {
+                        if let Some(color) = info.fg {
+                            new_styles[idx].fg = Some(color);
+                        }
+                        if let Some(color) = info.bg {
+                            new_styles[idx].bg = Some(color);
+                        }
+                        if info.bold {
+                            new_styles[idx].bold = true;
+                        }
                     }
                 }
             }
+
+            char_styles = new_styles;
+            char_links = new_links;
+            full_text = new_text;
         }
 
         // STEP 5: Reconstruct spans from char_styles with proper splitting
-        // Track link data per character to reconstruct precise link spans
-        let mut char_links: Vec<Option<LinkData>> = Vec::new();
-        for (content, _style, _span_type, link) in &self.current_line_spans {
-            for _ in content.chars() {
-                char_links.push(link.clone());
-            }
-        }
-
         let mut new_spans: Vec<(String, Style, SpanType, Option<LinkData>)> = Vec::new();
         let full_text_chars: Vec<char> = full_text.chars().collect();
 
@@ -1576,26 +1632,34 @@ impl TextWindow {
             }
         }
 
-        // Update width for wrapping - only subtract for borders if they're shown
-        let border_padding = if self.show_border { 2 } else { 0 };
-        let inner_width = area.width.saturating_sub(border_padding);
-        self.set_width(inner_width);
+        // Pre-compute border geometry so we can rewrap to the actual inner width
+        let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
+        let border_type = match self.border_style.as_deref() {
+            Some("double") => BorderType::Double,
+            Some("rounded") => BorderType::Rounded,
+            Some("thick") => BorderType::Thick,
+            Some("quadrant_inside") => BorderType::QuadrantInside,
+            Some("quadrant_outside") => BorderType::QuadrantOutside,
+            _ => BorderType::Plain,
+        };
+        let inner_area = if self.show_border {
+            Block::default()
+                .borders(borders)
+                .border_type(border_type)
+                .inner(area)
+        } else {
+            area
+        };
 
-        // Re-wrap all lines if width changed
+        // Update width based on inner area and re-wrap if needed
+        self.set_width(inner_area.width);
         if self.needs_rewrap {
             self.rewrap_all();
         }
 
-        // Build visible lines for display
-        // Buffer storage: wrapped_lines[0] = oldest, wrapped_lines[end] = newest
-        // Display: oldest at top, newest at bottom (standard chat/log view)
-        // scroll_offset = how many lines back from the end we're viewing
-        // scroll_offset=0 means viewing the bottom (live, newest lines)
-        // scroll_offset>0 means scrolled back to view older lines
-
-        let visible_height = area.height.saturating_sub(border_padding) as usize;
-        self.last_visible_height = visible_height; // Save for scroll calculations
         let total_lines = self.wrapped_lines.len();
+        let visible_height = inner_area.height as usize;
+        self.last_visible_height = visible_height; // Save for scroll calculations
 
         let title = if let Some(pos) = self.scroll_position {
             let lines_from_end = total_lines.saturating_sub(pos);
@@ -1605,26 +1669,6 @@ impl TextWindow {
         } else {
             self.title.clone()
         };
-
-        // Configure block (border style/color) before rendering any content so empty windows update
-        let mut block = if self.show_border {
-            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
-            Block::default().title(title.as_str()).borders(borders)
-        } else {
-            Block::default()
-        };
-
-        if let Some(ref style_name) = self.border_style {
-            let border_type = match style_name.as_str() {
-                "double" => BorderType::Double,
-                "rounded" => BorderType::Rounded,
-                "thick" => BorderType::Thick,
-                "quadrant_inside" => BorderType::QuadrantInside,
-                "quadrant_outside" => BorderType::QuadrantOutside,
-                _ => BorderType::Plain,
-            };
-            block = block.border_type(border_type);
-        }
 
         let mut border_style = Style::default();
         if let Some(ref color_hex) = self.border_color {
@@ -1639,13 +1683,20 @@ impl TextWindow {
                 .add_modifier(Modifier::BOLD);
         }
 
-        if self.show_border {
-            block = block.border_style(border_style);
-        }
+        // Draw border/title for the current window state
+        let inner_area = title_position::render_block_with_title(
+            area,
+            buf,
+            self.show_border,
+            borders,
+            &self.border_sides,
+            border_type,
+            border_style,
+            &title,
+            self.title_position,
+        );
 
         if total_lines == 0 {
-            let paragraph = Paragraph::new(vec![]).block(block);
-            paragraph.render(area, buf);
             return;
         }
 
@@ -1710,12 +1761,6 @@ impl TextWindow {
         // Once content fills the window, behave normally (top-aligned scrolling)
         let row_offset = if let Some(ref align_str) = self.content_align {
             let content_height = display_lines.len() as u16;
-            let inner_area = if self.show_border {
-                block.inner(area)
-            } else {
-                area
-            };
-
             // Only apply alignment if content is shorter than window
             if content_height < inner_area.height {
                 let align = crate::config::ContentAlign::from_str(align_str);
@@ -1741,14 +1786,9 @@ impl TextWindow {
             padded_lines.splice(0..0, empty_lines);
         }
 
-        // Attach block to paragraph (like VellumFE) so ratatui handles borders correctly
-        // This prevents span backgrounds from bleeding into border cells during scrolling
-        let paragraph = if self.show_border {
-            Paragraph::new(padded_lines).block(block)
-        } else {
-            Paragraph::new(padded_lines)
-        };
-        paragraph.render(area, buf);
+        // Render content inside the inner area (border already drawn above)
+        let paragraph = Paragraph::new(padded_lines);
+        paragraph.render(inner_area, buf);
     }
 
     fn fallback_text_color(&self) -> Color {

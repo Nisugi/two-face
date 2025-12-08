@@ -41,6 +41,7 @@ pub mod spell_color_browser;
 pub mod spell_color_form;
 mod spells_window;
 mod tabbed_text_window;
+mod title_position;
 mod targets;
 mod text_window;
 mod runtime;
@@ -178,6 +179,20 @@ impl TuiFrontend {
             }
         }
         false
+    }
+
+    /// Propagate the active tab index from tabbed widgets back into ui_state so sync doesn't reset it.
+    pub fn sync_tabbed_active_state(&mut self, app_core: &mut crate::core::AppCore) {
+        for (name, widget) in &self.widget_manager.tabbed_text_windows {
+            if let Some(window_state) = app_core.ui_state.get_window_mut(name) {
+                if let crate::data::WindowContent::TabbedText(tabbed) = &mut window_state.content {
+                    let active = widget.get_active_tab_index();
+                    if active < tabbed.tabs.len() {
+                        tabbed.active_tab_index = active;
+                    }
+                }
+            }
+        }
     }
 
     /// Scroll a window by a number of lines across supported widget types

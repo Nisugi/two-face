@@ -68,9 +68,13 @@ pub enum WindowContent {
     ActiveEffects(ActiveEffectsContent), // Active effects (buffs, debuffs, cooldowns, active spells)
     Targets {
         targets_text: String, // Raw text from game (XML formatted)
+        count: Option<String>, // Raw count string from targetcount stream (e.g., "[03]")
+        entity_id: String, // Stream id for counts (defaults to targetcount)
     },
     Players {
         players_text: String, // Raw text from game (XML formatted)
+        count: Option<String>, // Raw count string from playercount stream
+        entity_id: String, // Stream id for counts (defaults to playercount)
     },
     Dashboard {
         indicators: Vec<(String, u8)>, // (id, value) pairs
@@ -410,9 +414,11 @@ mod tests {
     fn test_window_content_targets() {
         let content = WindowContent::Targets {
             targets_text: "<target>Orc</target>".to_string(),
+            count: None,
+            entity_id: "targetcount".to_string(),
         };
         match content {
-            WindowContent::Targets { targets_text } => {
+            WindowContent::Targets { targets_text, .. } => {
                 assert!(targets_text.contains("Orc"));
             }
             _ => panic!("Expected Targets content"),
@@ -423,9 +429,11 @@ mod tests {
     fn test_window_content_players() {
         let content = WindowContent::Players {
             players_text: "<player>Warrior</player>".to_string(),
+            count: None,
+            entity_id: "playercount".to_string(),
         };
         match content {
-            WindowContent::Players { players_text } => {
+            WindowContent::Players { players_text, .. } => {
                 assert!(players_text.contains("Warrior"));
             }
             _ => panic!("Expected Players content"),

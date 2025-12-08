@@ -12,18 +12,20 @@ impl TuiFrontend {
         text_window.mouse_to_text_coords(mouse_col, mouse_row, window_rect)
     }
 
-    /// Handle a tab click for a tabbed text window; returns true if a tab was activated.
+    /// Handle a tab click for a tabbed text window; returns Some(new_index) if a tab was activated.
     pub fn handle_tabbed_click(
         &mut self,
         window_name: &str,
         window_rect: ratatui::layout::Rect,
         mouse_col: u16,
         mouse_row: u16,
-    ) -> bool {
+    ) -> Option<usize> {
         if let Some(tabbed_window) = self.widget_manager.tabbed_text_windows.get_mut(window_name) {
-            return tabbed_window.handle_mouse_click(window_rect, mouse_col, mouse_row);
+            if tabbed_window.handle_mouse_click(window_rect, mouse_col, mouse_row) {
+                return Some(tabbed_window.get_active_tab_index());
+            }
         }
-        false
+        None
     }
 
     /// Extract selected text from a text window

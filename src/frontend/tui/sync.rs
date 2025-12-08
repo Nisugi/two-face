@@ -1,6 +1,7 @@
 use super::*;
 use super::performance_stats;
 use super::colors::{blend_colors_hex, color_to_hex_string, normalize_color, parse_hex_color};
+use std::char;
 
 impl TuiFrontend {
     pub(crate) fn sync_text_windows(
@@ -29,6 +30,9 @@ impl TuiFrontend {
                         tw.set_background_color(colors.background.clone());
                         tw.set_text_color(colors.text.clone());
                         tw.set_content_align(def.base().content_align.clone());
+                        tw.set_title_position(super::title_position::TitlePosition::from_str(
+                            &def.base().title_position,
+                        ));
                         if let crate::config::WindowDef::Text { data, .. } = def {
                             tw.set_show_timestamps(data.show_timestamps);
                         } else {
@@ -58,12 +62,40 @@ impl TuiFrontend {
                     text_window.set_background_color(colors.background.clone());
                     text_window.set_text_color(colors.text.clone());
                     text_window.set_content_align(def.base().content_align.clone());
+                    let title_text = if def.base().show_title {
+                        def.base().title.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    text_window.set_title(title_text);
+                    text_window.set_title_position(super::title_position::TitlePosition::from_str(
+                        &def.base().title_position,
+                    ));
                     if let crate::config::WindowDef::Text { data, .. } = def {
                         text_window.set_show_timestamps(data.show_timestamps);
                     } else {
                         text_window.set_show_timestamps(app_core.config.ui.show_timestamps);
-                    }
-                }
+    }
+}
+
+fn decode_icon(icon_str: &str) -> Option<String> {
+    let trimmed = icon_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let hex = trimmed.trim_start_matches("0x").trim_start_matches("\\u{").trim_end_matches('}');
+    if hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(codepoint) = u32::from_str_radix(hex, 16) {
+            if let Some(ch) = char::from_u32(codepoint) {
+                return Some(ch.to_string());
+            }
+        }
+    }
+
+    // Fallback: use the first character as-is
+    trimmed.chars().next().map(|c| c.to_string())
+}
 
                 // Update width for proper wrapping
                 text_window.set_width(window.position.width);
@@ -166,6 +198,11 @@ impl TuiFrontend {
                         room_window.set_component_visible("room exits", data.show_exits);
                     }
 
+                    // Apply roomName preset colors to the title/room name if available
+                    if let Some(preset) = app_core.config.colors.presets.get("roomName") {
+                        room_window.set_title_colors(preset.fg.clone(), preset.bg.clone());
+                    }
+
                     self.widget_manager.room_windows.insert(name.clone(), room_window);
                     tracing::debug!("Created RoomWindow widget for '{}' during sync", name);
                 }
@@ -210,18 +247,13 @@ impl TuiFrontend {
             let cmd_input = self.widget_manager.command_inputs.entry(name.clone()).or_insert_with(|| {
                 let mut widget = command_input::CommandInput::new(1000);
                 if let Some(base) = base_config.as_ref() {
-                    let title = base
-                        .title
-                        .clone()
-                        .or_else(|| {
-                            if base.name.is_empty() {
-                                None
-                            } else {
-                                Some(base.name.clone())
-                            }
-                        })
-                        .unwrap_or_else(|| "Command".to_string());
-                    widget.set_title(title);
+                    let title_text = if base.show_title {
+                        base.title.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    widget.set_title(title_text);
+                    widget.set_show_title(base.show_title);
                 } else {
                     widget.set_title("Command".to_string());
                 }
@@ -229,18 +261,16 @@ impl TuiFrontend {
             });
 
             if let Some(base) = base_config.as_ref() {
-                let title = base
-                    .title
-                    .clone()
-                    .or_else(|| {
-                        if base.name.is_empty() {
-                            None
-                        } else {
-                            Some(base.name.clone())
-                        }
-                    })
-                    .unwrap_or_else(|| "Command".to_string());
-                cmd_input.set_title(title);
+                let title_text = if base.show_title {
+                    base.title.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                cmd_input.set_title(title_text);
+                cmd_input.set_title_position(super::title_position::TitlePosition::from_str(
+                    &base.title_position,
+                ));
+                cmd_input.set_show_title(base.show_title);
                 let border_color = normalize_color(&base.border_color)
                     .or_else(|| color_to_hex_string(&theme.window_border));
                 cmd_input.set_border_config(
@@ -272,6 +302,17 @@ impl TuiFrontend {
                     .and_then(|d| normalize_color(&d.cursor_background_color))
                     .or_else(|| color_to_hex_string(&theme.text_primary));
                 cmd_input.set_cursor_colors(cursor_fg, cursor_bg);
+                let prompt_icon = cmd_data
+                    .as_ref()
+                    .and_then(|d| d.prompt_icon.clone())
+                    .filter(|s| !s.trim().is_empty());
+                cmd_input.set_prompt_icon(prompt_icon);
+                let prompt_icon_color = cmd_data
+                    .as_ref()
+                    .and_then(|d| normalize_color(&d.prompt_icon_color))
+                    .or_else(|| normalize_color(&base.text_color))
+                    .or_else(|| color_to_hex_string(&theme.text_primary));
+                cmd_input.set_prompt_icon_color(prompt_icon_color);
             }
         }
     }
@@ -317,6 +358,15 @@ impl TuiFrontend {
                         inv_window.set_transparent_background(def.base().transparent_background);
                         inv_window.set_background_color(colors.background.clone());
                         inv_window.set_text_color(colors.text.clone());
+                        let title_text = if def.base().show_title {
+                            def.base()
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| text_content.title.clone())
+                        } else {
+                            String::new()
+                        };
+                        inv_window.set_title(title_text);
                     }
 
                     // Change detection: only sync if content changed (using generation)
@@ -377,7 +427,6 @@ impl TuiFrontend {
 
                 // Update configuration and content from WindowDef if present
                 if let Some(spells_window) = self.widget_manager.spells_windows.get_mut(name) {
-                    spells_window.set_title(text_content.title.clone());
                     if let Some(def) = window_def {
                         let colors = resolve_window_colors(def.base(), theme);
                         spells_window.set_border_config(
@@ -388,6 +437,17 @@ impl TuiFrontend {
                         spells_window.set_transparent_background(def.base().transparent_background);
                         spells_window.set_background_color(colors.background.clone());
                         spells_window.set_text_color(colors.text.clone());
+                        let title_text = if def.base().show_title {
+                            def.base()
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| text_content.title.clone())
+                        } else {
+                            String::new()
+                        };
+                        spells_window.set_title(title_text);
+                    } else {
+                        spells_window.set_title(text_content.title.clone());
                     }
 
                     // Change detection: only sync if content changed (using generation)
@@ -447,8 +507,15 @@ impl TuiFrontend {
                 // Get or create ProgressBar for this window
                 if !self.widget_manager.progress_bars.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref()).cloned()
-                        .unwrap_or_else(|| progress_data.label.clone());
+                        .and_then(|def| {
+                            if def.base().show_title {
+                                def.base().title.as_ref()
+                            } else {
+                                None
+                            }
+                        })
+                        .cloned()
+                        .unwrap_or_default();
 
                     let bar = progress_bar::ProgressBar::new(&label);
                     self.widget_manager.progress_bars.insert(name.clone(), bar);
@@ -466,8 +533,7 @@ impl TuiFrontend {
                             Some(custom_text.clone()),
                         );
                     } else {
-                        progress_bar
-                            .set_value(progress_data.value, progress_data.max);
+                        progress_bar.set_value(progress_data.value, progress_data.max);
                     }
 
                     // Apply window config from WindowDef
@@ -477,6 +543,41 @@ impl TuiFrontend {
                             def.base().show_border,
                             Some(def.base().border_style.clone()),
                             colors.border.clone(),
+                        );
+
+                        // Update title visibility
+                        if def.base().show_title {
+                            progress_bar.set_title(def.base().title.clone().unwrap_or_default());
+                        } else {
+                            progress_bar.set_title(String::new());
+                        }
+
+                        // Compute display text based on config and incoming text
+                        let display_text = if let crate::config::WindowDef::Progress { data, .. } = def {
+                            let (label, current_val, max_val) = Self::parse_progress_display_parts(
+                                &progress_data.label,
+                                progress_data.value,
+                                progress_data.max,
+                            );
+
+                            if data.current_only {
+                                format!("{}", current_val)
+                            } else if data.numbers_only {
+                                format!("{}/{}", current_val, max_val)
+                            } else if !progress_data.label.trim().is_empty() {
+                                progress_data.label.clone()
+                            } else if let Some(lbl) = label {
+                                format!("{} {}/{}", lbl, current_val, max_val)
+                            } else {
+                                format!("{}/{}", current_val, max_val)
+                            }
+                        } else {
+                            format!("{}/{}", progress_data.value, progress_data.max)
+                        };
+                        progress_bar.set_value_with_text(
+                            progress_data.value,
+                            progress_data.max,
+                            Some(display_text),
                         );
 
                         // Get bar color from ProgressWidgetData, or fallback to VellumFE defaults
@@ -506,9 +607,13 @@ impl TuiFrontend {
                         // Apply text color
                         progress_bar.set_text_color(colors.text.clone());
 
-                        // Apply transparent background setting
+                        // Apply transparent/background handling
+                        let bg = colors
+                            .background
+                            .clone()
+                            .or_else(|| color_to_hex_string(&theme.window_background));
                         progress_bar.set_transparent_background(def.base().transparent_background);
-                        progress_bar.set_background_color(colors.background.clone());
+                        progress_bar.set_background_color(bg);
                     }
                 }
             }
@@ -526,8 +631,15 @@ impl TuiFrontend {
                 // Get or create Countdown for this window
                 if !self.widget_manager.countdowns.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref()).cloned()
-                        .unwrap_or_else(|| name.clone());
+                        .and_then(|def| {
+                            if def.base().show_title {
+                                def.base().title.as_ref()
+                            } else {
+                                None
+                            }
+                        })
+                        .cloned()
+                        .unwrap_or_default();
 
                     let countdown = countdown::Countdown::new(&label);
                     self.widget_manager.countdowns.insert(name.clone(), countdown);
@@ -547,15 +659,30 @@ impl TuiFrontend {
                             Some(def.base().border_style.clone()),
                             colors.border.clone(),
                         );
+                        let title_text = if def.base().show_title {
+                            def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        countdown_widget.set_title(title_text);
 
                         // Get icon from CountdownWidgetData
                         if let crate::config::WindowDef::Countdown { data, .. } = def {
                             if let Some(icon) = data.icon {
                                 countdown_widget.set_icon(icon);
                             }
+                            let text_color = data.color.clone().or_else(|| colors.text.clone());
+                            countdown_widget.set_text_color(text_color);
+                            let bg_color = data
+                                .background_color
+                                .clone()
+                                .or_else(|| def.base().background_color.clone())
+                                .or_else(|| color_to_hex_string(&theme.window_background));
+                            countdown_widget.set_background_color(bg_color);
+                        } else {
+                            countdown_widget.set_text_color(colors.text.clone());
                         }
 
-                        countdown_widget.set_text_color(colors.text.clone());
                         countdown_widget
                             .set_transparent_background(def.base().transparent_background);
                     }
@@ -579,8 +706,15 @@ impl TuiFrontend {
                 // Get or create ActiveEffects for this window
                 if !self.widget_manager.active_effects_windows.contains_key(name) {
                     let label = window_def
-                        .and_then(|def| def.base().title.as_ref()).cloned()
-                        .unwrap_or_else(|| name.clone());
+                        .and_then(|def| {
+                            if def.base().show_title {
+                                def.base().title.as_ref()
+                            } else {
+                                None
+                            }
+                        })
+                        .cloned()
+                        .unwrap_or_default();
 
                     let widget = active_effects::ActiveEffects::new(
                         &label,
@@ -620,6 +754,12 @@ impl TuiFrontend {
                             colors.border.clone(),
                         );
                         widget.set_border_sides(def.base().border_sides.clone());
+                        let title_text = if def.base().show_title {
+                            def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        widget.set_title(title_text);
                         widget.set_transparent_background(def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
                         widget.set_text_color(colors.text.clone());
@@ -677,8 +817,8 @@ impl TuiFrontend {
 
                 // Update indicator widget content and configuration
                 if let Some(indicator_widget) = self.widget_manager.indicator_widgets.get_mut(name) {
-                    // Set status (which determines if it's active/shown)
-                    indicator_widget.set_status(&indicator_data.status);
+                    // Set active state based on indicator data
+                    indicator_widget.set_active(indicator_data.active);
 
                     // Apply window configuration from layout
                     if let Some(window_def) =
@@ -691,13 +831,28 @@ impl TuiFrontend {
                             colors.border.clone(),
                         );
                         indicator_widget.set_border_sides(window_def.base().border_sides.clone());
-                        indicator_widget.set_title(
-                            window_def
-                                .base()
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| name.clone()),
-                        );
+                        let title_text = if let crate::config::WindowDef::Indicator { data, .. } = window_def
+                        {
+                            // Prefer icon from data if provided; fall back to title or empty
+                            if let Some(ref icon_str) = data.icon {
+                                decode_icon(icon_str).unwrap_or_else(|| {
+                                    if window_def.base().show_title {
+                                        window_def.base().title.clone().unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                })
+                            } else if window_def.base().show_title {
+                                window_def.base().title.clone().unwrap_or_default()
+                            } else {
+                                String::new()
+                            }
+                        } else if window_def.base().show_title {
+                            window_def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        indicator_widget.set_title(title_text);
                         indicator_widget.set_background_color(colors.background.clone());
                         indicator_widget
                             .set_transparent_background(window_def.base().transparent_background);
@@ -719,7 +874,9 @@ impl TuiFrontend {
         theme: &crate::theme::AppTheme,
     ) {
         for (name, window) in &app_core.ui_state.windows {
-            if let crate::data::WindowContent::Targets { targets_text } = &window.content {
+            if let crate::data::WindowContent::Targets { targets_text, count, .. } =
+                &window.content
+            {
                 // Ensure widget exists
                 if !self.widget_manager.targets_widgets.contains_key(name) {
                     let widget = targets::Targets::new(name);
@@ -741,9 +898,21 @@ impl TuiFrontend {
                             colors.border.clone(),
                         );
                         widget.set_border_sides(window_def.base().border_sides.clone());
+                        widget.set_background_color(colors.background.clone());
+                        widget.set_text_color(colors.text.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         if let Some(ref color) = colors.text {
                             widget.set_bar_color(color.clone());
+                        }
+                        let base_title = window_def
+                            .base()
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| name.clone());
+                        if window_def.base().show_title {
+                            widget.set_title_with_count(&base_title, count.as_deref());
+                        } else {
+                            widget.set_title_with_count("", None);
                         }
                     }
                 }
@@ -758,7 +927,9 @@ impl TuiFrontend {
         theme: &crate::theme::AppTheme,
     ) {
         for (name, window) in &app_core.ui_state.windows {
-            if let crate::data::WindowContent::Players { players_text } = &window.content {
+            if let crate::data::WindowContent::Players { players_text, count, .. } =
+                &window.content
+            {
                 // Ensure widget exists
                 if !self.widget_manager.players_widgets.contains_key(name) {
                     let widget = players::Players::new(name);
@@ -780,9 +951,21 @@ impl TuiFrontend {
                             colors.border.clone(),
                         );
                         widget.set_border_sides(window_def.base().border_sides.clone());
+                        widget.set_background_color(colors.background.clone());
+                        widget.set_text_color(colors.text.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         if let Some(ref color) = colors.text {
                             widget.set_bar_color(color.clone());
+                        }
+                        let base_title = window_def
+                            .base()
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| name.clone());
+                        if window_def.base().show_title {
+                            widget.set_title_with_count(&base_title, count.as_deref());
+                        } else {
+                            widget.set_title_with_count("", None);
                         }
                     }
                 }
@@ -808,10 +991,7 @@ impl TuiFrontend {
 
                 // Update widget
                 if let Some(widget) = self.widget_manager.dashboard_widgets.get_mut(name) {
-                    // Update indicator values
-                    for (id, value) in indicators {
-                        widget.set_indicator_value(id, *value);
-                    }
+                    let indicator_values = indicators.clone();
 
                     // Apply configuration
                     if let Some(window_def) =
@@ -843,6 +1023,11 @@ impl TuiFrontend {
                             }
                         }
                     }
+
+                    // Apply values after indicators are configured
+                    for (id, value) in indicator_values {
+                        widget.set_indicator_value(&id, value);
+                    }
                 }
             }
         }
@@ -860,7 +1045,7 @@ impl TuiFrontend {
 
                 // Ensure widget exists - create if needed
                 if !self.widget_manager.tabbed_text_windows.contains_key(name) {
-                    let tabs: Vec<(String, Vec<String>, bool)> = tabbed_content
+                    let tabs: Vec<(String, Vec<String>, bool, bool)> = tabbed_content
                         .tabs
                         .iter()
                         .map(|t| {
@@ -868,6 +1053,7 @@ impl TuiFrontend {
                                 t.definition.name.clone(),
                                 t.definition.streams.clone(),
                                 t.definition.show_timestamps,
+                                t.definition.ignore_activity,
                             )
                         })
                         .collect();
@@ -899,12 +1085,19 @@ impl TuiFrontend {
                         widget.set_background_color(colors.background.clone());
                         widget.set_content_align(def.base().content_align.clone());
                         widget.apply_window_colors(colors.text.clone(), colors.background.clone());
+                        let title_text = if def.base().show_title {
+                            def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        widget.set_title(title_text);
 
                         if let crate::config::WindowDef::TabbedText { data, .. } = def {
                             let tab_position = tabbed_text_window::TabBarPosition::from_str(
                                 &data.tab_bar_position,
                             );
                             widget.set_tab_bar_position(tab_position);
+                            widget.set_tab_separator(data.tab_separator);
                             widget.set_tab_colors(
                                 data.tab_active_color.clone(),
                                 data.tab_inactive_color.clone(),
@@ -914,6 +1107,10 @@ impl TuiFrontend {
                                 widget.set_unread_prefix(prefix);
                             }
                         }
+
+                        widget.set_title_position(super::title_position::TitlePosition::from_str(
+                            &def.base().title_position,
+                        ));
                     }
 
                     // Set active tab
@@ -921,6 +1118,7 @@ impl TuiFrontend {
 
                     // Sync content for each tab
                     for (i, tab_state) in tabbed_content.tabs.iter().enumerate() {
+                        let ignore_activity = tab_state.definition.ignore_activity;
                         if let Some(text_window) = widget.get_tab_window_mut(i) {
                             text_window
                                 .set_show_timestamps(tab_state.definition.show_timestamps);
@@ -987,11 +1185,17 @@ impl TuiFrontend {
                                     }
                                     text_window.finish_line(window.position.width);
                                 }
+                                // Apply ignore flag before unread handling so unread is skipped when ignored
+                                widget.set_tab_ignore_activity(i, ignore_activity);
+
                                 self.widget_manager
                                     .last_synced_generation
                                     .insert(tab_sync_key, current_gen);
 
-                                if i != tabbed_content.active_tab_index && lines_added > 0 {
+                                if i != tabbed_content.active_tab_index
+                                    && lines_added > 0
+                                    && !ignore_activity
+                                {
                                     widget.mark_tab_unread(i, lines_added);
                                 }
                             }
@@ -1034,13 +1238,12 @@ impl TuiFrontend {
                         widget.set_transparent_background(window_def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
                         widget.set_content_align(window_def.base().content_align.clone());
-                        widget.set_title(
-                            window_def
-                                .base()
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| name.clone()),
-                        );
+                        let title_text = if window_def.base().show_title {
+                            window_def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        widget.set_title(title_text);
 
                         // Apply compass-specific colors if configured
                         if let crate::config::WindowDef::Compass { data, .. } = window_def {
@@ -1099,13 +1302,12 @@ impl TuiFrontend {
                         widget.set_border_sides(window_def.base().border_sides.clone());
                         widget.set_transparent_background(window_def.base().transparent_background);
                         widget.set_background_color(colors.background.clone());
-                        widget.set_title(
-                            window_def
-                                .base()
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| name.clone()),
-                        );
+                        let title_text = if window_def.base().show_title {
+                            window_def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        widget.set_title(title_text);
 
                         // Apply injury doll color configuration if specified
                         if let crate::config::WindowDef::InjuryDoll { data, .. } = window_def {
@@ -1166,17 +1368,17 @@ impl TuiFrontend {
                 .performance_widgets
                 .entry(name.clone())
                 .or_insert_with(|| {
-                    let mut w = performance_stats::PerformanceStatsWidget::new();
-                    w.set_title(name.clone());
+                    let w = performance_stats::PerformanceStatsWidget::new();
                     w
                 });
 
             if let Some(base) = base.as_ref() {
                 let colors = resolve_window_colors(base, theme);
-                let title = base
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| base.name.clone());
+                let title = if base.show_title {
+                    base.title.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 widget.set_title(title);
                 widget.set_border_config(
                     base.show_border,
@@ -1208,9 +1410,9 @@ impl TuiFrontend {
                 if !self.widget_manager.hand_widgets.contains_key(name) {
                     // Determine hand type based on window name
                     let hand_type = match name.as_str() {
-                        "left_hand" => hand::HandType::Left,
-                        "right_hand" => hand::HandType::Right,
-                        "spell_hand" => hand::HandType::Spell,
+                        "left" | "left_hand" => hand::HandType::Left,
+                        "right" | "right_hand" => hand::HandType::Right,
+                        "spell" | "spell_hand" => hand::HandType::Spell,
                         _ => hand::HandType::Left, // Default fallback
                     };
 
@@ -1235,25 +1437,54 @@ impl TuiFrontend {
                             colors.border.clone(),
                         );
                         hand_widget.set_border_sides(window_def.base().border_sides.clone());
-                        hand_widget.set_title(
-                            window_def
-                                .base()
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| name.clone()),
-                        );
-                        hand_widget.set_text_color(colors.text.clone());
-                        hand_widget.set_content_highlight_color(None);
+                        let title_text = if window_def.base().show_title {
+                            window_def.base().title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        hand_widget.set_title(title_text);
+
+                        // Apply hand-specific icon/text colors
+                        let (data_icon, data_icon_color, data_text_color) =
+                            if let crate::config::WindowDef::Hand { data, .. } = window_def {
+                                (
+                                    data.icon.clone(),
+                                    data.icon_color.clone(),
+                                    data.text_color.clone(),
+                                )
+                            } else {
+                                (None, None, None)
+                            };
+                        if let Some(icon) = data_icon {
+                            hand_widget.set_icon(icon);
+                        }
+
+                        let resolved_text_color =
+                            data_text_color.clone().or_else(|| colors.text.clone());
+                        hand_widget.set_text_color(resolved_text_color.clone());
+
+                        let icon_color =
+                            data_icon_color.clone().or_else(|| resolved_text_color.clone());
+                        hand_widget.set_icon_color(icon_color);
+
+                        // Always keep link data for click/drag
                         if let Some(link_ref) = link {
                             hand_widget.set_link_data(Some(link_ref.clone()));
-                            if let Some(preset) = app_core.config.colors.presets.get("links") {
-                                if let Some(link_fg) = preset.fg.clone() {
-                                    hand_widget.set_content_highlight_color(Some(link_fg));
-                                }
-                            }
                         } else {
                             hand_widget.set_link_data(None);
                         }
+
+                        // Link/text interaction: if user set a text color, use it for content; otherwise keep link color
+                        let mut content_highlight = None;
+                        if data_text_color.is_some() {
+                            content_highlight = resolved_text_color.clone();
+                        } else if link.is_some() {
+                            if let Some(preset) = app_core.config.colors.presets.get("links") {
+                                content_highlight = preset.fg.clone();
+                            }
+                        }
+                        hand_widget.set_content_highlight_color(content_highlight);
+
                         hand_widget.set_background_color(colors.background.clone());
                         hand_widget
                             .set_transparent_background(window_def.base().transparent_background);
@@ -1367,4 +1598,76 @@ impl TuiFrontend {
         }
     }
 
+    fn parse_progress_display_parts(text: &str, fallback_current: u32, fallback_max: u32) -> (Option<String>, u32, u32) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return (None, fallback_current, fallback_max);
+        }
+
+        // Slash form "label 324/326" or "324/326"
+        if let Some(slash_pos) = trimmed.rfind('/') {
+            let before_slash = &trimmed[..slash_pos];
+            let after_slash = &trimmed[slash_pos + 1..];
+
+            let current = Self::last_number(before_slash).unwrap_or(fallback_current);
+            let maximum = Self::first_number(after_slash).unwrap_or(fallback_max);
+
+            let label = before_slash
+                .find(|c: char| c.is_ascii_digit())
+                .map(|idx| before_slash[..idx].trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            return (label, current, maximum);
+        }
+
+        // Single number/percent form "label 100%" or "100%"
+        if let Some(idx) = trimmed.find(|c: char| c.is_ascii_digit()) {
+            let current = Self::first_number(&trimmed[idx..]).unwrap_or(fallback_current);
+            let label = trimmed[..idx].trim();
+            let label_opt = if label.is_empty() {
+                None
+            } else {
+                Some(label.to_string())
+            };
+            return (label_opt, current, fallback_max);
+        }
+
+        // Label-only
+        (Some(trimmed.to_string()), fallback_current, fallback_max)
+    }
+
+    fn first_number(input: &str) -> Option<u32> {
+        input
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '%')
+            .find_map(|token| token.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+    }
+
+    fn last_number(input: &str) -> Option<u32> {
+        input
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '%')
+            .rev()
+            .find_map(|token| token.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+    }
+
+}
+
+fn decode_icon(icon_str: &str) -> Option<String> {
+    let trimmed = icon_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let hex = trimmed
+        .trim_start_matches("0x")
+        .trim_start_matches("\\u{")
+        .trim_end_matches('}');
+    if hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(codepoint) = u32::from_str_radix(hex, 16) {
+            if let Some(ch) = char::from_u32(codepoint) {
+                return Some(ch.to_string());
+            }
+        }
+    }
+
+    trimmed.chars().next().map(|c| c.to_string())
 }

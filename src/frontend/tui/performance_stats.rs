@@ -52,7 +52,7 @@ impl PerformanceStatsWidget {
             border_color: None,
             border_sides: BorderSides::default(),
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
             text_color: None,
             show_fps: true,
             show_frame_times: true,
@@ -375,3 +375,4 @@ impl Default for PerformanceStatsWidget {
         Self::new()
     }
 }
+

@@ -25,6 +25,7 @@ pub struct HighlightEntry {
     pub is_squelched: bool,
     pub redirect_to: Option<String>,
     pub redirect_mode: Option<crate::config::RedirectMode>,
+    pub replace: Option<String>,
 }
 
 /// Popup list component used for browsing configured highlights.
@@ -60,6 +61,7 @@ impl HighlightBrowser {
                 } else {
                     None
                 },
+                replace: pattern.replace.clone(),
             })
             .collect();
 
@@ -426,19 +428,24 @@ impl HighlightBrowser {
                     .bg(crossterm_bridge::to_ratatui_color(theme.browser_background)) // Normal color otherwise
             };
 
-            let sound_indicator = if entry.has_sound { " ♫" } else { "" };
+                        let sound_indicator = if entry.has_sound { " " } else { "" };
             let squelch_indicator = if entry.is_squelched { " [SQUELCH]" } else { "" };
+            let replace_indicator = if let Some(ref repl) = entry.replace {
+                format!(" ->{}", repl)
+            } else {
+                String::new()
+            };
             let redirect_indicator = if let Some(ref stream) = entry.redirect_to {
                 let mode_str = match entry.redirect_mode {
-                    Some(crate::config::RedirectMode::RedirectOnly) => "→",
-                    Some(crate::config::RedirectMode::RedirectCopy) => "⇉",
-                    None => "→",
+                    Some(crate::config::RedirectMode::RedirectOnly) => "",
+                    Some(crate::config::RedirectMode::RedirectCopy) => "?",
+                    None => "",
                 };
                 format!(" {}{}", mode_str, stream)
             } else {
                 String::new()
             };
-            let name_with_indicators = format!("   {}{}{}{}", entry.name, sound_indicator, redirect_indicator, squelch_indicator);
+            let name_with_indicators = format!("   {}{}{}{}{}", entry.name, sound_indicator, replace_indicator, redirect_indicator, squelch_indicator);
             for (i, ch) in name_with_indicators.chars().enumerate() {
                 let col = x + 13 + i as u16;
                 if col < x + width - 1 {
@@ -570,6 +577,7 @@ impl HighlightBrowser {
                 } else {
                     None
                 },
+                replace: highlight.replace.clone(),
             });
         }
         // Sort by name

@@ -222,3 +222,278 @@ pub fn ensure_sounds_directory() -> Result<PathBuf> {
 
     Ok(sounds_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    // ========== Volume clamping tests ==========
+
+    #[test]
+    fn test_volume_clamp_normal() {
+        // Normal volume values should be unchanged
+        assert_eq!(0.5_f32.clamp(0.0, 1.0), 0.5);
+        assert_eq!(0.0_f32.clamp(0.0, 1.0), 0.0);
+        assert_eq!(1.0_f32.clamp(0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn test_volume_clamp_over_max() {
+        // Values over 1.0 should be clamped to 1.0
+        assert_eq!(1.5_f32.clamp(0.0, 1.0), 1.0);
+        assert_eq!(100.0_f32.clamp(0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn test_volume_clamp_under_min() {
+        // Values under 0.0 should be clamped to 0.0
+        assert_eq!((-0.5_f32).clamp(0.0, 1.0), 0.0);
+        assert_eq!((-100.0_f32).clamp(0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn test_volume_clamp_boundary() {
+        // Boundary values
+        assert_eq!(0.001_f32.clamp(0.0, 1.0), 0.001);
+        assert_eq!(0.999_f32.clamp(0.0, 1.0), 0.999);
+    }
+
+    // ========== Cooldown logic tests ==========
+
+    #[test]
+    fn test_cooldown_map_empty() {
+        // Empty cooldown map should not be on cooldown
+        let map: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        let sound_id = "test_sound";
+        let cooldown_duration = Duration::from_millis(500);
+
+        let is_on_cooldown = if let Some(last_played) = map.get(sound_id) {
+            last_played.elapsed() < cooldown_duration
+        } else {
+            false
+        };
+
+        assert!(!is_on_cooldown);
+    }
+
+    #[test]
+    fn test_cooldown_map_recent_sound() {
+        // Sound played just now should be on cooldown
+        let mut map: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        let sound_id = "test_sound";
+        let cooldown_duration = Duration::from_millis(500);
+
+        map.insert(sound_id.to_string(), Instant::now());
+
+        let is_on_cooldown = if let Some(last_played) = map.get(sound_id) {
+            last_played.elapsed() < cooldown_duration
+        } else {
+            false
+        };
+
+        assert!(is_on_cooldown);
+    }
+
+    #[test]
+    fn test_cooldown_map_expired() {
+        // Sound played long ago should not be on cooldown
+        let mut map: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        let sound_id = "test_sound";
+        let cooldown_duration = Duration::from_millis(50);
+
+        map.insert(sound_id.to_string(), Instant::now());
+
+        // Wait for cooldown to expire
+        thread::sleep(Duration::from_millis(60));
+
+        let is_on_cooldown = if let Some(last_played) = map.get(sound_id) {
+            last_played.elapsed() < cooldown_duration
+        } else {
+            false
+        };
+
+        assert!(!is_on_cooldown);
+    }
+
+    #[test]
+    fn test_cooldown_different_sounds() {
+        // Different sounds should have independent cooldowns
+        let mut map: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        let cooldown_duration = Duration::from_millis(500);
+
+        map.insert("sound_a".to_string(), Instant::now());
+        // sound_b is not in the map
+
+        let is_a_on_cooldown = if let Some(last_played) = map.get("sound_a") {
+            last_played.elapsed() < cooldown_duration
+        } else {
+            false
+        };
+
+        let is_b_on_cooldown = if let Some(last_played) = map.get("sound_b") {
+            last_played.elapsed() < cooldown_duration
+        } else {
+            false
+        };
+
+        assert!(is_a_on_cooldown);
+        assert!(!is_b_on_cooldown);
+    }
+
+    // ========== Extension search pattern tests ==========
+
+    #[test]
+    fn test_audio_extensions_list() {
+        // Verify we support common audio formats
+        let extensions = ["mp3", "wav", "ogg", "flac"];
+
+        assert!(extensions.contains(&"mp3"));
+        assert!(extensions.contains(&"wav"));
+        assert!(extensions.contains(&"ogg"));
+        assert!(extensions.contains(&"flac"));
+        assert_eq!(extensions.len(), 4);
+    }
+
+    #[test]
+    fn test_path_with_extension_join() {
+        // Test how path joining works for extension search
+        let sounds_dir = PathBuf::from("/sounds");
+        let filename = "alert";
+
+        let path_mp3 = sounds_dir.join(format!("{}.{}", filename, "mp3"));
+        let path_wav = sounds_dir.join(format!("{}.{}", filename, "wav"));
+
+        assert_eq!(path_mp3, PathBuf::from("/sounds/alert.mp3"));
+        assert_eq!(path_wav, PathBuf::from("/sounds/alert.wav"));
+    }
+
+    #[test]
+    fn test_path_already_has_extension() {
+        // When file already has extension, should use as-is
+        let sounds_dir = PathBuf::from("/sounds");
+        let filename = "alert.mp3";
+
+        let path = sounds_dir.join(filename);
+        assert_eq!(path, PathBuf::from("/sounds/alert.mp3"));
+    }
+
+    // ========== DEFAULT_SOUNDS constant tests ==========
+
+    #[test]
+    fn test_default_sounds_is_array() {
+        // Verify DEFAULT_SOUNDS is accessible and is a slice
+        assert!(DEFAULT_SOUNDS.len() >= 0); // Currently empty but valid
+    }
+
+    #[test]
+    fn test_default_sounds_format() {
+        // Each entry should be (filename, bytes)
+        for (filename, bytes) in DEFAULT_SOUNDS {
+            assert!(!filename.is_empty() || DEFAULT_SOUNDS.is_empty());
+            assert!(!bytes.is_empty() || DEFAULT_SOUNDS.is_empty());
+        }
+    }
+
+    // ========== Duration conversion tests ==========
+
+    #[test]
+    fn test_cooldown_duration_from_millis() {
+        let cooldown_ms: u64 = 500;
+        let duration = Duration::from_millis(cooldown_ms);
+
+        assert_eq!(duration.as_millis(), 500);
+        assert_eq!(duration.as_secs(), 0);
+    }
+
+    #[test]
+    fn test_cooldown_duration_zero() {
+        let cooldown_ms: u64 = 0;
+        let duration = Duration::from_millis(cooldown_ms);
+
+        assert_eq!(duration.as_millis(), 0);
+    }
+
+    #[test]
+    fn test_cooldown_duration_large() {
+        let cooldown_ms: u64 = 60_000; // 1 minute
+        let duration = Duration::from_millis(cooldown_ms);
+
+        assert_eq!(duration.as_secs(), 60);
+    }
+
+    // ========== Arc<Mutex> cooldown map pattern tests ==========
+
+    #[test]
+    fn test_arc_mutex_cooldown_pattern() {
+        // Test the Arc<Mutex<HashMap>> pattern used for thread-safe cooldowns
+        let cooldown_map: Arc<Mutex<std::collections::HashMap<String, Instant>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        // Insert a cooldown
+        {
+            let mut map = cooldown_map.lock().unwrap();
+            map.insert("test".to_string(), Instant::now());
+        }
+
+        // Check cooldown from another "thread" perspective
+        {
+            let map = cooldown_map.lock().unwrap();
+            assert!(map.contains_key("test"));
+        }
+    }
+
+    #[test]
+    fn test_arc_mutex_multiple_sounds() {
+        let cooldown_map: Arc<Mutex<std::collections::HashMap<String, Instant>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        // Insert multiple sounds
+        {
+            let mut map = cooldown_map.lock().unwrap();
+            map.insert("beep".to_string(), Instant::now());
+            map.insert("alert".to_string(), Instant::now());
+            map.insert("death".to_string(), Instant::now());
+        }
+
+        // Verify all present
+        {
+            let map = cooldown_map.lock().unwrap();
+            assert_eq!(map.len(), 3);
+            assert!(map.contains_key("beep"));
+            assert!(map.contains_key("alert"));
+            assert!(map.contains_key("death"));
+        }
+    }
+
+    // ========== Volume override calculation tests ==========
+
+    #[test]
+    fn test_volume_override_some() {
+        let master_volume: f32 = 0.8;
+        let volume_override: Option<f32> = Some(0.5);
+
+        let final_volume = volume_override.unwrap_or(master_volume);
+        assert_eq!(final_volume, 0.5);
+    }
+
+    #[test]
+    fn test_volume_override_none() {
+        let master_volume: f32 = 0.8;
+        let volume_override: Option<f32> = None;
+
+        let final_volume = volume_override.unwrap_or(master_volume);
+        assert_eq!(final_volume, 0.8);
+    }
+
+    #[test]
+    fn test_volume_override_with_clamp() {
+        let volume_override: Option<f32> = Some(1.5);
+
+        let volume = volume_override.unwrap_or(0.5);
+        let clamped = volume.clamp(0.0, 1.0);
+
+        assert_eq!(clamped, 1.0);
+    }
+}

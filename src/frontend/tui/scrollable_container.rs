@@ -61,7 +61,7 @@ impl ScrollableContainer {
             border_color: None,
             border_sides: crate::config::BorderSides::default(), // Default: all borders
             bar_color: "#808080".to_string(),
-            transparent_background: true,
+            transparent_background: false,
             text_color: None,
             background_color_hex: None,
             background_color: None,
@@ -396,3 +396,4 @@ impl ScrollableContainer {
         self.render(area, buf);
     }
 }
+

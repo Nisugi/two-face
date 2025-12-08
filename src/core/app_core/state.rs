@@ -421,14 +421,15 @@ impl AppCore {
                 WidgetType::TabbedText => {
                     // Extract tab definitions and buffer size from window def
                     if let crate::config::WindowDef::TabbedText { data, .. } = window_def {
-                        let tabs: Vec<(String, Vec<String>, bool)> = data
+                        let tabs: Vec<(String, Vec<String>, bool, bool)> = data
                             .tabs
                             .iter()
                             .map(|tab| {
                                 let show_ts = tab
                                     .show_timestamps
                                     .unwrap_or(self.config.ui.show_timestamps);
-                                (tab.name.clone(), tab.get_streams(), show_ts)
+                                let ignore = tab.ignore_activity.unwrap_or(false);
+                                (tab.name.clone(), tab.get_streams(), show_ts, ignore)
                             })
                             .collect();
                         WindowContent::TabbedText(crate::data::TabbedTextContent::new(
@@ -442,6 +443,7 @@ impl AppCore {
                                 "Default".to_string(),
                                 vec!["main".to_string()],
                                 self.config.ui.show_timestamps,
+                                false,
                             )],
                             1000,
                         ))
@@ -456,21 +458,65 @@ impl AppCore {
                 WidgetType::Progress => WindowContent::Progress(ProgressData {
                     value: 100,
                     max: 100,
-                    label: title.to_string(),
+                    label: if let crate::config::WindowDef::Progress { data, .. } = window_def {
+                        data.label.clone().unwrap_or_else(|| title.to_string())
+                    } else {
+                        title.to_string()
+                    },
                     color: None,
+                    progress_id: if let crate::config::WindowDef::Progress { data, .. } = window_def
+                    {
+                        data.id
+                            .clone()
+                            .unwrap_or_else(|| window_def.name().to_string())
+                    } else {
+                        window_def.name().to_string()
+                    },
                 }),
-                WidgetType::Countdown => WindowContent::Countdown(CountdownData {
-                    end_time: 0,
-                    label: title.to_string(),
-                }),
+                WidgetType::Countdown => {
+                    let (label, countdown_id) = if let crate::config::WindowDef::Countdown { data, .. } =
+                        window_def
+                    {
+                        (
+                            data.label
+                                .clone()
+                                .unwrap_or_else(|| title.to_string()),
+                            data.id
+                                .clone()
+                                .unwrap_or_else(|| window_def.name().to_string()),
+                        )
+                    } else {
+                        (title.to_string(), window_def.name().to_string())
+                    };
+
+                    WindowContent::Countdown(CountdownData {
+                        end_time: 0,
+                        label,
+                        countdown_id,
+                    })
+                }
                 WidgetType::Compass => WindowContent::Compass(CompassData {
                     directions: Vec::new(),
                 }),
                 WidgetType::InjuryDoll => WindowContent::InjuryDoll(InjuryDollData::new()),
-                WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
-                    status: String::from("standing"),
-                    color: None,
-                }),
+                WidgetType::Indicator => {
+                    let (indicator_id, active_color) =
+                        if let crate::config::WindowDef::Indicator { data, .. } = window_def {
+                            (
+                                data.indicator_id
+                                    .clone()
+                                    .unwrap_or_else(|| window_def.name().to_string()),
+                                data.active_color.clone(),
+                            )
+                        } else {
+                            (window_def.name().to_string(), None)
+                        };
+                    WindowContent::Indicator(IndicatorData {
+                        indicator_id,
+                        active: false,
+                        color: active_color,
+                    })
+                }
                 WidgetType::Performance => {
                     if let crate::config::WindowDef::Performance { data, .. } = window_def {
                         self.perf_stats.apply_enabled_from(data);
@@ -503,12 +549,34 @@ impl AppCore {
                         effects: Vec::new(),
                     })
                 }
-                WidgetType::Targets => WindowContent::Targets {
-                    targets_text: String::new(),
-                },
-                WidgetType::Players => WindowContent::Players {
-                    players_text: String::new(),
-                },
+                WidgetType::Targets => {
+                    let entity_id = if let crate::config::WindowDef::Targets { data, .. } =
+                        window_def
+                    {
+                        data.entity_id.clone()
+                    } else {
+                        crate::config::default_target_entity_id()
+                    };
+                    WindowContent::Targets {
+                        targets_text: String::new(),
+                        count: None,
+                        entity_id,
+                    }
+                }
+                WidgetType::Players => {
+                    let entity_id = if let crate::config::WindowDef::Players { data, .. } =
+                        window_def
+                    {
+                        data.entity_id.clone()
+                    } else {
+                        crate::config::default_player_entity_id()
+                    };
+                    WindowContent::Players {
+                        players_text: String::new(),
+                        count: None,
+                        entity_id,
+                    }
+                }
                 WidgetType::Dashboard => WindowContent::Dashboard {
                     indicators: Vec::new(),
                 },
@@ -592,7 +660,7 @@ impl AppCore {
             .base()
             .title
             .as_deref()
-            .unwrap_or(window_def.name());
+            .unwrap_or("");
 
         let content = match widget_type {
             WidgetType::Text => {
@@ -606,13 +674,14 @@ impl AppCore {
             WidgetType::TabbedText => {
                 // Extract tab definitions and buffer size from window def
                 if let crate::config::WindowDef::TabbedText { data, .. } = window_def {
-                    let tabs: Vec<(String, Vec<String>, bool)> = data
+                    let tabs: Vec<(String, Vec<String>, bool, bool)> = data
                         .tabs
                         .iter()
                         .map(|tab| {
                             let show_ts =
                                 tab.show_timestamps.unwrap_or(self.config.ui.show_timestamps);
-                            (tab.name.clone(), tab.get_streams(), show_ts)
+                            let ignore = tab.ignore_activity.unwrap_or(false);
+                            (tab.name.clone(), tab.get_streams(), show_ts, ignore)
                         })
                         .collect();
                     WindowContent::TabbedText(crate::data::TabbedTextContent::new(
@@ -626,6 +695,7 @@ impl AppCore {
                             "Default".to_string(),
                             vec!["main".to_string()],
                             self.config.ui.show_timestamps,
+                            false,
                         )],
                         5000,
                     ))
@@ -642,19 +712,53 @@ impl AppCore {
                 max: 100,
                 label: title.to_string(),
                 color: None,
+                progress_id: if let crate::config::WindowDef::Progress { data, .. } = window_def {
+                    data.id
+                        .clone()
+                        .unwrap_or_else(|| window_def.name().to_string())
+                } else {
+                    window_def.name().to_string()
+                },
             }),
             WidgetType::Countdown => WindowContent::Countdown(CountdownData {
                 end_time: 0,
-                label: title.to_string(),
+                label: if let crate::config::WindowDef::Countdown { data, .. } = window_def {
+                    data.label.clone().unwrap_or_else(|| title.to_string())
+                } else {
+                    title.to_string()
+                },
+                countdown_id: if let crate::config::WindowDef::Countdown { data, .. } =
+                    window_def
+                {
+                    data.id
+                        .clone()
+                        .unwrap_or_else(|| window_def.name().to_string())
+                } else {
+                    window_def.name().to_string()
+                },
             }),
             WidgetType::Compass => WindowContent::Compass(CompassData {
                 directions: Vec::new(),
             }),
             WidgetType::InjuryDoll => WindowContent::InjuryDoll(InjuryDollData::new()),
-            WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
-                status: String::from("standing"),
-                color: None,
-            }),
+            WidgetType::Indicator => {
+                let (indicator_id, active_color) =
+                    if let crate::config::WindowDef::Indicator { data, .. } = window_def {
+                        (
+                            data.indicator_id
+                                .clone()
+                                .unwrap_or_else(|| window_def.name().to_string()),
+                            data.active_color.clone(),
+                        )
+                    } else {
+                        (window_def.name().to_string(), None)
+                    };
+                WindowContent::Indicator(IndicatorData {
+                    indicator_id,
+                    active: false,
+                    color: active_color,
+                })
+            }
             WidgetType::Performance => {
                 if let crate::config::WindowDef::Performance { data, .. } = window_def {
                     self.perf_stats.apply_enabled_from(data);
@@ -689,9 +793,13 @@ impl AppCore {
             }
             WidgetType::Targets => WindowContent::Targets {
                 targets_text: String::new(),
+                count: None,
+                entity_id: crate::config::default_target_entity_id(),
             },
             WidgetType::Players => WindowContent::Players {
                 players_text: String::new(),
+                count: None,
+                entity_id: crate::config::default_player_entity_id(),
             },
             WidgetType::Dashboard => WindowContent::Dashboard {
                 indicators: Vec::new(),
@@ -1398,10 +1506,12 @@ impl AppCore {
                 max: 100,
                 label: name.to_string(),
                 color: None,
+                progress_id: name.to_string(),
             }),
             WidgetType::Countdown => WindowContent::Countdown(CountdownData {
                 end_time: 0,
                 label: name.to_string(),
+                countdown_id: name.to_string(),
             }),
             WidgetType::Compass => WindowContent::Compass(CompassData {
                 directions: Vec::new(),
@@ -1419,7 +1529,8 @@ impl AppCore {
                 objects: Vec::new(),
             }),
             WidgetType::Indicator => WindowContent::Indicator(IndicatorData {
-                status: String::from("standing"),
+                indicator_id: name.to_string(),
+                active: false,
                 color: None,
             }),
             WidgetType::Performance => WindowContent::Performance,
@@ -1489,9 +1600,10 @@ impl AppCore {
             border_color: None,
             show_title: true,
             title: Some(name.to_string()),
+            title_position: "top-left".to_string(),
             background_color: None,
             text_color: None,
-            transparent_background: true,
+            transparent_background: false,
             locked: false,
             min_rows: None,
             max_rows: None,
@@ -1798,11 +1910,6 @@ impl AppCore {
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Themes >".to_string(),
-                command: "__SUBMENU__themes".to_string(),
-                disabled: false,
-            },
-            crate::data::ui_state::PopupMenuItem {
                 text: "Settings".to_string(),
                 command: ".settings".to_string(),
                 disabled: false,
@@ -1819,28 +1926,23 @@ impl AppCore {
     fn build_colors_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         vec![
             crate::data::ui_state::PopupMenuItem {
-                text: "Add color (opens color form)".to_string(),
+                text: "Add".to_string(),
                 command: ".addcolor".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Browse colors".to_string(),
+                text: "Browse".to_string(),
                 command: ".colors".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Add spellcolor".to_string(),
-                command: ".addspellcolor".to_string(),
-                disabled: false,
-            },
-            crate::data::ui_state::PopupMenuItem {
-                text: "Browse spellcolors".to_string(),
+                text: "Spells".to_string(),
                 command: ".spellcolors".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Browse UI colors".to_string(),
-                command: ".uicolors".to_string(),
+                text: "Themes".to_string(),
+                command: ".themes".to_string(),
                 disabled: false,
             },
         ]
@@ -1850,12 +1952,12 @@ impl AppCore {
     pub(super) fn build_highlights_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         vec![
             crate::data::ui_state::PopupMenuItem {
-                text: "Add highlight".to_string(),
+                text: "Add".to_string(),
                 command: ".addhighlight".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Browse highlights".to_string(),
+                text: "Browse".to_string(),
                 command: ".highlights".to_string(),
                 disabled: false,
             },
@@ -1866,12 +1968,12 @@ impl AppCore {
     fn build_keybinds_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         vec![
             crate::data::ui_state::PopupMenuItem {
-                text: "Add keybind".to_string(),
+                text: "Add".to_string(),
                 command: ".addkeybind".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Browse keybinds".to_string(),
+                text: "Browse".to_string(),
                 command: ".keybinds".to_string(),
                 disabled: false,
             },
@@ -1898,22 +2000,22 @@ impl AppCore {
     pub fn build_windows_submenu(&self) -> Vec<crate::data::ui_state::PopupMenuItem> {
         vec![
             crate::data::ui_state::PopupMenuItem {
-                text: "Add window (opens editor)".to_string(),
+                text: "Add window >".to_string(),
                 command: ".addwindow".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Edit window".to_string(),
+                text: "Edit window >".to_string(),
                 command: ".editwindow".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "Hide window".to_string(),
+                text: "Hide window >".to_string(),
                 command: ".hidewindow".to_string(),
                 disabled: false,
             },
             crate::data::ui_state::PopupMenuItem {
-                text: "List windows".to_string(),
+                text: "List windows >".to_string(),
                 command: ".windows".to_string(),
                 disabled: false,
             },
@@ -2331,18 +2433,48 @@ impl AppCore {
                 })
                 .collect();
 
+            // Special handling for Status: dashboard + Indicators submenu
+            if matches!(category, crate::config::WidgetCategory::Status) {
+                let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
+                if available_templates.iter().any(|t| *t == "dashboard") {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: "Dashboard".to_string(),
+                        command: "__ADD__dashboard".to_string(),
+                        disabled: false,
+                    });
+                }
+                // Indicators submenu (only if any indicator templates are available)
+                let available_owned: Vec<String> =
+                    available_templates.iter().map(|s| s.to_string()).collect();
+                if !self.build_indicator_add_menu(&available_owned).is_empty() {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: "Indicators >".to_string(),
+                        command: "__SUBMENU_INDICATORS".to_string(),
+                        disabled: false,
+                    });
+                }
+                return items;
+            }
+
             let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
 
             // Custom template entry (derive widget type from the first available template)
-            if let Some(first) = available_templates.first() {
-                if let Some(widget_type) = crate::config::Config::get_window_template(first)
-                    .map(|t| t.widget_type().to_string())
-                {
-                    items.push(crate::data::ui_state::PopupMenuItem {
-                        text: "Custom (blank)".to_string(),
-                        command: format!("__ADD_CUSTOM__{}", widget_type),
-                        disabled: false,
-                    });
+            // Skip for Hands to match the fixed submenu (left/right/spell only).
+            let allow_custom = !matches!(category, crate::config::WidgetCategory::Hand);
+            let has_explicit_custom = available_templates
+                .iter()
+                .any(|name| name.ends_with("_custom"));
+            if allow_custom && !has_explicit_custom {
+                if let Some(first) = available_templates.first() {
+                    if let Some(widget_type) = crate::config::Config::get_window_template(first)
+                        .map(|t| t.widget_type().to_string())
+                    {
+                        items.push(crate::data::ui_state::PopupMenuItem {
+                            text: "Custom (blank)".to_string(),
+                            command: format!("__ADD_CUSTOM__{}", widget_type),
+                            disabled: false,
+                        });
+                    }
                 }
             }
 
@@ -2385,9 +2517,46 @@ impl AppCore {
         &self,
         category: &crate::config::WidgetCategory,
     ) -> Vec<crate::data::ui_state::PopupMenuItem> {
-        let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, true);
+        let categories_map =
+            crate::config::Config::get_visible_templates_by_category(&self.layout, true);
 
         if let Some(templates) = categories_map.get(category) {
+            // Special handling for Status: Dashboard item + Indicators submenu
+            if matches!(category, crate::config::WidgetCategory::Status) {
+                let dashboards: Vec<String> = templates
+                    .iter()
+                    .filter(|name| *name == "dashboard")
+                    .cloned()
+                    .collect();
+                let indicators: Vec<String> = templates
+                    .iter()
+                    .filter(|name| {
+                        crate::config::Config::get_window_template(name)
+                            .map(|t| t.widget_type().to_string())
+                            .unwrap_or_default()
+                            == "indicator"
+                    })
+                    .cloned()
+                    .collect();
+
+                let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
+                for name in dashboards {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: self.get_window_display_name(&name),
+                        command: format!("__HIDE__{}", name),
+                        disabled: false,
+                    });
+                }
+                if !indicators.is_empty() {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: "Indicators >".to_string(),
+                        command: "__SUBMENU_HIDE_INDICATORS".to_string(),
+                        disabled: false,
+                    });
+                }
+                return items;
+            }
+
             templates
                 .iter()
                 .map(|name| crate::data::ui_state::PopupMenuItem {
@@ -2399,6 +2568,123 @@ impl AppCore {
         } else {
             vec![]
         }
+    }
+
+    /// Build indicator submenu for Status -> Indicators
+    pub fn build_indicator_add_menu(
+        &self,
+        available_templates: &[String],
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let desired_order = [
+            "bleeding",
+            "diseased",
+            "poisoned",
+            "stunned",
+            "webbed",
+            "indicator_custom",
+        ];
+
+        desired_order
+            .iter()
+            .filter_map(|name| {
+                if available_templates.iter().any(|t| t == name) {
+                    Some(crate::data::ui_state::PopupMenuItem {
+                        text: match *name {
+                            "indicator_custom" => "Custom".to_string(),
+                            other => other
+                                .chars()
+                                .enumerate()
+                                .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+                                .collect(),
+                        },
+                        command: format!("__ADD__{}", name),
+                        disabled: false,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Indicator submenu for Hide
+    pub fn build_indicator_hide_menu(
+        &self,
+        indicator_names: &[String],
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let desired_order = [
+            "bleeding",
+            "diseased",
+            "poisoned",
+            "stunned",
+            "webbed",
+            "indicator_custom",
+        ];
+
+        // Order by desired list, then append any others
+        let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
+
+        for desired in &desired_order {
+            for name in indicator_names {
+                if name == desired {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: self.get_window_display_name(name),
+                        command: format!("__HIDE__{}", name),
+                        disabled: false,
+                    });
+                }
+            }
+        }
+        // Append any remaining indicators not in desired order
+        for name in indicator_names {
+            if !desired_order.contains(&name.as_str()) {
+                items.push(crate::data::ui_state::PopupMenuItem {
+                    text: self.get_window_display_name(name),
+                    command: format!("__HIDE__{}", name),
+                    disabled: false,
+                });
+            }
+        }
+        items
+    }
+
+    /// Indicator submenu for Edit
+    pub fn build_indicator_edit_menu(
+        &self,
+        indicator_names: &[String],
+    ) -> Vec<crate::data::ui_state::PopupMenuItem> {
+        let desired_order = [
+            "bleeding",
+            "diseased",
+            "poisoned",
+            "stunned",
+            "webbed",
+            "indicator_custom",
+        ];
+
+        let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
+
+        for desired in &desired_order {
+            for name in indicator_names {
+                if name == desired {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: self.get_window_display_name(name),
+                        command: format!("__EDIT__{}", name),
+                        disabled: false,
+                    });
+                }
+            }
+        }
+        for name in indicator_names {
+            if !desired_order.contains(&name.as_str()) {
+                items.push(crate::data::ui_state::PopupMenuItem {
+                    text: self.get_window_display_name(name),
+                    command: format!("__EDIT__{}", name),
+                    disabled: false,
+                });
+            }
+        }
+        items
     }
 
     /// Build "Edit Window" menu showing widget categories (only categories with visible windows)
@@ -2429,6 +2715,42 @@ impl AppCore {
         let categories_map = crate::config::Config::get_visible_templates_by_category(&self.layout, false);
 
         if let Some(templates) = categories_map.get(category) {
+            // Special handling for Status: Dashboard + Indicators submenu
+            if matches!(category, crate::config::WidgetCategory::Status) {
+                let dashboards: Vec<String> = templates
+                    .iter()
+                    .filter(|name| *name == "dashboard")
+                    .cloned()
+                    .collect();
+                let indicators: Vec<String> = templates
+                    .iter()
+                    .filter(|name| {
+                        crate::config::Config::get_window_template(name)
+                            .map(|t| t.widget_type().to_string())
+                            .unwrap_or_default()
+                            == "indicator"
+                    })
+                    .cloned()
+                    .collect();
+
+                let mut items: Vec<crate::data::ui_state::PopupMenuItem> = Vec::new();
+                for name in dashboards {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: self.get_window_display_name(&name),
+                        command: format!("__EDIT__{}", name),
+                        disabled: false,
+                    });
+                }
+                if !indicators.is_empty() {
+                    items.push(crate::data::ui_state::PopupMenuItem {
+                        text: "Indicators >".to_string(),
+                        command: "__SUBMENU_EDIT_INDICATORS".to_string(),
+                        disabled: false,
+                    });
+                }
+                return items;
+            }
+
             templates
                 .iter()
                 .map(|name| crate::data::ui_state::PopupMenuItem {
@@ -2506,7 +2828,7 @@ mod tests {
             title: None,
             background_color: None,
             text_color: None,
-            transparent_background: true,
+            transparent_background: false,
             locked: false,
             min_rows: None,
             max_rows: None,
@@ -2514,6 +2836,7 @@ mod tests {
             max_cols: None,
             visible: true,
             content_align: None,
+            title_position: "top-left".to_string(),
         }
     }
 
@@ -2609,6 +2932,8 @@ mod tests {
             data: crate::config::TextWidgetData {
                 streams: vec!["main".to_string()],
                 buffer_size: 1000,
+                wordwrap: true,
+                show_timestamps: false,
             },
         };
         let spacer1 = WindowDef::Spacer {
@@ -2698,4 +3023,5 @@ mod tests {
         assert_eq!(name, "spacer_100");
     }
 }
+
 

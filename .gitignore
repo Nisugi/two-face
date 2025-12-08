@@ -7,7 +7,10 @@ Cargo.lock
 *~
 .DS_Store
 
+archive/
 design/
+docs/
+doculated/
 
 # Cache
 .vercel/
@@ -50,6 +53,9 @@ logs/
 # Backups
 
 # Claude and MoAI configuration (user-specific, root only)
+.claude/
+.mcp.json
+
 docs/.next/
 .playwright-mcp
 .uv-cache
@@ -71,18 +77,14 @@ __pycache__/
 # Test coverage
 .venv/
 # =============== MoAI ADK ===============
-# Keep only specs + config
-!.moai/specs/
-!.moai/config/
-
 # Ignore everything else inside .moai
 .moai/*
 # But unignore the SPECs and config
-!.moai/specs/**
-!.moai/config/**
+.moai/specs/**
+.moai/config/**
 
 # Ignore MoAI-generated runtime content
-.moai/backups/
+.moai-backups/
 .moai/cache/
 .moai/logs/
 .moai/reports/

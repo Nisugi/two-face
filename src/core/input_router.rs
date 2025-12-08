@@ -67,7 +67,7 @@ pub fn should_use_menu_keybinds(mode: &InputMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::common::{KeyCode, KeyModifiers};
+    use crate::frontend::common::KeyModifiers;
 
     #[test]
     fn test_context_mapping() {

@@ -54,7 +54,7 @@ impl InventoryWindow {
             border_color: None,
             text_color: None,
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
             lines: Vec::new(),
             current_line: Vec::new(),
             scroll_offset: 0,
@@ -526,3 +526,4 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 
     Some(Color::Rgb(r, g, b))
 }
+

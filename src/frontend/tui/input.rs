@@ -208,7 +208,7 @@ impl TuiFrontend {
                 let mut found_window = None;
                 let mut drag_op = None;
                 let mut clicked_window_name: Option<String> = None;
-                let mut handled_tab_click = false;
+                let mut handled_tab_click: Option<(String, usize)> = None;
 
                 for (name, window) in &app_core.ui_state.windows {
                     let pos = &window.position;
@@ -227,8 +227,10 @@ impl TuiFrontend {
                                 width: pos.width,
                                 height: pos.height,
                             };
-                            if self.handle_tabbed_click(name, rect, *x, *y) {
-                                handled_tab_click = true;
+                            if let Some(new_index) =
+                                self.handle_tabbed_click(name, rect, *x, *y)
+                            {
+                                handled_tab_click = Some((name.clone(), new_index));
                                 break;
                             }
                         }
@@ -262,7 +264,16 @@ impl TuiFrontend {
                     }
                 }
 
-                if handled_tab_click {
+                if let Some((win_name, new_index)) = handled_tab_click {
+                    if let Some(window_state) = app_core.ui_state.get_window_mut(&win_name) {
+                        if let crate::data::WindowContent::TabbedText(tabbed) =
+                            &mut window_state.content
+                        {
+                            if new_index < tabbed.tabs.len() {
+                                tabbed.active_tab_index = new_index;
+                            }
+                        }
+                    }
                     app_core.needs_render = true;
                     return Ok((true, None));
                 }
@@ -478,10 +489,10 @@ impl TuiFrontend {
                                 && *y < pos.y + pos.height
                             {
                                 // First check if this is a hand widget (left or right only)
-                                if name == "left_hand" {
+                                if name == "left_hand" || name == "left" {
                                     drop_target_hand = Some("left".to_string());
                                     break;
-                                } else if name == "right_hand" {
+                                } else if name == "right_hand" || name == "right" {
                                     drop_target_hand = Some("right".to_string());
                                     break;
                                 }
@@ -1716,12 +1727,30 @@ impl TuiFrontend {
         
         
         use crate::frontend::KeyCode;
+        use crate::data::ui_state::InputMode;
 
         tracing::debug!("Menu mode active - handling key: {:?}", code);
 
         match code {
+            KeyCode::Esc => {
+                if app_core.ui_state.nested_submenu.is_some() {
+                    // Close the deepest level first
+                    app_core.ui_state.nested_submenu = None;
+                } else if app_core.ui_state.submenu.is_some() {
+                    app_core.ui_state.submenu = None;
+                } else {
+                    // Close all menus and return to normal mode
+                    app_core.ui_state.popup_menu = None;
+                    app_core.ui_state.submenu = None;
+                    app_core.ui_state.nested_submenu = None;
+                    app_core.ui_state.input_mode = InputMode::Normal;
+                }
+                app_core.needs_render = true;
+            }
             KeyCode::Tab | KeyCode::Down => {
-                if let Some(ref mut submenu) = app_core.ui_state.submenu {
+                if let Some(ref mut nested) = app_core.ui_state.nested_submenu {
+                    nested.select_next();
+                } else if let Some(ref mut submenu) = app_core.ui_state.submenu {
                     submenu.select_next();
                 } else if let Some(ref mut menu) = app_core.ui_state.popup_menu {
                     menu.select_next();
@@ -1729,7 +1758,9 @@ impl TuiFrontend {
                 app_core.needs_render = true;
             }
             KeyCode::BackTab | KeyCode::Up => {
-                if let Some(ref mut submenu) = app_core.ui_state.submenu {
+                if let Some(ref mut nested) = app_core.ui_state.nested_submenu {
+                    nested.select_prev();
+                } else if let Some(ref mut submenu) = app_core.ui_state.submenu {
                     submenu.select_prev();
                 } else if let Some(ref mut menu) = app_core.ui_state.popup_menu {
                     menu.select_prev();
@@ -1737,7 +1768,10 @@ impl TuiFrontend {
                 app_core.needs_render = true;
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let menu_to_use = if app_core.ui_state.submenu.is_some() {
+                // Choose the deepest open menu
+                let menu_to_use = if app_core.ui_state.nested_submenu.is_some() {
+                    &app_core.ui_state.nested_submenu
+                } else if app_core.ui_state.submenu.is_some() {
                     &app_core.ui_state.submenu
                 } else {
                     &app_core.ui_state.popup_menu
@@ -1812,30 +1846,121 @@ impl TuiFrontend {
             let category = Self::parse_widget_category(category_str, app_core)?;
             let items = app_core.build_add_window_category_menu(&category);
             if items.is_empty() {
-                app_core.ui_state.popup_menu = None;
-                app_core.ui_state.input_mode = InputMode::Normal;
+                app_core.ui_state.nested_submenu = None;
             } else {
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(items, (40, 12)));
+                let parent_pos = app_core
+                    .ui_state
+                    .submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
+            }
+            app_core.needs_render = true;
+        } else if command == "__SUBMENU_INDICATORS" {
+            // Indicator submenu under Status
+            let templates = crate::config::Config::get_addable_templates_by_category(&app_core.layout)
+                .get(&crate::config::WidgetCategory::Status)
+                .cloned()
+                .unwrap_or_default();
+            let items = app_core.build_indicator_add_menu(&templates);
+            if items.is_empty() {
+                app_core.ui_state.nested_submenu = None;
+            } else {
+                let parent_pos = app_core
+                    .ui_state
+                    .nested_submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.submenu.as_ref().map(|m| m.get_position()))
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
             }
             app_core.needs_render = true;
         } else if let Some(category_str) = command.strip_prefix("__SUBMENU_HIDE__") {
             let category = Self::parse_widget_category(category_str, app_core)?;
             let items = app_core.build_hide_window_category_menu(&category);
             if items.is_empty() {
-                app_core.ui_state.popup_menu = None;
-                app_core.ui_state.input_mode = InputMode::Normal;
+                app_core.ui_state.nested_submenu = None;
             } else {
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(items, (40, 12)));
+                let parent_pos = app_core
+                    .ui_state
+                    .submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
             }
             app_core.needs_render = true;
         } else if let Some(category_str) = command.strip_prefix("__SUBMENU_EDIT__") {
             let category = Self::parse_widget_category(category_str, app_core)?;
             let items = app_core.build_edit_window_category_menu(&category);
             if items.is_empty() {
-                app_core.ui_state.popup_menu = None;
-                app_core.ui_state.input_mode = InputMode::Normal;
+                app_core.ui_state.nested_submenu = None;
             } else {
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(items, (40, 12)));
+                let parent_pos = app_core
+                    .ui_state
+                    .submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
+            }
+            app_core.needs_render = true;
+        } else if command == "__SUBMENU_HIDE_INDICATORS" {
+            let indicators = app_core
+                .layout
+                .windows
+                .iter()
+                .filter(|w| w.base().visible && matches!(w.widget_type(), "indicator"))
+                .map(|w| w.name().to_string())
+                .collect::<Vec<String>>();
+            let items = app_core.build_indicator_hide_menu(&indicators);
+            if items.is_empty() {
+                app_core.ui_state.nested_submenu = None;
+            } else {
+                let parent_pos = app_core
+                    .ui_state
+                    .nested_submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.submenu.as_ref().map(|m| m.get_position()))
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
+            }
+            app_core.needs_render = true;
+        } else if command == "__SUBMENU_EDIT_INDICATORS" {
+            let indicators = app_core
+                .layout
+                .windows
+                .iter()
+                .filter(|w| w.base().visible && matches!(w.widget_type(), "indicator"))
+                .map(|w| w.name().to_string())
+                .collect::<Vec<String>>();
+            let items = app_core.build_indicator_edit_menu(&indicators);
+            if items.is_empty() {
+                app_core.ui_state.nested_submenu = None;
+            } else {
+                let parent_pos = app_core
+                    .ui_state
+                    .nested_submenu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .or_else(|| app_core.ui_state.submenu.as_ref().map(|m| m.get_position()))
+                    .or_else(|| app_core.ui_state.popup_menu.as_ref().map(|m| m.get_position()))
+                    .unwrap_or((40, 12));
+                app_core.ui_state.nested_submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
             }
             app_core.needs_render = true;
         } else if let Some(widget_type) = command.strip_prefix("__ADD_CUSTOM__") {
@@ -1885,6 +2010,7 @@ impl TuiFrontend {
             }
             app_core.ui_state.popup_menu = None;
             app_core.ui_state.submenu = None;
+            app_core.ui_state.nested_submenu = None;
             app_core.needs_render = true;
         } else if let Some(window_name) = command.strip_prefix("__HIDE__") {
             match app_core.layout.hide_window(window_name) {
@@ -1900,8 +2026,8 @@ impl TuiFrontend {
                     tracing::error!("Failed to hide window '{}': {}", window_name, e);
                 }
             }
-            app_core.ui_state.popup_menu = None;
-            app_core.ui_state.input_mode = InputMode::Normal;
+            // Keep parent menus open so Esc can back up
+            app_core.ui_state.nested_submenu = None;
             app_core.needs_render = true;
         } else if let Some(window_name) = command.strip_prefix("__EDIT__") {
             if let Some(window_def) = app_core.layout.get_window(window_name) {
@@ -1915,22 +2041,30 @@ impl TuiFrontend {
                 tracing::warn!("Window '{}' not found in layout", window_name);
             }
             app_core.ui_state.popup_menu = None;
-            app_core.needs_render = true;
-        } else {
-            app_core.ui_state.popup_menu = None;
             app_core.ui_state.submenu = None;
             app_core.ui_state.nested_submenu = None;
-            app_core.ui_state.input_mode = InputMode::Normal;
             app_core.needs_render = true;
-
+        } else {
+            // Internal action commands should manage menus themselves
             if command.starts_with("action:") {
                 handle_menu_action_fn(app_core, self, &command)?;
+                app_core.needs_render = true;
             } else if command.starts_with(".") {
                 let action_command = format!("action:{}", &command[1..]);
                 handle_menu_action_fn(app_core, self, &action_command)?;
-            } else if !command.is_empty() {
-                tracing::info!("Sending context menu command: {}", command);
-                return Ok(Some(format!("{}\n", command)));
+                app_core.needs_render = true;
+            } else {
+                // Game command or empty selection: close menus
+                app_core.ui_state.popup_menu = None;
+                app_core.ui_state.submenu = None;
+                app_core.ui_state.nested_submenu = None;
+                app_core.ui_state.input_mode = InputMode::Normal;
+                app_core.needs_render = true;
+
+                if !command.is_empty() {
+                    tracing::info!("Sending context menu command: {}", command);
+                    return Ok(Some(format!("{}\n", command)));
+                }
             }
         }
         Ok(None)
@@ -1950,6 +2084,8 @@ impl TuiFrontend {
             "Countdown" => Ok(WidgetCategory::Countdown),
             "Hand" => Ok(WidgetCategory::Hand),
             "ActiveEffects" => Ok(WidgetCategory::ActiveEffects),
+            "Entity" => Ok(WidgetCategory::Entity),
+            "Status" => Ok(WidgetCategory::Status),
             "Other" => Ok(WidgetCategory::Other),
             _ => {
                 tracing::warn!("Unknown widget category: {}", category_str);
@@ -2013,12 +2149,38 @@ impl TuiFrontend {
                     } else if editor.is_on_content_align() {
                         editor.cycle_content_align(false);
                         app_core.needs_render = true;
+                    } else if editor.is_on_title_position() {
+                        editor.cycle_title_position(false);
+                        app_core.needs_render = true;
                     } else if editor.is_on_tab_bar_position() {
+                        editor.cycle_tab_bar_position();
+                        app_core.needs_render = true;
+                    } else if editor.is_on_edit_tabs() || editor.is_on_edit_indicators() {
                         editor.toggle_field();
                         app_core.needs_render = true;
                     } else if editor.is_on_border_style() {
-                        editor.cycle_border_style();
+                        editor.cycle_border_style(false);
                         app_core.needs_render = true;
+                    }
+                }
+                crate::core::menu_actions::MenuAction::CycleForward
+                | crate::core::menu_actions::MenuAction::CycleBackward => {
+                    if !editor.is_sub_editor_active() {
+                        let reverse =
+                            matches!(action, crate::core::menu_actions::MenuAction::CycleBackward);
+                        if editor.is_on_content_align() {
+                            editor.cycle_content_align(reverse);
+                            app_core.needs_render = true;
+                        } else if editor.is_on_title_position() {
+                            editor.cycle_title_position(reverse);
+                            app_core.needs_render = true;
+                        } else if editor.is_on_tab_bar_position() {
+                            editor.cycle_tab_bar_position();
+                            app_core.needs_render = true;
+                        } else if editor.is_on_border_style() {
+                            editor.cycle_border_style(reverse);
+                            app_core.needs_render = true;
+                        }
                     }
                 }
                 crate::core::menu_actions::MenuAction::Select => {
@@ -2027,17 +2189,24 @@ impl TuiFrontend {
                     } else {
                         if editor.is_on_checkbox()
                             || editor.is_on_content_align()
+                            || editor.is_on_title_position()
                             || editor.is_on_tab_bar_position()
                             || editor.is_on_border_style()
+                            || editor.is_on_edit_tabs()
+                            || editor.is_on_edit_indicators()
                         {
                             if editor.is_on_checkbox() {
                                 editor.toggle_field();
                             } else if editor.is_on_content_align() {
                                 editor.cycle_content_align(false);
+                            } else if editor.is_on_title_position() {
+                                editor.cycle_title_position(false);
                             } else if editor.is_on_tab_bar_position() {
-                                editor.toggle_field();
+                                editor.cycle_tab_bar_position();
                             } else if editor.is_on_border_style() {
-                                editor.cycle_border_style();
+                                editor.cycle_border_style(false);
+                            } else if editor.is_on_edit_tabs() || editor.is_on_edit_indicators() {
+                                editor.toggle_field();
                             }
                             app_core.needs_render = true;
                         }
@@ -2046,6 +2215,12 @@ impl TuiFrontend {
                 crate::core::menu_actions::MenuAction::Save => {
                     let (width, height) = self.size();
                     if let Some(ref mut editor) = self.window_editor {
+                        // If a sub-editor form is active, save it and return to the sub-editor list
+                        if editor.save_active_sub_editor_form() {
+                            app_core.needs_render = true;
+                            return Ok(None);
+                        }
+
                         editor.commit_sub_editors();
                         let window_def = editor.get_window_def().clone();
 

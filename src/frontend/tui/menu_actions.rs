@@ -4,7 +4,7 @@
 
 use crate::config;
 use crate::core::AppCore;
-use crate::data::ui_state::{InputMode, PopupMenu, PopupMenuItem};
+use crate::data::ui_state::{InputMode, PopupMenu};
 use crate::frontend::tui::menu_builders;
 use crate::frontend::tui::TuiFrontend;
 use anyhow::Result;
@@ -55,7 +55,10 @@ pub fn handle_menu_action(
         {
             // Open window editor
             frontend.window_editor = Some(
-                crate::frontend::tui::window_editor::WindowEditor::new(window_def)
+                crate::frontend::tui::window_editor::WindowEditor::new_with_layout(
+                    window_def,
+                    &app_core.layout,
+                )
             );
             app_core.ui_state.input_mode = InputMode::WindowEditor;
         } else {
@@ -81,24 +84,35 @@ pub fn handle_menu_action(
         match command {
             "action:addwindow" => {
                 // Close submenu if it exists
-                app_core.ui_state.submenu = None;
-                // Show widget type picker using proper build_add_window_menu
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(
-                    app_core.build_add_window_menu(),
-                    (40, 12),
-                ));
-                // Stay in Menu mode
+                let parent_pos = app_core
+                    .ui_state
+                    .popup_menu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .unwrap_or((40, 12));
+                // Show widget category picker as submenu (allows Esc to go back)
+                let items = app_core.build_add_window_menu();
+                app_core.ui_state.submenu =
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)));
+                app_core.ui_state.nested_submenu = None;
                 app_core.ui_state.input_mode = InputMode::Menu;
             }
             "action:hidewindow" => {
                 // Close submenu if it exists
-                app_core.ui_state.submenu = None;
-                // Show window picker for hiding
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(
-                    menu_builders::build_hidewindow_picker(app_core),
-                    (40, 12),
-                ));
-                // Stay in Menu mode
+                let parent_pos = app_core
+                    .ui_state
+                    .popup_menu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .unwrap_or((40, 12));
+                // Show category-based picker for hiding as submenu
+                let items = app_core.build_hide_window_menu();
+                app_core.ui_state.submenu = if items.is_empty() {
+                    None
+                } else {
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)))
+                };
+                app_core.ui_state.nested_submenu = None;
                 app_core.ui_state.input_mode = InputMode::Menu;
             }
             "action:listwindows" => {
@@ -107,6 +121,17 @@ pub fn handle_menu_action(
 
                 // Close menu and return to normal mode
                 app_core.ui_state.popup_menu = None;
+                app_core.ui_state.input_mode = InputMode::Normal;
+                app_core.needs_render = true;
+            }
+            "action:windows" => {
+                // List all windows (dot command handled locally)
+                app_core.send_command(".windows".to_string())?;
+
+                // Close menu and return to normal mode
+                app_core.ui_state.popup_menu = None;
+                app_core.ui_state.submenu = None;
+                app_core.ui_state.nested_submenu = None;
                 app_core.ui_state.input_mode = InputMode::Normal;
                 app_core.needs_render = true;
             }
@@ -211,38 +236,32 @@ pub fn handle_menu_action(
                 app_core.ui_state.input_mode = InputMode::ThemeEditor;
             }
             "action:editwindow" => {
-                // Open window picker for editing
-                let window_names: Vec<String> = app_core
-                    .layout
-                    .windows
-                    .iter()
-                    .map(|w| w.name().to_string())
-                    .collect();
-
-                let items: Vec<PopupMenuItem> = window_names
-                    .iter()
-                    .map(|name| PopupMenuItem {
-                        text: name.clone(),
-                        command: format!("action:editwindow:{}", name),
-                        disabled: false,
-                    })
-                    .collect();
-
-                // Close submenu if it exists
-                app_core.ui_state.submenu = None;
-                // Create new popup menu for window selection
-                app_core.ui_state.popup_menu = Some(PopupMenu::new(items, (40, 12)));
-                // Stay in Menu mode
+                let parent_pos = app_core
+                    .ui_state
+                    .popup_menu
+                    .as_ref()
+                    .map(|m| m.get_position())
+                    .unwrap_or((40, 12));
+                // Show category-based picker for editing as submenu
+                let items = app_core.build_edit_window_menu();
+                app_core.ui_state.submenu = if items.is_empty() {
+                    None
+                } else {
+                    Some(PopupMenu::new(items, (parent_pos.0 + 2, parent_pos.1)))
+                };
+                app_core.ui_state.nested_submenu = None;
                 app_core.ui_state.input_mode = InputMode::Menu;
             }
             "action:nexttab" => {
                 // Navigate to next tab in all tabbed windows
                 frontend.next_tab_all();
+                frontend.sync_tabbed_active_state(app_core);
                 app_core.needs_render = true;
             }
             "action:prevtab" => {
                 // Navigate to previous tab in all tabbed windows
                 frontend.prev_tab_all();
+                frontend.sync_tabbed_active_state(app_core);
                 app_core.needs_render = true;
             }
             "action:gonew" => {
@@ -250,6 +269,7 @@ pub fn handle_menu_action(
                 if !frontend.go_to_next_unread_tab() {
                     app_core.add_system_message("No tabs with new messages");
                 }
+                frontend.sync_tabbed_active_state(app_core);
                 app_core.needs_render = true;
             }
             _ => {

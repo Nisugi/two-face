@@ -5,7 +5,9 @@
       "Bash(cargo build:*)",
       "Bash(cargo check:*)",
       "Bash(powershell -Command \"(Get-Content ''c:\\Gemstone\\Projects\\two-face\\src\\main.rs'').Count\")",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(\"c:\\Gemstone\\Projects\\two-face\\src\\frontend\\tui\\input_handlers_temp.rs\")",
+      "Bash(powershell -Command \"(Get-Content ''c:\\Gemstone\\Projects\\two-face\\src\\frontend\\tui\\mod.rs'').Count\")"
     ]
   },
   "enabledMcpjsonServers": [

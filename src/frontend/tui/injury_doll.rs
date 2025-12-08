@@ -56,7 +56,7 @@ impl InjuryDoll {
             ],
             background_color: None,
             content_align: None,
-            transparent_background: true, // Default to transparent
+            transparent_background: false, // Default to transparent
         }
     }
 
@@ -288,3 +288,4 @@ impl InjuryDoll {
         }
     }
 }
+

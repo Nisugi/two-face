@@ -572,6 +572,7 @@ impl AppTheme {
     ///
     /// # Examples
     /// ```
+    /// use two_face::theme::ThemePresets;
     /// let theme = ThemePresets::dark();
     /// let high_contrast = theme.with_contrast_boost(1.5); // 50% more contrast
     /// let low_contrast = theme.with_contrast_boost(0.7);  // 30% less contrast
@@ -662,6 +663,7 @@ impl AppTheme {
     ///
     /// # Examples
     /// ```
+    /// use two_face::theme::{ThemePresets, ThemeVariant};
     /// let theme = ThemePresets::ocean_depths();
     /// let adjusted = theme.with_variant_and_contrast(ThemeVariant::HighContrast, 1.3);
     /// ```
@@ -676,6 +678,7 @@ impl AppTheme {
     ///
     /// # Examples
     /// ```
+    /// use two_face::theme::{ThemePresets, ColorFilter};
     /// let theme = ThemePresets::dark();
     /// let grayscale = theme.with_color_filter(ColorFilter::Grayscale);
     /// let sepia = theme.with_color_filter(ColorFilter::Sepia);
@@ -769,6 +772,7 @@ impl AppTheme {
     ///
     /// # Examples
     /// ```
+    /// use two_face::theme::{ThemePresets, ThemeVariant, ColorFilter};
     /// let theme = ThemePresets::ocean_depths();
     /// let fully_adjusted = theme.with_all_transformations(
     ///     ThemeVariant::HighContrast,

@@ -553,4 +553,322 @@ mod eaccess {
             character,
         })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // ========== obfuscate_password tests ==========
+
+        #[test]
+        fn test_obfuscate_password_basic() {
+            // Test that password obfuscation produces expected output
+            let password = "test";
+            let hash_key = "ABCD";
+            let result = obfuscate_password(password, hash_key);
+
+            // Verify length matches password length
+            assert_eq!(result.len(), password.len());
+
+            // Verify the algorithm: ((pwd - 32) ^ hash) + 32
+            let expected: Vec<u8> = password
+                .bytes()
+                .zip(hash_key.bytes())
+                .map(|(p, h)| (((p as i32 - 32) ^ h as i32) + 32) as u8)
+                .collect();
+            assert_eq!(result, expected);
+        }
+
+        #[test]
+        fn test_obfuscate_password_empty() {
+            let result = obfuscate_password("", "ABCD");
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn test_obfuscate_password_shorter_hash() {
+            // When hash is shorter than password, zip stops at shorter
+            let password = "password";
+            let hash_key = "AB";
+            let result = obfuscate_password(password, hash_key);
+            assert_eq!(result.len(), 2); // Only 2 chars processed
+        }
+
+        #[test]
+        fn test_obfuscate_password_special_chars() {
+            let password = "P@ss!23";
+            let hash_key = "ABCDEFG";
+            let result = obfuscate_password(password, hash_key);
+            assert_eq!(result.len(), 7);
+        }
+
+        #[test]
+        fn test_obfuscate_password_deterministic() {
+            // Same inputs should always produce same output
+            let password = "mypassword";
+            let hash_key = "0123456789";
+            let result1 = obfuscate_password(password, hash_key);
+            let result2 = obfuscate_password(password, hash_key);
+            assert_eq!(result1, result2);
+        }
+
+        // ========== parse_character_code tests ==========
+
+        #[test]
+        fn test_parse_character_code_found() {
+            let response = "C\t5\t0\t0\t0\tABC123\tMyChar\tDEF456\tOtherChar";
+            let result = parse_character_code(response, "MyChar");
+            assert_eq!(result, Some("ABC123".to_string()));
+        }
+
+        #[test]
+        fn test_parse_character_code_case_insensitive() {
+            let response = "C\t5\t0\t0\t0\tABC123\tMyChar\tDEF456\tOtherChar";
+            let result = parse_character_code(response, "mychar");
+            assert_eq!(result, Some("ABC123".to_string()));
+        }
+
+        #[test]
+        fn test_parse_character_code_second_character() {
+            let response = "C\t5\t0\t0\t0\tABC123\tFirstChar\tDEF456\tSecondChar";
+            let result = parse_character_code(response, "SecondChar");
+            assert_eq!(result, Some("DEF456".to_string()));
+        }
+
+        #[test]
+        fn test_parse_character_code_not_found() {
+            let response = "C\t5\t0\t0\t0\tABC123\tMyChar";
+            let result = parse_character_code(response, "NonExistent");
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn test_parse_character_code_invalid_prefix() {
+            let response = "X\t5\t0\t0\t0\tABC123\tMyChar";
+            let result = parse_character_code(response, "MyChar");
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn test_parse_character_code_insufficient_fields() {
+            let response = "C\t1\t2\t3";
+            let result = parse_character_code(response, "MyChar");
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn test_parse_character_code_whitespace_trimmed() {
+            let response = "  C\t5\t0\t0\t0\tABC123\tMyChar  \n";
+            let result = parse_character_code(response, "MyChar");
+            assert_eq!(result, Some("ABC123".to_string()));
+        }
+
+        // ========== parse_launch_response tests ==========
+
+        #[test]
+        fn test_parse_launch_response_valid() {
+            let response = "L\tOK\tKEY=abc123\tGAMEHOST=game.server.net\tGAMEPORT=4900\tGAME=GS3\tCHARACTER=TestChar";
+            let result = parse_launch_response(response).unwrap();
+            assert_eq!(result.key, "abc123");
+            assert_eq!(result.game_host, "game.server.net");
+            assert_eq!(result.game_port, 4900);
+            assert_eq!(result.game, "GS3");
+            assert_eq!(result.character, "TestChar");
+        }
+
+        #[test]
+        fn test_parse_launch_response_minimal() {
+            // Only required fields
+            let response = "L\tOK\tKEY=xyz\tGAMEHOST=host\tGAMEPORT=1234";
+            let result = parse_launch_response(response).unwrap();
+            assert_eq!(result.key, "xyz");
+            assert_eq!(result.game_host, "host");
+            assert_eq!(result.game_port, 1234);
+            assert!(result.game.is_empty());
+            assert_eq!(result.character, "unknown");
+        }
+
+        #[test]
+        fn test_parse_launch_response_case_insensitive_keys() {
+            let response = "L\tOK\tkey=abc\tgamehost=host\tgameport=5000";
+            let result = parse_launch_response(response).unwrap();
+            assert_eq!(result.key, "abc");
+            assert_eq!(result.game_host, "host");
+            assert_eq!(result.game_port, 5000);
+        }
+
+        #[test]
+        fn test_parse_launch_response_missing_key() {
+            let response = "L\tOK\tGAMEHOST=host\tGAMEPORT=1234";
+            let result = parse_launch_response(response);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("KEY"));
+        }
+
+        #[test]
+        fn test_parse_launch_response_missing_host() {
+            let response = "L\tOK\tKEY=abc\tGAMEPORT=1234";
+            let result = parse_launch_response(response);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("GAMEHOST"));
+        }
+
+        #[test]
+        fn test_parse_launch_response_missing_port() {
+            let response = "L\tOK\tKEY=abc\tGAMEHOST=host";
+            let result = parse_launch_response(response);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("GAMEPORT"));
+        }
+
+        #[test]
+        fn test_parse_launch_response_invalid_port() {
+            let response = "L\tOK\tKEY=abc\tGAMEHOST=host\tGAMEPORT=notanumber";
+            let result = parse_launch_response(response);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_launch_response_invalid_prefix() {
+            let response = "X\tOK\tKEY=abc\tGAMEHOST=host\tGAMEPORT=1234";
+            let result = parse_launch_response(response);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_launch_response_whitespace() {
+            let response = "  L\tOK\tKEY=abc\tGAMEHOST=host\tGAMEPORT=1234  \n";
+            let result = parse_launch_response(response).unwrap();
+            assert_eq!(result.key, "abc");
+        }
+
+        // ========== LaunchTicket tests ==========
+
+        #[test]
+        fn test_launch_ticket_clone() {
+            let ticket = LaunchTicket {
+                key: "test_key".to_string(),
+                game_host: "test_host".to_string(),
+                game_port: 1234,
+                game: "GS3".to_string(),
+                character: "TestChar".to_string(),
+            };
+            let cloned = ticket.clone();
+            assert_eq!(ticket.key, cloned.key);
+            assert_eq!(ticket.game_host, cloned.game_host);
+            assert_eq!(ticket.game_port, cloned.game_port);
+        }
+
+        #[test]
+        fn test_launch_ticket_debug() {
+            let ticket = LaunchTicket {
+                key: "secret".to_string(),
+                game_host: "host".to_string(),
+                game_port: 4900,
+                game: "GS3".to_string(),
+                character: "Char".to_string(),
+            };
+            let debug_str = format!("{:?}", ticket);
+            assert!(debug_str.contains("LaunchTicket"));
+            assert!(debug_str.contains("host"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== fix_game_host_port tests ==========
+
+    #[test]
+    fn test_fix_game_host_port_gs_plat() {
+        let (host, port) = fix_game_host_port("gs-plat.simutronics.net", 10121);
+        assert_eq!(host, "storm.gs4.game.play.net");
+        assert_eq!(port, 10124);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_gs3() {
+        let (host, port) = fix_game_host_port("gs3.simutronics.net", 4900);
+        assert_eq!(host, "storm.gs4.game.play.net");
+        assert_eq!(port, 10024);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_gs4() {
+        let (host, port) = fix_game_host_port("gs4.simutronics.net", 10321);
+        assert_eq!(host, "storm.gs4.game.play.net");
+        assert_eq!(port, 10324);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_dr() {
+        let (host, port) = fix_game_host_port("prime.dr.game.play.net", 4901);
+        assert_eq!(host, "dr.simutronics.net");
+        assert_eq!(port, 11024);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_unknown() {
+        let (host, port) = fix_game_host_port("unknown.server.net", 1234);
+        assert_eq!(host, "unknown.server.net");
+        assert_eq!(port, 1234);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_case_insensitive() {
+        let (host, port) = fix_game_host_port("GS3.SIMUTRONICS.NET", 4900);
+        assert_eq!(host, "storm.gs4.game.play.net");
+        assert_eq!(port, 10024);
+    }
+
+    #[test]
+    fn test_fix_game_host_port_wrong_port_for_host() {
+        // GS3 host but wrong port - should not match
+        let (host, port) = fix_game_host_port("gs3.simutronics.net", 9999);
+        assert_eq!(host, "gs3.simutronics.net");
+        assert_eq!(port, 9999);
+    }
+
+    // ========== ServerMessage tests ==========
+
+    #[test]
+    fn test_server_message_text() {
+        let msg = ServerMessage::Text("hello".to_string());
+        if let ServerMessage::Text(s) = msg {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected Text variant");
+        }
+    }
+
+    #[test]
+    fn test_server_message_connected() {
+        let msg = ServerMessage::Connected;
+        assert!(matches!(msg, ServerMessage::Connected));
+    }
+
+    #[test]
+    fn test_server_message_disconnected() {
+        let msg = ServerMessage::Disconnected;
+        assert!(matches!(msg, ServerMessage::Disconnected));
+    }
+
+    #[test]
+    fn test_server_message_clone() {
+        let msg = ServerMessage::Text("test".to_string());
+        let cloned = msg.clone();
+        if let ServerMessage::Text(s) = cloned {
+            assert_eq!(s, "test");
+        }
+    }
+
+    #[test]
+    fn test_server_message_debug() {
+        let msg = ServerMessage::Text("data".to_string());
+        let debug_str = format!("{:?}", msg);
+        assert!(debug_str.contains("Text"));
+        assert!(debug_str.contains("data"));
+    }
 }

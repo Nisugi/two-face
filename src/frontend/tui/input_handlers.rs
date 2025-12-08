@@ -116,10 +116,12 @@ impl super::TuiFrontend {
                         match action_str.as_str() {
                             "next_tab" => {
                                 self.next_tab_all();
+                                self.sync_tabbed_active_state(app_core);
                                 tracing::info!("Switched to next tab in all tabbed windows");
                             }
                             "prev_tab" => {
                                 self.prev_tab_all();
+                                self.sync_tabbed_active_state(app_core);
                                 tracing::info!("Switched to previous tab in all tabbed windows");
                             }
                             "next_unread_tab" => {

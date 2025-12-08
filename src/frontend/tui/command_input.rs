@@ -3,14 +3,17 @@
 //! Handles multi-byte cursoring, cut/copy selection, history persistence, and
 //! autocomplete for both dot-commands and window names.
 
-use crate::frontend::tui::crossterm_bridge;
+use crate::frontend::tui::{
+    crossterm_bridge,
+    title_position::{self, TitlePosition},
+};
 use crate::config::BorderSides;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{BorderType, Paragraph, Widget},
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -30,10 +33,13 @@ pub struct CommandInput {
     show_title: bool,
     border_sides: BorderSides,
     title: String,
+    title_position: TitlePosition,
     background_color: Option<String>,
     text_color: Option<String>,         // Input text color
     cursor_fg_color: Option<String>,    // Cursor foreground color
     cursor_bg_color: Option<String>,    // Cursor background color
+    prompt_icon: Option<String>,        // Optional prompt icon shown before input
+    prompt_icon_color: Option<String>,  // Color for prompt icon
     completion_candidates: Vec<String>, // Current completion candidates
     completion_index: Option<usize>,    // Index of current completion
     completion_prefix: Option<String>,  // Original text before completion started
@@ -56,10 +62,13 @@ impl CommandInput {
             show_title: true,
             border_sides: BorderSides::default(),
             title: "Command".to_string(),
+            title_position: TitlePosition::TopLeft,
             background_color: None,
             text_color: None,      // Will use global default
             cursor_fg_color: None, // Default: black
             cursor_bg_color: None, // Default: white
+            prompt_icon: None,
+            prompt_icon_color: None,
             completion_candidates: Vec::new(),
             completion_index: None,
             completion_prefix: None,
@@ -95,6 +104,10 @@ impl CommandInput {
         self.title = title;
     }
 
+    pub fn set_title_position(&mut self, position: TitlePosition) {
+        self.title_position = position;
+    }
+
     pub fn set_background_color(&mut self, color: Option<String>) {
         self.background_color = color;
     }
@@ -106,6 +119,14 @@ impl CommandInput {
     pub fn set_cursor_colors(&mut self, fg: Option<String>, bg: Option<String>) {
         self.cursor_fg_color = fg;
         self.cursor_bg_color = bg;
+    }
+
+    pub fn set_prompt_icon(&mut self, icon: Option<String>) {
+        self.prompt_icon = icon;
+    }
+
+    pub fn set_prompt_icon_color(&mut self, color: Option<String>) {
+        self.prompt_icon_color = color;
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -365,39 +386,25 @@ impl CommandInput {
             self.title.clone()
         };
 
-        let mut block = Block::default();
-
         // Check if border_style is "none" - that should disable borders too
         let border_is_none = self.border_style.as_ref().is_some_and(|s| s == "none");
+        let show_border = self.show_border && !border_is_none;
+        let title_text = if self.show_title { title } else { String::new() };
 
-        if self.show_border && !border_is_none {
-            let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
-            block = block.borders(borders);
+        let borders = crossterm_bridge::to_ratatui_borders(&self.border_sides);
+        let border_type = match self.border_style.as_deref() {
+            Some("double") => BorderType::Double,
+            Some("rounded") => BorderType::Rounded,
+            Some("thick") => BorderType::Thick,
+            Some("quadrant_inside") => BorderType::QuadrantInside,
+            Some("quadrant_outside") => BorderType::QuadrantOutside,
+            _ => BorderType::Plain,
+        };
 
-            // Apply border style if specified
-            if let Some(style_str) = &self.border_style {
-                use ratatui::widgets::BorderType;
-                let border_type = match style_str.as_str() {
-                    "double" => BorderType::Double,
-                    "rounded" => BorderType::Rounded,
-                    "thick" => BorderType::Thick,
-                    "quadrant_inside" => BorderType::QuadrantInside,
-                    "quadrant_outside" => BorderType::QuadrantOutside,
-                    _ => BorderType::Plain,
-                };
-                block = block.border_type(border_type);
-            }
-
-            // Apply border color if specified
-            if let Some(color_str) = &self.border_color {
-                if let Some(color) = Self::parse_color(color_str) {
-                    block = block.border_style(Style::default().fg(color));
-                }
-            }
-
-            // Only show title if border is shown
-            if self.show_title {
-                block = block.title(title);
+        let mut border_style = Style::default();
+        if let Some(color_str) = &self.border_color {
+            if let Some(color) = Self::parse_color(color_str) {
+                border_style = border_style.fg(color);
             }
         }
 
@@ -432,17 +439,65 @@ impl CommandInput {
         }
 
         // Only render block if it has borders (otherwise it's just empty)
-        let inner = if self.show_border && !border_is_none {
-            let inner_area = block.inner(area);
-            block.render(area, buf);
-            inner_area
-        } else {
-            // No borders - use full area for content
-            area
-        };
+        let inner = title_position::render_block_with_title(
+            area,
+            buf,
+            show_border,
+            borders,
+            &self.border_sides,
+            border_type,
+            border_style,
+            &title_text,
+            self.title_position,
+        );
 
-        // Calculate horizontal scroll to keep cursor visible
-        let available_width = inner.width as usize;
+        // Calculate horizontal scroll to keep cursor visible (account for optional icon)
+        let mut text_area = inner;
+        let text_color = self
+            .text_color
+            .as_ref()
+            .and_then(|c| Self::parse_color(c))
+            .unwrap_or(Color::White);
+        let icon_text = self
+            .prompt_icon
+            .as_ref()
+            .and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() { None } else { Some(t) }
+            });
+        if let Some(icon) = icon_text {
+            let max_icon_width = inner.width as usize;
+            if max_icon_width > 0 {
+                let icon_render: String = icon.chars().take(max_icon_width).collect();
+                let icon_render_width = icon_render.chars().count();
+                let icon_color = self
+                    .prompt_icon_color
+                    .as_ref()
+                    .and_then(|c| Self::parse_color(c))
+                    .unwrap_or(text_color);
+                buf.set_string(
+                    inner.x,
+                    inner.y,
+                    &icon_render,
+                    Style::default().fg(icon_color),
+                );
+                let mut consumed = icon_render_width;
+                // Add a trailing spacer if room allows
+                if consumed < max_icon_width {
+                    buf.set_string(
+                        inner.x + consumed as u16,
+                        inner.y,
+                        " ",
+                        Style::default().fg(icon_color),
+                    );
+                    consumed += 1;
+                }
+                text_area.x = text_area.x.saturating_add(consumed as u16);
+                text_area.width = text_area.width.saturating_sub(consumed as u16);
+            }
+        }
+
+        let available_width = text_area.width as usize;
         let chars: Vec<char> = self.input.chars().collect();
         let total_chars = chars.len();
 
@@ -497,13 +552,6 @@ impl CommandInput {
             .unwrap_or(' ');
         let after_cursor: String = visible_chars.iter().skip(visible_cursor_pos + 1).collect();
 
-        // Get text color (default to white if not set)
-        let text_color = self
-            .text_color
-            .as_ref()
-            .and_then(|c| Self::parse_color(c))
-            .unwrap_or(Color::White);
-
         // Get cursor colors
         let cursor_fg = self
             .cursor_fg_color
@@ -526,7 +574,7 @@ impl CommandInput {
         ]);
 
         let paragraph = Paragraph::new(line);
-        paragraph.render(inner, buf);
+        paragraph.render(text_area, buf);
     }
 
     /// Reset completion state

@@ -39,7 +39,7 @@ impl Indicator {
             off_color: "#555555".to_string(), // Dark gray when off
             on_color: "#00ff00".to_string(),  // Green when on
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -213,3 +213,4 @@ impl Indicator {
         self.render(area, buf);
     }
 }
+

@@ -37,7 +37,7 @@ impl Default for ColorConfig {
         Self {
             foreground: None,
             background: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 }
@@ -84,7 +84,7 @@ impl ProgressBarData {
             bar_background_color: None,
             text_color: Some("#ffffff".to_string()), // White default
             window_background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -125,7 +125,7 @@ impl IndicatorData {
             off_color: "#555555".to_string(), // Dark gray
             on_color: "#00ff00".to_string(),   // Green
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -180,7 +180,7 @@ impl CountdownData {
             border: BorderConfig::default(),
             text_color: Some("#ffffff".to_string()), // White default
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -238,7 +238,7 @@ impl HandData {
             text_color: None,
             content_highlight_color: None,
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
         let config = ColorConfig::default();
         assert!(config.foreground.is_none());
         assert!(config.background.is_none());
-        assert!(config.transparent_background);
+        assert!(!config.transparent_background);
     }
 
     #[test]
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_progress_bar_transparent_background() {
         let data = ProgressBarData::new("Test".to_string(), 50, 100, None);
-        assert!(data.transparent_background);
+        assert!(!data.transparent_background);
     }
 
     // ===========================================
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn test_indicator_transparent_background() {
         let data = IndicatorData::new("Test".to_string(), false);
-        assert!(data.transparent_background);
+        assert!(!data.transparent_background);
         assert!(data.background_color.is_none());
     }
 
@@ -525,7 +525,7 @@ mod tests {
         let data = CountdownData::new("RT".to_string(), 5, 20, '█');
         assert_eq!(data.text_color, Some("#ffffff".to_string()));
         assert!(data.background_color.is_none());
-        assert!(data.transparent_background);
+        assert!(!data.transparent_background);
     }
 
     // ===========================================
@@ -615,7 +615,7 @@ mod tests {
         assert!(data.text_color.is_none());
         assert!(data.content_highlight_color.is_none());
         assert!(data.background_color.is_none());
-        assert!(data.transparent_background);
+        assert!(!data.transparent_background);
     }
 
     #[test]
@@ -677,3 +677,4 @@ mod tests {
         assert!(debug_str.contains("Stun"));
     }
 }
+

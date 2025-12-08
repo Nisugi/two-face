@@ -35,6 +35,13 @@ pub fn render_countdown(data: &CountdownData, area: Rect, buf: &mut Buffer) {
         .map(|c| parse_color(c))
         .unwrap_or(Color::White);
 
+    // Determine background color (no theme available here)
+    let bg_color = if data.transparent_background {
+        None
+    } else {
+        data.background_color.as_ref().map(|c| parse_color(c))
+    };
+
     let inner_area: Rect;
 
     if data.border.show_border {
@@ -52,6 +59,9 @@ pub fn render_countdown(data: &CountdownData, area: Rect, buf: &mut Buffer) {
         }
 
         block = block.border_style(Style::default().fg(border_color));
+        if let Some(bg) = bg_color {
+            block = block.style(Style::default().bg(bg));
+        }
         block = block.title(data.label.as_str());
 
         inner_area = block.inner(area);

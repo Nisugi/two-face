@@ -51,7 +51,7 @@ impl SpellsWindow {
             border_color: None,
             text_color: None,
             background_color: None,
-            transparent_background: true,
+            transparent_background: false,
             lines: Vec::new(),
             current_line: Vec::new(),
             scroll_offset: 0,
@@ -371,3 +371,4 @@ impl SpellsWindow {
         self.render(area, buf);
     }
 }
+

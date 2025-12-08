@@ -43,6 +43,8 @@ pub struct HighlightPattern {
     pub redirect_to: Option<String>, // Window name to redirect matching lines to
     #[serde(default)]
     pub redirect_mode: RedirectMode, // How to handle redirect: only or copy
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace: Option<String>, // If set, replace matched text with this string
 
     // Performance optimization: cache compiled regex (not serialized)
     #[serde(skip)]
@@ -301,6 +303,7 @@ mod tests {
             squelch: false,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 
@@ -325,6 +328,7 @@ mod tests {
             squelch: false,
             redirect_to: Some("combat".to_string()),
             redirect_mode: RedirectMode::RedirectCopy,
+            replace: None,
             compiled_regex: None,
         };
 
@@ -352,6 +356,7 @@ mod tests {
             squelch: true,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 
@@ -373,6 +378,7 @@ mod tests {
             squelch: false,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 
@@ -394,6 +400,7 @@ mod tests {
             squelch: false,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 
@@ -554,6 +561,7 @@ mod tests {
             squelch: false,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 
@@ -596,6 +604,7 @@ mod tests {
             squelch: false,
             redirect_to: Some("combat".to_string()),
             redirect_mode: RedirectMode::RedirectCopy,
+            replace: None,
             compiled_regex: None,
         };
         let toml_str = toml::to_string(&pattern).unwrap();
@@ -645,6 +654,7 @@ mod tests {
             squelch: false,
             redirect_to: None,
             redirect_mode: RedirectMode::default(),
+            replace: None,
             compiled_regex: None,
         };
 

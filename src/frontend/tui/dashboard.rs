@@ -85,7 +85,7 @@ impl Dashboard {
             border_sides: crate::config::BorderSides::default(),
             background_color: None,
             content_align: None,
-            transparent_background: true,
+            transparent_background: false,
         }
     }
 
@@ -442,3 +442,4 @@ impl Dashboard {
         }
     }
 }
+

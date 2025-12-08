@@ -19,6 +19,50 @@ pub enum SpanType {
     Speech,      // <preset id="speech"> from parser
 }
 
+/// Parse numeric current/max out of a progress bar text string.
+/// Supports:
+/// - "label 324/326" -> (324, 326)
+/// - "324/326" -> (324, 326)
+/// - "label (100%)" or "label 100%" -> (100, 100)
+/// - "label" -> (percentage, 100)
+fn parse_progress_numbers(text: &str, percentage: u32) -> (u32, u32) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return (percentage, 100);
+    }
+
+    // Slash form: current/max
+    if let Some(slash_pos) = trimmed.rfind('/') {
+        let before_slash = &trimmed[..slash_pos];
+        let after_slash = &trimmed[slash_pos + 1..];
+
+        let current = last_number(before_slash).unwrap_or(percentage);
+        let maximum = first_number(after_slash).unwrap_or(100);
+        return (current, maximum);
+    }
+
+    // Percent or single number form: treat as current, max = 100
+    if let Some(num) = first_number(trimmed) {
+        return (num, 100);
+    }
+
+    // Label-only: fall back to percentage/max
+    (percentage, 100)
+}
+
+fn first_number(input: &str) -> Option<u32> {
+    input
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '%')
+        .find_map(|token| token.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+}
+
+fn last_number(input: &str) -> Option<u32> {
+    input
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '%')
+        .rev()
+        .find_map(|token| token.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+}
+
 /// Convenience struct used while normalizing spans before they are wrapped in a
 /// higher-level `ParsedElement`.
 #[derive(Clone, Debug)]
@@ -412,11 +456,23 @@ impl XmlParser {
                 elements.push(ParsedElement::Component { id, value: content });
             }
         } else if tag.starts_with("<pushStream ") {
-            if !text_buffer.is_empty() {
+            // If we encounter a mid-line stream switch into the speech stream, carry the
+            // buffered text forward so the speech window gets the full line (including
+            // the speaker). Without this, a pushStream that occurs after "You " will
+            // leave the pronoun in the previous stream, cutting it off in the speech tab.
+            let target_stream = Self::extract_attribute(tag, "id");
+            let mut carried_prefix: Option<String> = None;
+            if target_stream.as_deref() == Some("speech") && !text_buffer.is_empty() {
+                // Hold onto the current buffer; don't flush to the previous stream.
+                carried_prefix = Some(std::mem::take(text_buffer));
+            } else if !text_buffer.is_empty() {
                 self.flush_text_with_events(text_buffer.clone(), elements);
                 text_buffer.clear();
             }
             self.handle_push_stream(tag, elements);
+            if let Some(prefix) = carried_prefix {
+                *text_buffer = prefix;
+            }
         } else if tag.starts_with("<popStream") || tag == "</component>" {
             if !text_buffer.is_empty() {
                 self.flush_text_with_events(text_buffer.clone(), elements);
@@ -669,8 +725,8 @@ impl XmlParser {
         // <indicator id='IconHIDDEN' visible='y'/>
         // <indicator id='IconSTUNNED' visible='n'/>
         if let Some(id) = Self::extract_attribute(tag, "id") {
-            // Strip "Icon" prefix and convert to lowercase
-            let status = id.strip_prefix("Icon").unwrap_or(&id).to_lowercase();
+            // Strip "Icon" prefix but preserve original casing of the remainder
+            let status = id.strip_prefix("Icon").unwrap_or(&id).to_string();
 
             // Extract visible attribute ('y' or 'n')
             if let Some(visible) = Self::extract_attribute(tag, "visible") {
@@ -710,9 +766,9 @@ impl XmlParser {
                     }
                 }
             }
-            // Handle Icon* status indicators
-            if id.starts_with("Icon") {
-                let status = id.strip_prefix("Icon").unwrap_or(&id).to_lowercase();
+            // Handle Icon* status indicators (preserve casing after stripping prefix)
+            if let Some(rest) = id.strip_prefix("Icon") {
+                let status = rest.to_string();
                 if let Some(value) = Self::extract_attribute(tag, "value") {
                     let active = value == "active";
                     elements.push(ParsedElement::StatusIndicator { id: status, active });
@@ -859,45 +915,18 @@ impl XmlParser {
                 .unwrap_or(0);
             let text = Self::extract_attribute(tag, "text").unwrap_or_default();
 
-            // Try to extract current/max from text (format: "mana 407/407" or "175/175")
-            let (value, max) = if let Some(slash_pos) = text.rfind('/') {
-                // Find the number before the slash
-                let before_slash = &text[..slash_pos];
-                // Extract the last number before the slash (current value)
-                let current = before_slash
-                    .split_whitespace()
-                    .rev()
-                    .find_map(|s| {
-                        s.trim_matches(|c: char| !c.is_ascii_digit())
-                            .parse::<u32>()
-                            .ok()
-                    })
-                    .unwrap_or(percentage);
+        // Try to extract current/max from text (format: "mana 407/407" or "175/175")
+        // Also handle formats like "defensive (100%)" (label + current) and label-only strings.
+        let (value, max) = parse_progress_numbers(&text, percentage);
 
-                // Extract the number after the slash (max value)
-                let after_slash = &text[slash_pos + 1..];
-                let maximum = after_slash
-                    .split_whitespace()
-                    .find_map(|s| {
-                        s.trim_matches(|c: char| !c.is_ascii_digit())
-                            .parse::<u32>()
-                            .ok()
-                    })
-                    .unwrap_or(100);
+        elements.push(ParsedElement::ProgressBar {
+            id,
+            value,
+            max,
+            text,
+        });
+    }
 
-                (current, maximum)
-            } else {
-                // No slash found - use percentage as value, 100 as max
-                (percentage, 100)
-            };
-
-            elements.push(ParsedElement::ProgressBar {
-                id,
-                value,
-                max,
-                text,
-            });
-        }
     }
 
     fn handle_label(&mut self, tag: &str, elements: &mut Vec<ParsedElement>) {
@@ -1816,5 +1845,843 @@ mod tests {
         let tag = "<a exist='12345'>";
         assert_eq!(XmlParser::extract_attribute(tag, "noun"), None);
         assert_eq!(XmlParser::extract_attribute(tag, "nonexistent"), None);
+    }
+
+    // ==================== Helper Functions ====================
+
+    #[test]
+    fn test_first_number_simple() {
+        assert_eq!(first_number("123"), Some(123));
+        assert_eq!(first_number("health 175"), Some(175));
+        assert_eq!(first_number("abc 42 def"), Some(42));
+    }
+
+    #[test]
+    fn test_first_number_with_delimiters() {
+        assert_eq!(first_number("(100%)"), Some(100));
+        assert_eq!(first_number("value (50)"), Some(50));
+        assert_eq!(first_number("  99  "), Some(99));
+    }
+
+    #[test]
+    fn test_first_number_no_number() {
+        assert_eq!(first_number("no numbers here"), None);
+        assert_eq!(first_number(""), None);
+        assert_eq!(first_number("   "), None);
+    }
+
+    #[test]
+    fn test_last_number_simple() {
+        assert_eq!(last_number("123"), Some(123));
+        assert_eq!(last_number("health 175"), Some(175));
+        assert_eq!(last_number("42 def 99"), Some(99));
+    }
+
+    #[test]
+    fn test_last_number_slash_format() {
+        // Note: last_number doesn't split on slash - it handles tokens
+        // "175/200" as a single token that can't be parsed
+        assert_eq!(last_number("health 175/200"), None);  // Can't parse "175/200"
+        assert_eq!(last_number("mana 386"), Some(386));
+        assert_eq!(last_number("health 175"), Some(175));  // Without slash works
+    }
+
+    #[test]
+    fn test_last_number_no_number() {
+        assert_eq!(last_number("no numbers"), None);
+        assert_eq!(last_number(""), None);
+    }
+
+    #[test]
+    fn test_parse_progress_numbers_slash_format() {
+        // "label current/max" format
+        assert_eq!(parse_progress_numbers("health 175/326", 50), (175, 326));
+        assert_eq!(parse_progress_numbers("mana 386/407", 94), (386, 407));
+        assert_eq!(parse_progress_numbers("stamina 100/100", 100), (100, 100));
+    }
+
+    #[test]
+    fn test_parse_progress_numbers_no_label() {
+        // "current/max" without label
+        assert_eq!(parse_progress_numbers("324/326", 99), (324, 326));
+        assert_eq!(parse_progress_numbers("0/100", 0), (0, 100));
+    }
+
+    #[test]
+    fn test_parse_progress_numbers_percent_format() {
+        // Percentage format
+        assert_eq!(parse_progress_numbers("defensive (100%)", 100), (100, 100));
+        assert_eq!(parse_progress_numbers("75%", 75), (75, 100));
+        assert_eq!(parse_progress_numbers("(50%)", 50), (50, 100));
+    }
+
+    #[test]
+    fn test_parse_progress_numbers_label_only() {
+        // Label without numbers - fallback to percentage/100
+        assert_eq!(parse_progress_numbers("clear as a bell", 0), (0, 100));
+        assert_eq!(parse_progress_numbers("focused", 50), (50, 100));
+    }
+
+    #[test]
+    fn test_parse_progress_numbers_empty() {
+        // Empty string
+        assert_eq!(parse_progress_numbers("", 75), (75, 100));
+        assert_eq!(parse_progress_numbers("   ", 50), (50, 100));
+    }
+
+    // ==================== ProgressBar Parsing ====================
+
+    #[test]
+    fn test_progressbar_health() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='health' value='100' text='health 175/175' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, text } = &pb_elements[0] {
+            assert_eq!(id, "health");
+            assert_eq!(*value, 175);
+            assert_eq!(*max, 175);
+            assert_eq!(text, "health 175/175");
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_mana_partial() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='mana' value='94' text='mana 386/407' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, text } = &pb_elements[0] {
+            assert_eq!(id, "mana");
+            assert_eq!(*value, 386);
+            assert_eq!(*max, 407);
+            assert_eq!(text, "mana 386/407");
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_stamina() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='stamina' value='75' text='stamina 75/100' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, text } = &pb_elements[0] {
+            assert_eq!(id, "stamina");
+            assert_eq!(*value, 75);
+            assert_eq!(*max, 100);
+            assert_eq!(text, "stamina 75/100");
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_spirit() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='spirit' value='100' text='spirit 100/100' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, .. } = &pb_elements[0] {
+            assert_eq!(id, "spirit");
+            assert_eq!(*value, 100);
+            assert_eq!(*max, 100);
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_mindstate() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='mindState' value='0' text='clear as a bell' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, text } = &pb_elements[0] {
+            assert_eq!(id, "mindState");
+            assert_eq!(*value, 0);  // Falls back to percentage
+            assert_eq!(*max, 100);
+            assert_eq!(text, "clear as a bell");
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_concentration() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<progressBar id='concentration' value='100' text='concentration (100%)' />");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, .. } = &pb_elements[0] {
+            assert_eq!(id, "concentration");
+            assert_eq!(*value, 100);
+            assert_eq!(*max, 100);
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_progressbar_inside_dialogdata() {
+        let mut parser = test_parser();
+        // This is the format used in minivitals updates
+        let elements = parser.parse_line("<dialogData id='minivitals'><progressBar id='mana' value='100' text='mana 414/414' left='76.7%' top='0%' width='23.3%' height='100%'/></dialogData>");
+
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert!(pb_elements.len() >= 1, "Should have at least one ProgressBar");
+
+        // Find the mana progressbar
+        let mana_pb = pb_elements.iter().find(|e| {
+            if let ParsedElement::ProgressBar { id, .. } = e {
+                id == "mana"
+            } else {
+                false
+            }
+        });
+
+        assert!(mana_pb.is_some(), "Should have mana ProgressBar");
+        if let Some(ParsedElement::ProgressBar { id, value, max, .. }) = mana_pb {
+            assert_eq!(id, "mana");
+            assert_eq!(*value, 414);
+            assert_eq!(*max, 414);
+        }
+    }
+
+    // ==================== CastTime Parsing ====================
+
+    #[test]
+    fn test_casttime_parsing() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<castTime value='3'/>");
+
+        let ct_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::CastTime { .. })).collect();
+        assert_eq!(ct_elements.len(), 1);
+
+        if let ParsedElement::CastTime { value } = &ct_elements[0] {
+            assert_eq!(*value, 3);
+        } else {
+            panic!("Expected CastTime element");
+        }
+    }
+
+    #[test]
+    fn test_casttime_long_duration() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<castTime value='10'/>");
+
+        let ct_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::CastTime { .. })).collect();
+        assert_eq!(ct_elements.len(), 1);
+
+        if let ParsedElement::CastTime { value } = &ct_elements[0] {
+            assert_eq!(*value, 10);
+        } else {
+            panic!("Expected CastTime element");
+        }
+    }
+
+    #[test]
+    fn test_casttime_zero() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<castTime value='0'/>");
+
+        let ct_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::CastTime { .. })).collect();
+        assert_eq!(ct_elements.len(), 1);
+
+        if let ParsedElement::CastTime { value } = &ct_elements[0] {
+            assert_eq!(*value, 0);
+        } else {
+            panic!("Expected CastTime element");
+        }
+    }
+
+    // ==================== Hand Item Parsing ====================
+
+    #[test]
+    fn test_left_hand_simple() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<left>Empty</left>");
+
+        let hand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::LeftHand { .. })).collect();
+        assert_eq!(hand_elements.len(), 1);
+
+        if let ParsedElement::LeftHand { item, link } = &hand_elements[0] {
+            assert_eq!(item, "Empty");
+            assert!(link.is_none());
+        } else {
+            panic!("Expected LeftHand element");
+        }
+    }
+
+    #[test]
+    fn test_left_hand_with_item() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<left exist='12345' noun='sword'>a gleaming steel sword</left>");
+
+        let hand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::LeftHand { .. })).collect();
+        assert_eq!(hand_elements.len(), 1);
+
+        if let ParsedElement::LeftHand { item, link } = &hand_elements[0] {
+            assert_eq!(item, "a gleaming steel sword");
+            let link_data = link.as_ref().expect("Should have link data");
+            assert_eq!(link_data.exist_id, "12345");
+            assert_eq!(link_data.noun, "sword");
+        } else {
+            panic!("Expected LeftHand element");
+        }
+    }
+
+    #[test]
+    fn test_right_hand_simple() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<right>Empty</right>");
+
+        let hand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::RightHand { .. })).collect();
+        assert_eq!(hand_elements.len(), 1);
+
+        if let ParsedElement::RightHand { item, link } = &hand_elements[0] {
+            assert_eq!(item, "Empty");
+            assert!(link.is_none());
+        } else {
+            panic!("Expected RightHand element");
+        }
+    }
+
+    #[test]
+    fn test_right_hand_with_item() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<right exist='67890' noun='shield'>an iron-banded shield</right>");
+
+        let hand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::RightHand { .. })).collect();
+        assert_eq!(hand_elements.len(), 1);
+
+        if let ParsedElement::RightHand { item, link } = &hand_elements[0] {
+            assert_eq!(item, "an iron-banded shield");
+            let link_data = link.as_ref().expect("Should have link data");
+            assert_eq!(link_data.exist_id, "67890");
+            assert_eq!(link_data.noun, "shield");
+        } else {
+            panic!("Expected RightHand element");
+        }
+    }
+
+    #[test]
+    fn test_left_hand_with_coord() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<left exist='11111' noun='dagger' coord='1234,5678'>a silver dagger</left>");
+
+        let hand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::LeftHand { .. })).collect();
+        assert_eq!(hand_elements.len(), 1);
+
+        if let ParsedElement::LeftHand { item, link } = &hand_elements[0] {
+            assert_eq!(item, "a silver dagger");
+            let link_data = link.as_ref().expect("Should have link data");
+            assert_eq!(link_data.coord.as_deref(), Some("1234,5678"));
+        } else {
+            panic!("Expected LeftHand element");
+        }
+    }
+
+    // ==================== SpellHand Parsing ====================
+
+    #[test]
+    fn test_spell_hand_simple() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<spell>Minor Shock (901)</spell>");
+
+        // Should emit both Spell and SpellHand elements
+        let spell_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Spell { .. })).collect();
+        let spellhand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::SpellHand { .. })).collect();
+
+        assert_eq!(spell_elements.len(), 1);
+        assert_eq!(spellhand_elements.len(), 1);
+
+        if let ParsedElement::Spell { text } = &spell_elements[0] {
+            assert_eq!(text, "Minor Shock (901)");
+        } else {
+            panic!("Expected Spell element");
+        }
+
+        if let ParsedElement::SpellHand { spell } = &spellhand_elements[0] {
+            assert_eq!(spell, "Minor Shock (901)");
+        } else {
+            panic!("Expected SpellHand element");
+        }
+    }
+
+    #[test]
+    fn test_spell_hand_empty() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<spell></spell>");
+
+        let spellhand_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::SpellHand { .. })).collect();
+        assert_eq!(spellhand_elements.len(), 1);
+
+        if let ParsedElement::SpellHand { spell } = &spellhand_elements[0] {
+            assert_eq!(spell, "");
+        } else {
+            panic!("Expected SpellHand element");
+        }
+    }
+
+    #[test]
+    fn test_spell_with_exist_attribute() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<spell exist='99999'>Fire Spirit (111)</spell>");
+
+        let spell_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Spell { .. })).collect();
+        assert_eq!(spell_elements.len(), 1);
+
+        if let ParsedElement::Spell { text } = &spell_elements[0] {
+            assert_eq!(text, "Fire Spirit (111)");
+        } else {
+            panic!("Expected Spell element");
+        }
+    }
+
+    // ==================== StatusIndicator Parsing ====================
+
+    #[test]
+    fn test_indicator_hidden_active() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<indicator id='IconHIDDEN' visible='y'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "HIDDEN");  // Icon prefix stripped, casing preserved
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_indicator_stunned_inactive() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<indicator id='IconSTUNNED' visible='n'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "STUNNED");
+            assert!(!*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_indicator_standing() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<indicator id='IconSTANDING' visible='y'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "STANDING");
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_indicator_kneeling() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<indicator id='IconKNEELING' visible='y'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "KNEELING");
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_indicator_prone() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<indicator id='IconPRONE' visible='y'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "PRONE");
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_dialogdata_status_indicator_poisoned() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='IconPOISONED' value='active'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "POISONED");
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_dialogdata_status_indicator_diseased_clear() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='IconDISEASED' value='clear'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "DISEASED");
+            assert!(!*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    #[test]
+    fn test_dialogdata_status_indicator_bleeding() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='IconBLEEDING' value='active'/>");
+
+        let ind_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StatusIndicator { .. })).collect();
+        assert_eq!(ind_elements.len(), 1);
+
+        if let ParsedElement::StatusIndicator { id, active } = &ind_elements[0] {
+            assert_eq!(id, "BLEEDING");
+            assert!(*active);
+        } else {
+            panic!("Expected StatusIndicator element");
+        }
+    }
+
+    // ==================== InjuryImage Parsing ====================
+
+    #[test]
+    fn test_injury_image_head() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='injuries'><image id='head' name='Injury2' /></dialogData>");
+
+        let injury_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::InjuryImage { .. })).collect();
+        assert_eq!(injury_elements.len(), 1);
+
+        if let ParsedElement::InjuryImage { id, name } = &injury_elements[0] {
+            assert_eq!(id, "head");
+            assert_eq!(name, "Injury2");
+        } else {
+            panic!("Expected InjuryImage element");
+        }
+    }
+
+    #[test]
+    fn test_injury_image_multiple() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='injuries'><image id='leftArm' name='Injury1' /><image id='chest' name='Injury3' /></dialogData>");
+
+        let injury_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::InjuryImage { .. })).collect();
+        assert_eq!(injury_elements.len(), 2);
+
+        // First injury
+        if let ParsedElement::InjuryImage { id, name } = &injury_elements[0] {
+            assert_eq!(id, "leftArm");
+            assert_eq!(name, "Injury1");
+        } else {
+            panic!("Expected InjuryImage element");
+        }
+
+        // Second injury
+        if let ParsedElement::InjuryImage { id, name } = &injury_elements[1] {
+            assert_eq!(id, "chest");
+            assert_eq!(name, "Injury3");
+        } else {
+            panic!("Expected InjuryImage element");
+        }
+    }
+
+    #[test]
+    fn test_injury_image_scar() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='injuries'><image id='rightLeg' name='Scar1' /></dialogData>");
+
+        let injury_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::InjuryImage { .. })).collect();
+        assert_eq!(injury_elements.len(), 1);
+
+        if let ParsedElement::InjuryImage { id, name } = &injury_elements[0] {
+            assert_eq!(id, "rightLeg");
+            assert_eq!(name, "Scar1");
+        } else {
+            panic!("Expected InjuryImage element");
+        }
+    }
+
+    #[test]
+    fn test_injuries_clear() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='injuries' clear='t'></dialogData>");
+
+        let injury_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::InjuryImage { .. })).collect();
+
+        // Should emit clear events for all body parts (14 parts)
+        assert!(injury_elements.len() >= 14, "Should clear all body parts, got {}", injury_elements.len());
+
+        // Verify body parts are cleared (name == id indicates cleared)
+        let cleared_parts: Vec<_> = injury_elements.iter().filter_map(|e| {
+            if let ParsedElement::InjuryImage { id, name } = e {
+                if id == name {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect();
+
+        assert!(cleared_parts.contains(&"head".to_string()));
+        assert!(cleared_parts.contains(&"chest".to_string()));
+        assert!(cleared_parts.contains(&"leftArm".to_string()));
+        assert!(cleared_parts.contains(&"rightArm".to_string()));
+    }
+
+    // ==================== Label Parsing ====================
+
+    #[test]
+    fn test_label_blood_points() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<label id='lblBPs' value='Blood Points: 100' />");
+
+        // Blood Points label is emitted as ProgressBar for consistency
+        let pb_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ProgressBar { .. })).collect();
+        assert_eq!(pb_elements.len(), 1);
+
+        if let ParsedElement::ProgressBar { id, value, max, text } = &pb_elements[0] {
+            assert_eq!(id, "lblBPs");
+            assert_eq!(*value, 100);
+            assert_eq!(*max, 100);
+            assert!(text.contains("Blood Points"));
+        } else {
+            panic!("Expected ProgressBar element");
+        }
+    }
+
+    #[test]
+    fn test_label_regular() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<label id='someLabel' value='Some Value' />");
+
+        let label_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Label { .. })).collect();
+        assert_eq!(label_elements.len(), 1);
+
+        if let ParsedElement::Label { id, value } = &label_elements[0] {
+            assert_eq!(id, "someLabel");
+            assert_eq!(value, "Some Value");
+        } else {
+            panic!("Expected Label element");
+        }
+    }
+
+    // ==================== Component Parsing ====================
+
+    #[test]
+    fn test_component_room_title() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<component id='room title'>Town Square</component>");
+
+        let comp_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Component { .. })).collect();
+        assert_eq!(comp_elements.len(), 1);
+
+        if let ParsedElement::Component { id, value } = &comp_elements[0] {
+            assert_eq!(id, "room title");
+            assert_eq!(value, "Town Square");
+        } else {
+            panic!("Expected Component element");
+        }
+    }
+
+    #[test]
+    fn test_compdef_room_desc() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<compDef id='room desc'>A description of the room with <a exist='1' noun='statue'>a marble statue</a>.</compDef>");
+
+        let comp_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::Component { .. })).collect();
+        assert_eq!(comp_elements.len(), 1);
+
+        if let ParsedElement::Component { id, value } = &comp_elements[0] {
+            assert_eq!(id, "room desc");
+            assert!(value.contains("marble statue"));
+        } else {
+            panic!("Expected Component element");
+        }
+    }
+
+    // ==================== Active Effects Parsing ====================
+
+    #[test]
+    fn test_active_spell() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='Active Spells'><progressBar id='115' value='74' text=\"Fasthr's Reward\" time='03:06:54'/></dialogData>");
+
+        let effect_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ActiveEffect { .. })).collect();
+        assert_eq!(effect_elements.len(), 1);
+
+        if let ParsedElement::ActiveEffect { category, id, value, text, time } = &effect_elements[0] {
+            assert_eq!(category, "ActiveSpells");  // Normalized
+            assert_eq!(id, "115");
+            assert_eq!(*value, 74);
+            assert_eq!(text, "Fasthr's Reward");
+            assert_eq!(time, "03:06:54");
+        } else {
+            panic!("Expected ActiveEffect element");
+        }
+    }
+
+    #[test]
+    fn test_buff_effect() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='Buffs'><progressBar id='buff1' value='100' text='Strength' time='01:00:00'/></dialogData>");
+
+        let effect_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ActiveEffect { .. })).collect();
+        assert_eq!(effect_elements.len(), 1);
+
+        if let ParsedElement::ActiveEffect { category, .. } = &effect_elements[0] {
+            assert_eq!(category, "Buffs");
+        } else {
+            panic!("Expected ActiveEffect element");
+        }
+    }
+
+    #[test]
+    fn test_clear_active_spells() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<dialogData id='Active Spells' clear='t'></dialogData>");
+
+        let clear_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ClearActiveEffects { .. })).collect();
+        assert_eq!(clear_elements.len(), 1);
+
+        if let ParsedElement::ClearActiveEffects { category } = &clear_elements[0] {
+            assert_eq!(category, "ActiveSpells");
+        } else {
+            panic!("Expected ClearActiveEffects element");
+        }
+    }
+
+    // ==================== StreamWindow Parsing ====================
+
+    #[test]
+    fn test_stream_window_room() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<streamWindow id='room' subtitle=' - Emberthorn Refuge, Bowery' />");
+
+        let sw_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::StreamWindow { .. })).collect();
+        assert_eq!(sw_elements.len(), 1);
+
+        if let ParsedElement::StreamWindow { id, subtitle } = &sw_elements[0] {
+            assert_eq!(id, "room");
+            assert_eq!(subtitle.as_deref(), Some(" - Emberthorn Refuge, Bowery"));
+        } else {
+            panic!("Expected StreamWindow element");
+        }
+    }
+
+    // ==================== Nav/RoomId Parsing ====================
+
+    #[test]
+    fn test_nav_room_id() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<nav rm='7150105'/>");
+
+        let room_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::RoomId { .. })).collect();
+        assert_eq!(room_elements.len(), 1);
+
+        if let ParsedElement::RoomId { id } = &room_elements[0] {
+            assert_eq!(id, "7150105");
+        } else {
+            panic!("Expected RoomId element");
+        }
+    }
+
+    // ==================== ClearStream Parsing ====================
+
+    #[test]
+    fn test_clear_stream() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<clearStream id='room'/>");
+
+        let clear_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::ClearStream { .. })).collect();
+        assert_eq!(clear_elements.len(), 1);
+
+        if let ParsedElement::ClearStream { id } = &clear_elements[0] {
+            assert_eq!(id, "room");
+        } else {
+            panic!("Expected ClearStream element");
+        }
+    }
+
+    // ==================== LaunchURL Parsing ====================
+
+    #[test]
+    fn test_launch_url() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<LaunchURL src='/gs4/play/cm/loader.asp?uname=test'/>");
+
+        let url_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::LaunchURL { .. })).collect();
+        assert_eq!(url_elements.len(), 1);
+
+        if let ParsedElement::LaunchURL { url } = &url_elements[0] {
+            assert_eq!(url, "/gs4/play/cm/loader.asp?uname=test");
+        } else {
+            panic!("Expected LaunchURL element");
+        }
+    }
+
+    // ==================== Menu Response Parsing ====================
+
+    #[test]
+    fn test_menu_response() {
+        let mut parser = test_parser();
+        let elements = parser.parse_line("<menu id='123'><mi coord='2524,1898'/><mi coord='2524,1735' noun='gleaming steel baselard'/></menu>");
+
+        let menu_elements: Vec<_> = elements.iter().filter(|e| matches!(e, ParsedElement::MenuResponse { .. })).collect();
+        assert_eq!(menu_elements.len(), 1);
+
+        if let ParsedElement::MenuResponse { id, coords } = &menu_elements[0] {
+            assert_eq!(id, "123");
+            assert_eq!(coords.len(), 2);
+            assert_eq!(coords[0].0, "2524,1898");
+            assert!(coords[0].1.is_none());
+            assert_eq!(coords[1].0, "2524,1735");
+            assert_eq!(coords[1].1.as_deref(), Some("gleaming steel baselard"));
+        } else {
+            panic!("Expected MenuResponse element");
+        }
     }
 }

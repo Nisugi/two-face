@@ -28,6 +28,27 @@ pub fn render_indicator(data: &IndicatorData, area: Rect, buf: &mut Buffer) {
         return;
     }
 
+    // Resolve background color once for border + fill
+    let resolved_bg = if !data.transparent_background {
+        data.background_color.as_ref().map(|c| parse_color(c))
+    } else {
+        None
+    };
+
+    // Pre-fill the entire area so borders also sit on the correct background
+    if let Some(bg_color) = resolved_bg {
+        for row in 0..area.height {
+            for col in 0..area.width {
+                let x = area.x + col;
+                let y = area.y + row;
+                if x < buf.area().width && y < buf.area().height {
+                    buf[(x, y)].set_char(' ');
+                    buf[(x, y)].set_bg(bg_color);
+                }
+            }
+        }
+    }
+
     // Determine which borders to show
     let borders = if data.border.show_border {
         // For now, always show all borders when border is enabled
@@ -63,6 +84,9 @@ pub fn render_indicator(data: &IndicatorData, area: Rect, buf: &mut Buffer) {
         }
 
         block = block.border_style(Style::default().fg(border_color));
+        if let Some(bg_color) = resolved_bg {
+            block = block.style(Style::default().bg(bg_color));
+        }
         block = block.title(data.label.as_str());
 
         inner_area = block.inner(area);
@@ -76,17 +100,14 @@ pub fn render_indicator(data: &IndicatorData, area: Rect, buf: &mut Buffer) {
     }
 
     // Fill background if not transparent and color is set
-    if !data.transparent_background {
-        if let Some(ref color_hex) = data.background_color {
-            let bg_color = parse_color(color_hex);
-            for row in 0..inner_area.height {
-                for col in 0..inner_area.width {
-                    let x = inner_area.x + col;
-                    let y = inner_area.y + row;
-                    if x < buf.area().width && y < buf.area().height {
-                        buf[(x, y)].set_char(' ');
-                        buf[(x, y)].set_bg(bg_color);
-                    }
+    if let Some(bg_color) = resolved_bg {
+        for row in 0..inner_area.height {
+            for col in 0..inner_area.width {
+                let x = inner_area.x + col;
+                let y = inner_area.y + row;
+                if x < buf.area().width && y < buf.area().height {
+                    buf[(x, y)].set_char(' ');
+                    buf[(x, y)].set_bg(bg_color);
                 }
             }
         }
@@ -120,11 +141,8 @@ pub fn render_indicator(data: &IndicatorData, area: Rect, buf: &mut Buffer) {
                 buf[(x, y)].set_char(c);
                 buf[(x, y)].set_fg(color);
                 // Set background if not transparent and color is configured
-                if !data.transparent_background {
-                    if let Some(ref color_hex) = data.background_color {
-                        let bg_color = parse_color(color_hex);
-                        buf[(x, y)].set_bg(bg_color);
-                    }
+                if let Some(bg_color) = resolved_bg {
+                    buf[(x, y)].set_bg(bg_color);
                 }
             }
         }

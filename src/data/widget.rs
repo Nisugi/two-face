@@ -64,6 +64,7 @@ pub struct ProgressData {
     pub max: u32,              // Maximum value (actual max, not percentage)
     pub label: String,         // Display label
     pub color: Option<String>, // Hex color override (or custom text like "clear as a bell")
+    pub progress_id: String,   // Feed id (XML progressBar id), case-sensitive
 }
 
 /// Countdown timer state
@@ -71,6 +72,7 @@ pub struct ProgressData {
 pub struct CountdownData {
     pub end_time: i64, // Unix timestamp when timer expires
     pub label: String, // Display label
+    pub countdown_id: String, // Feed id (XML event id), case-sensitive
 }
 
 /// Compass directions
@@ -109,8 +111,9 @@ impl InjuryDollData {
 /// Status indicator state
 #[derive(Clone, Debug)]
 pub struct IndicatorData {
-    pub status: String,        // "standing", "kneeling", "sitting", etc.
-    pub color: Option<String>, // Color for this status
+    pub indicator_id: String,  // Feed id, e.g., "kneeling", "hidden"
+    pub active: bool,          // Whether indicator is on
+    pub color: Option<String>, // Optional color override
 }
 
 /// Room description content
@@ -147,6 +150,7 @@ pub struct TabDefinition {
     pub name: String,   // Display name of tab
     pub streams: Vec<String>, // Stream IDs this tab listens to
     pub show_timestamps: bool, // Whether to render timestamps for this tab
+    pub ignore_activity: bool, // Skip unread indicators/counts
 }
 
 /// Holds the state for a single tab, including its definition and content.
@@ -165,16 +169,17 @@ pub struct TabbedTextContent {
 
 impl TabbedTextContent {
     pub fn new(
-        tabs: Vec<(String, Vec<String>, bool)>,
+        tabs: Vec<(String, Vec<String>, bool, bool)>,
         max_lines_per_tab: usize,
     ) -> Self {
         let tabs = tabs
             .into_iter()
-            .map(|(name, streams, show_timestamps)| {
+            .map(|(name, streams, show_timestamps, ignore_activity)| {
                 let definition = TabDefinition {
                     name: name.clone(),
                     streams,
                     show_timestamps,
+                    ignore_activity,
                 };
                 let content = TextContent::new(name, max_lines_per_tab);
                 TabState { definition, content }
@@ -556,8 +561,13 @@ mod tests {
     #[test]
     fn test_tabbed_text_content_new() {
         let tabs = vec![
-            ("Main".to_string(), vec!["main".to_string()], false),
-            ("Combat".to_string(), vec!["combat".to_string(), "death".to_string()], true),
+            ("Main".to_string(), vec!["main".to_string()], false, false),
+            (
+                "Combat".to_string(),
+                vec!["combat".to_string(), "death".to_string()],
+                true,
+                true,
+            ),
         ];
 
         let content = TabbedTextContent::new(tabs, 1000);
@@ -568,10 +578,12 @@ mod tests {
         assert_eq!(content.tabs[0].definition.name, "Main");
         assert_eq!(content.tabs[0].definition.streams, vec!["main"]);
         assert!(!content.tabs[0].definition.show_timestamps);
+        assert!(!content.tabs[0].definition.ignore_activity);
 
         assert_eq!(content.tabs[1].definition.name, "Combat");
         assert_eq!(content.tabs[1].definition.streams, vec!["combat", "death"]);
         assert!(content.tabs[1].definition.show_timestamps);
+        assert!(content.tabs[1].definition.ignore_activity);
     }
 
     // ==================== ProgressData Tests ====================
@@ -583,12 +595,14 @@ mod tests {
             max: 100,
             label: "Health".to_string(),
             color: Some("#00FF00".to_string()),
+            progress_id: "health".to_string(),
         };
 
         assert_eq!(progress.value, 75);
         assert_eq!(progress.max, 100);
         assert_eq!(progress.label, "Health");
         assert_eq!(progress.color, Some("#00FF00".to_string()));
+        assert_eq!(progress.progress_id, "health");
     }
 
     // ==================== CompassData Tests ====================

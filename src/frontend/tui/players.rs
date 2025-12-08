@@ -9,6 +9,8 @@ use ratatui::{buffer::Buffer, layout::Rect};
 pub struct Players {
     container: ScrollableContainer,
     count: u32,
+    base_title: String,
+    count_override: Option<String>,
 }
 
 impl Players {
@@ -20,6 +22,8 @@ impl Players {
         Self {
             container,
             count: 0,
+            base_title: title.to_string(),
+            count_override: None,
         }
     }
 
@@ -111,8 +115,25 @@ impl Players {
     }
 
     fn update_title(&mut self) {
-        let title = format!("Players [{:02}]", self.count);
-        self.container.set_title(title);
+        if let Some(ref override_count) = self.count_override {
+            let title = if self.base_title.is_empty() {
+                String::new()
+            } else {
+                format!("{} {}", self.base_title, override_count)
+            };
+            self.container.set_title(title);
+        } else if self.base_title.is_empty() {
+            self.container.set_title(String::new());
+        } else {
+            let title = format!("{} [{:02}]", self.base_title, self.count);
+            self.container.set_title(title);
+        }
+    }
+
+    pub fn set_title_with_count(&mut self, base_title: &str, count: Option<&str>) {
+        self.base_title = base_title.to_string();
+        self.count_override = count.map(|c| c.to_string());
+        self.update_title();
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -133,6 +154,14 @@ impl Players {
 
     pub fn set_bar_color(&mut self, color: String) {
         self.container.set_bar_color(color);
+    }
+
+    pub fn set_background_color(&mut self, color: Option<String>) {
+        self.container.set_background_color(color);
+    }
+
+    pub fn set_text_color(&mut self, color: Option<String>) {
+        self.container.set_text_color(color);
     }
 
     pub fn set_transparent_background(&mut self, transparent: bool) {

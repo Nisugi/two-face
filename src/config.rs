@@ -38,36 +38,38 @@ const LAYOUT_DEFAULT: &str = include_str!("../defaults/layouts/layout.toml");
 /// Widget category for organizing windows in menus
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WidgetCategory {
-    ProgressBar,
-    TextWindow,
-    Countdown,
-    Hand,
     ActiveEffects,
+    Countdown,
     Entity,
+    Hand,
     Other,
+    ProgressBar,
+    Status,
+    TextWindow,
 }
 
 impl WidgetCategory {
     pub fn display_name(&self) -> &str {
         match self {
-            Self::ProgressBar => "Progress Bars",
-            Self::TextWindow => "Text Windows",
-            Self::Countdown => "Countdowns",
-            Self::Hand => "Hands",
             Self::ActiveEffects => "Active Effects",
-            Self::Entity => "Entity",
+            Self::Countdown => "Countdowns",
+            Self::Entity => "Entities",
+            Self::Hand => "Hands",
             Self::Other => "Other",
+            Self::ProgressBar => "Progress Bars",
+            Self::Status => "Status",
+            Self::TextWindow => "Text Windows",
         }
     }
 
     pub fn from_widget_type(widget_type: &str) -> Self {
         match widget_type {
-            "progress" => Self::ProgressBar,
-            "text" => Self::TextWindow,
-            "tabbedtext" => Self::TextWindow,
             "countdown" => Self::Countdown,
             "hand" => Self::Hand,
             "active_effects" => Self::ActiveEffects,
+            "indicator" | "dashboard" => Self::Status,
+            "progress" => Self::ProgressBar,
+            "text" | "tabbedtext" => Self::TextWindow,
             "targets" | "players" => Self::Entity,
             _ => Self::Other,
         }
@@ -520,6 +522,8 @@ pub struct WindowBase {
     pub show_title: bool,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default = "default_title_position")]
+    pub title_position: String,
     #[serde(default)]
     pub background_color: Option<String>,
     #[serde(default)]
@@ -590,6 +594,10 @@ pub struct CommandInputWidgetData {
     pub cursor_color: Option<String>,
     #[serde(default)]
     pub cursor_background_color: Option<String>,
+    #[serde(default)]
+    pub prompt_icon: Option<String>,
+    #[serde(default)]
+    pub prompt_icon_color: Option<String>,
 }
 
 /// Inventory widget specific data
@@ -614,6 +622,8 @@ pub struct TabbedTextWidgetData {
     pub buffer_size: usize,
     #[serde(default = "default_tab_bar_position")]
     pub tab_bar_position: String,
+    #[serde(default)]
+    pub tab_separator: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_active_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -628,6 +638,10 @@ fn default_tab_bar_position() -> String {
     "top".to_string()
 }
 
+fn default_title_position() -> String {
+    "top-left".to_string()
+}
+
 /// Tab configuration for TabbedText widget
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabbedTextTab {
@@ -638,8 +652,12 @@ pub struct TabbedTextTab {
     /// Multiple streams (preferred) - if both set, this takes precedence
     #[serde(default)]
     pub streams: Vec<String>,
-    #[serde(default)]
+    /// Show timestamps (overrides ui.show_timestamps if Some)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_timestamps: Option<bool>,
+    /// Ignore activity/unread indicators for this tab
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_activity: Option<bool>,
 }
 
 impl TabbedTextTab {
@@ -659,21 +677,34 @@ impl TabbedTextTab {
 /// Progress bar widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgressWidgetData {
+    /// Progress feed identifier (XML progressBar id); case-sensitive
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
     pub numbers_only: bool,
+    /// When true, show only the current value (no label, no max)
+    #[serde(default)]
+    pub current_only: bool,
 }
 
 /// Countdown timer widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CountdownWidgetData {
+    /// Countdown feed identifier (XML id), case-sensitive
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
     pub icon: Option<char>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub background_color: Option<String>,
 }
 
 /// Compass widget specific data
@@ -708,9 +739,17 @@ pub struct InjuryDollWidgetData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndicatorWidgetData {
     #[serde(default)]
-    pub default_status: Option<String>,
+    pub icon: Option<String>,
     #[serde(default)]
-    pub default_color: Option<String>,
+    pub indicator_id: Option<String>,
+    #[serde(default = "default_indicator_inactive_color")]
+    pub inactive_color: Option<String>,
+    #[serde(default = "default_indicator_active_color")]
+    pub active_color: Option<String>,
+    #[serde(default)]
+    pub default_status: Option<String>, // legacy
+    #[serde(default)]
+    pub default_color: Option<String>,  // legacy
 }
 
 /// Dashboard widget specific data
@@ -754,10 +793,34 @@ fn default_dashboard_hide_inactive() -> bool {
     false
 }
 
+pub(crate) fn default_target_entity_id() -> String {
+    "targetcount".to_string()
+}
+
+pub(crate) fn default_player_entity_id() -> String {
+    "playercount".to_string()
+}
+
+fn default_indicator_active_color() -> Option<String> {
+    Some("#00ff00".to_string())
+}
+
+fn default_indicator_inactive_color() -> Option<String> {
+    Some("#555555".to_string())
+}
+
 /// Hand widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandWidgetData {
-    // No extra fields currently
+    /// Optional icon prefix (e.g., "L:", "R:", "S:")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Icon color (falls back to window/text color if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
+    /// Text color override (also overrides link color if set)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
 }
 
 /// Active effects widget specific data
@@ -804,13 +867,15 @@ pub struct PerformanceWidgetData {
 /// Targets widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TargetsWidgetData {
-    // No extra fields currently
+    #[serde(default = "default_target_entity_id")]
+    pub entity_id: String,
 }
 
 /// Players widget specific data
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayersWidgetData {
-    // No extra fields currently
+    #[serde(default = "default_player_entity_id")]
+    pub entity_id: String,
 }
 
 /// Spacer widget specific data
@@ -1092,7 +1157,7 @@ fn default_show_title() -> bool {
 }
 
 fn default_transparent_background() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2037,9 +2102,10 @@ impl Config {
             border_color: None,
             show_title: true,
             title: None, // Will be overridden
+            title_position: default_title_position(),
             background_color: None,
             text_color: None,
-            transparent_background: true,
+            transparent_background: false,
             locked: false,
             min_rows: None,
             max_rows: None,
@@ -2131,9 +2197,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("health".to_string()),
                     label: Some("Health".to_string()),
                     color: Some("#6e0202".to_string()), // Dark red
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
             "performance" => Some(WindowDef::Performance {
@@ -2181,9 +2249,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("mana".to_string()),
                     label: Some("Mana".to_string()),
                     color: Some("#08086d".to_string()), // Dark blue
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2201,9 +2271,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("stamina".to_string()),
                     label: Some("Stamina".to_string()),
                     color: Some("#bd7b00".to_string()), // Orange
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
             "targets" => Some(WindowDef::Targets {
@@ -2218,7 +2290,9 @@ impl Config {
                     min_cols: Some(20),
                     ..base_defaults.clone()
                 },
-                data: TargetsWidgetData {},
+                data: TargetsWidgetData {
+                    entity_id: default_target_entity_id(),
+                },
             }),
             "players" => Some(WindowDef::Players {
                 base: WindowBase {
@@ -2232,7 +2306,185 @@ impl Config {
                     min_cols: Some(20),
                     ..base_defaults.clone()
                 },
-                data: PlayersWidgetData {},
+                data: PlayersWidgetData {
+                    entity_id: default_player_entity_id(),
+                },
+            }),
+
+            "entity_custom" => Some(WindowDef::Targets {
+                base: WindowBase {
+                    name: "entity_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40,
+                    min_rows: Some(4),
+                    min_cols: Some(20),
+                    ..base_defaults.clone()
+                },
+                data: TargetsWidgetData {
+                    entity_id: String::new(),
+                },
+            }),
+
+            "dashboard" => Some(WindowDef::Dashboard {
+                base: WindowBase {
+                    name: "dashboard".to_string(),
+                    title: Some("Dashboard".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 5,
+                    cols: 40,
+                    min_rows: Some(3),
+                    min_cols: Some(10),
+                    ..base_defaults.clone()
+                },
+                data: DashboardWidgetData {
+                    layout: default_dashboard_layout(),
+                    spacing: default_dashboard_spacing(),
+                    hide_inactive: default_dashboard_hide_inactive(),
+                    indicators: Vec::new(),
+                },
+            }),
+
+            "poisoned" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "poisoned".to_string(),
+                    title: Some("Poisoned".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: Some("f231".to_string()), // Nerdfont poison icon
+                    indicator_id: Some("poisoned".to_string()),
+                    inactive_color: None,
+                    active_color: Some("#00ff00".to_string()),
+                    default_status: None,
+                    default_color: Some("#00ff00".to_string()),
+                },
+            }),
+            "bleeding" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "bleeding".to_string(),
+                    title: Some("Bleeding".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: Some("f043".to_string()), // Nerdfont bleeding icon
+                    indicator_id: Some("bleeding".to_string()),
+                    inactive_color: None,
+                    active_color: Some("#ff0000".to_string()),
+                    default_status: None,
+                    default_color: Some("#ff0000".to_string()),
+                },
+            }),
+            "diseased" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "diseased".to_string(),
+                    title: Some("Diseased".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: Some("ef7f".to_string()), // Nerdfont diseased icon
+                    indicator_id: Some("diseased".to_string()),
+                    inactive_color: None,
+                    active_color: Some("#8b4513".to_string()),
+                    default_status: None,
+                    default_color: Some("#8b4513".to_string()),
+                },
+            }),
+            "stunned" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "stunned".to_string(),
+                    title: Some("Stunned".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: Some("26a1".to_string()), // Lightning bolt
+                    indicator_id: Some("stunned".to_string()),
+                    inactive_color: None,
+                    active_color: Some("#ffff00".to_string()),
+                    default_status: None,
+                    default_color: Some("#ffff00".to_string()),
+                },
+            }),
+            "webbed" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "webbed".to_string(),
+                    title: Some("Webbed".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: Some("f0bca".to_string()), // Nerdfont web icon
+                    indicator_id: Some("webbed".to_string()),
+                    inactive_color: None,
+                    active_color: Some("#cccccc".to_string()),
+                    default_status: None,
+                    default_color: Some("#cccccc".to_string()),
+                },
+            }),
+            "indicator_custom" => Some(WindowDef::Indicator {
+                base: WindowBase {
+                    name: "indicator_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 1,
+                    cols: 1,
+                    min_rows: Some(1),
+                    max_rows: Some(1),
+                    min_cols: Some(1),
+                    max_cols: Some(1),
+                    ..base_defaults.clone()
+                },
+                data: IndicatorWidgetData {
+                    icon: None,
+                    indicator_id: Some("indicator_custom".to_string()),
+                    inactive_color: None,
+                    active_color: None,
+                    default_status: None,
+                    default_color: None,
+                },
             }),
 
             "spirit" => Some(WindowDef::Progress {
@@ -2249,9 +2501,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("spirit".to_string()),
                     label: Some("Spirit".to_string()),
                     color: Some("#6e727c".to_string()), // Gray
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2269,9 +2523,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("encumlevel".to_string()),
                     label: Some("Encumbrance".to_string()),
                     color: Some("#006400".to_string()), // Dark green
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2289,9 +2545,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("pbarStance".to_string()),
                     label: Some("Stance".to_string()),
                     color: Some("#000080".to_string()), // Navy
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2309,9 +2567,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("mindState".to_string()),
                     label: Some("Mind".to_string()),
                     color: Some("#008b8b".to_string()), // Cyan/teal
                     numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2329,9 +2589,33 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: ProgressWidgetData {
+                    id: Some("lblBPs".to_string()),
                     label: Some("Blood Points".to_string()),
                     color: Some("#8B0000".to_string()), // Dark red
                     numbers_only: false,
+                    current_only: false,
+                },
+            }),
+
+            "progress_custom" => Some(WindowDef::Progress {
+                base: WindowBase {
+                    name: "progress_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    min_rows: Some(1),
+                    max_rows: Some(3),
+                    ..base_defaults.clone()
+                },
+                data: ProgressWidgetData {
+                id: None,
+                    label: None,
+                    color: None,
+                    numbers_only: false,
+                    current_only: false,
                 },
             }),
 
@@ -2348,8 +2632,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: CountdownWidgetData {
+                    id: Some("roundtime".to_string()),
                     label: None,
-                    icon: Some('█'),
+                    icon: Some(default_countdown_icon().chars().next().unwrap_or('█')),
+                    color: None,
+                    background_color: None,
                 },
             }),
 
@@ -2366,8 +2653,11 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: CountdownWidgetData {
+                    id: Some("casttime".to_string()),
                     label: None,
-                    icon: Some('█'),
+                    icon: Some(default_countdown_icon().chars().next().unwrap_or('█')),
+                    color: None,
+                    background_color: None,
                 },
             }),
 
@@ -2384,15 +2674,38 @@ impl Config {
                     ..base_defaults.clone()
                 },
                 data: CountdownWidgetData {
+                    id: Some("stuntime".to_string()),
                     label: None,
-                    icon: Some('█'),
+                    icon: Some(default_countdown_icon().chars().next().unwrap_or('█')),
+                    color: None,
+                    background_color: None,
+                },
+            }),
+
+            "countdown_custom" => Some(WindowDef::Countdown {
+                base: WindowBase {
+                    name: "countdown_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    row: 0,
+                    col: 0,
+                    rows: 3,
+                    cols: 20,
+                    show_border: true,
+                    ..base_defaults.clone()
+                },
+                data: CountdownWidgetData {
+                    id: None,
+                    label: None,
+                    icon: Some(default_countdown_icon().chars().next().unwrap_or('█')),
+                    color: None,
+                    background_color: None,
                 },
             }),
 
             "compass" => Some(WindowDef::Compass {
                 base: WindowBase {
                     name: "compass".to_string(),
-                    title: Some("Exits".to_string()),
+                    title: Some("Compass".to_string()),
                     row: 0,
                     col: 0,
                     rows: 5, // 3 for compass grid + 2 for border
@@ -2496,9 +2809,23 @@ impl Config {
                 },
             }),
 
-            "left_hand" => Some(WindowDef::Hand {
+            "active_effects_custom" => Some(WindowDef::ActiveEffects {
                 base: WindowBase {
-                    name: "left_hand".to_string(),
+                    name: "active_effects_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    rows: 10,
+                    cols: 30,
+                    show_border: true,
+                    ..base_defaults.clone()
+                },
+                data: ActiveEffectsWidgetData {
+                    category: String::new(),
+                },
+            }),
+
+            "left" => Some(WindowDef::Hand {
+                base: WindowBase {
+                    name: "left".to_string(),
                     title: Some("Left Hand".to_string()),
                     row: 0,
                     col: 0,
@@ -2509,12 +2836,16 @@ impl Config {
                     max_rows: Some(3),
                     ..base_defaults.clone()
                 },
-                data: HandWidgetData {},
+                data: HandWidgetData {
+                    icon: Some("L:".to_string()),
+                    icon_color: None,
+                    text_color: None,
+                },
             }),
 
-            "right_hand" => Some(WindowDef::Hand {
+            "right" => Some(WindowDef::Hand {
                 base: WindowBase {
-                    name: "right_hand".to_string(),
+                    name: "right".to_string(),
                     title: Some("Right Hand".to_string()),
                     row: 0,
                     col: 0,
@@ -2525,12 +2856,16 @@ impl Config {
                     max_rows: Some(3),
                     ..base_defaults.clone()
                 },
-                data: HandWidgetData {},
+                data: HandWidgetData {
+                    icon: Some("R:".to_string()),
+                    icon_color: None,
+                    text_color: None,
+                },
             }),
 
-            "spell_hand" => Some(WindowDef::Hand {
+            "spell" => Some(WindowDef::Hand {
                 base: WindowBase {
-                    name: "spell_hand".to_string(),
+                    name: "spell".to_string(),
                     title: Some("Spell".to_string()),
                     row: 0,
                     col: 0,
@@ -2541,7 +2876,11 @@ impl Config {
                     max_rows: Some(3),
                     ..base_defaults.clone()
                 },
-                data: HandWidgetData {},
+                data: HandWidgetData {
+                    icon: Some("S:".to_string()),
+                    icon_color: None,
+                    text_color: None,
+                },
             }),
 
             // Text window templates for common streams
@@ -2725,6 +3064,23 @@ impl Config {
                 },
             }),
 
+            "text_custom" => Some(WindowDef::Text {
+                base: WindowBase {
+                    name: "text_custom".to_string(),
+                    title: Some("Custom".to_string()),
+                    rows: 10,
+                    cols: 40,
+                    show_border: true,
+                    ..base_defaults.clone()
+                },
+                data: TextWidgetData {
+                    streams: vec!["custom".to_string()],
+                    buffer_size: 1000,
+                    wordwrap: true,
+                    show_timestamps: false,
+                },
+            }),
+
             "spells" => Some(WindowDef::Spells {
                 base: WindowBase {
                     name: "spells".to_string(),
@@ -2754,34 +3110,40 @@ impl Config {
                             stream: None,
                             streams: vec!["thoughts".to_string()],
                             show_timestamps: None,
+                            ignore_activity: Some(false),
                         },
                         TabbedTextTab {
                             name: "Speech".to_string(),
                             stream: None,
                             streams: vec!["speech".to_string()],
                             show_timestamps: None,
+                            ignore_activity: Some(false),
                         },
                         TabbedTextTab {
                             name: "Announcements".to_string(),
                             stream: None,
                             streams: vec!["announcements".to_string()],
                             show_timestamps: None,
+                            ignore_activity: Some(false),
                         },
                         TabbedTextTab {
                             name: "Loot".to_string(),
                             stream: None,
                             streams: vec!["loot".to_string()],
                             show_timestamps: None,
+                            ignore_activity: Some(false),
                         },
                         TabbedTextTab {
                             name: "Ambients".to_string(),
                             stream: None,
                             streams: vec!["ambients".to_string()],
                             show_timestamps: None,
+                            ignore_activity: Some(false),
                         },
                     ],
                     buffer_size: 5000,
                     tab_bar_position: "top".to_string(),
+                    tab_separator: true,
                     tab_active_color: None,
                     tab_inactive_color: None,
                     tab_unread_color: None,
@@ -2819,6 +3181,14 @@ impl Config {
             "pbarStance",
             "mindState",
             "lblBPs",
+            "progress_custom",
+            "dashboard",
+            "poisoned",
+            "bleeding",
+            "diseased",
+            "stunned",
+            "webbed",
+            "indicator_custom",
             // Text windows
             "main",
             "thoughts",
@@ -2831,24 +3201,28 @@ impl Config {
             "ambients",
             "bounty",
             "society",
+            "text_custom",
             // Tabbed text windows
             "chat",
             // Entity
             "targets",
             "players",
+            "entity_custom",
             // Countdowns
             "roundtime",
             "casttime",
             "stuntime",
+            "countdown_custom",
             // Hands
-            "left_hand",
-            "right_hand",
-            "spell_hand",
+            "left",
+            "right",
+            "spell",
             // Active Effects
             "buffs",
             "debuffs",
             "cooldowns",
             "active_spells",
+            "active_effects_custom",
             // Other
             "inventory",
             "room",
@@ -2916,7 +3290,7 @@ impl Config {
     ) -> HashMap<WidgetCategory, Vec<String>> {
         let all_by_category = Self::get_templates_by_category();
 
-        all_by_category
+        let mut visible_by_category: HashMap<WidgetCategory, Vec<String>> = all_by_category
             .into_iter()
             .map(|(category, templates)| {
                 let visible: Vec<String> = templates
@@ -2936,7 +3310,23 @@ impl Config {
                 (category, visible)
             })
             .filter(|(_, templates)| !templates.is_empty())
-            .collect()
+            .collect();
+
+        // Special-case command_input: always present, not addable, not hideable, but editable
+        if !exclude_essential {
+            if let Some(cmd) = layout
+                .windows
+                .iter()
+                .find(|w| w.widget_type() == "command_input" && w.base().visible)
+            {
+                visible_by_category
+                    .entry(WidgetCategory::Other)
+                    .or_default()
+                    .push(cmd.name().to_string());
+            }
+        }
+
+        visible_by_category
     }
 
     /// Get list of visible windows in a layout
@@ -3582,7 +3972,7 @@ mod tests {
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3590,6 +3980,7 @@ mod tests {
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3624,7 +4015,7 @@ rows = 3
 cols = 8
 show_border = false
 show_title = false
-transparent_background = true
+transparent_background = false
 visible = true
 "#;
 
@@ -3652,7 +4043,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3660,6 +4051,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3695,7 +4087,7 @@ visible = true
         assert_eq!(base.cols, 6);
         assert!(!base.show_border);
         assert!(!base.show_title);
-        assert!(base.transparent_background);
+        assert!(!base.transparent_background);
         assert!(base.visible);
     }
 
@@ -3717,7 +4109,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3725,6 +4117,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3744,7 +4137,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3752,6 +4145,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3794,7 +4188,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3802,6 +4196,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3821,7 +4216,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3829,6 +4224,7 @@ visible = true
                 max_cols: None,
                 visible: false,
                 content_align: None,  // Hidden!
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3882,6 +4278,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -3906,7 +4303,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -3914,6 +4311,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -3941,6 +4339,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -3996,6 +4395,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4020,7 +4420,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -4028,6 +4428,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -4055,6 +4456,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4123,6 +4525,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["main".to_string()],
@@ -4147,7 +4550,7 @@ visible = true
                 title: None,
                 background_color: None,
                 text_color: None,
-                transparent_background: true,
+                transparent_background: false,
                 locked: false,
                 min_rows: None,
                 max_rows: None,
@@ -4155,6 +4558,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: SpacerWidgetData {},
         };
@@ -4182,6 +4586,7 @@ visible = true
                 max_cols: None,
                 visible: true,
                 content_align: None,
+                title_position: "top-left".to_string(),
             },
             data: TextWidgetData {
                 streams: vec!["status".to_string()],
@@ -4218,4 +4623,5 @@ visible = true
         assert!(spacer_end <= b_start, "Spacer should not overlap B");
     }
 }
+
 

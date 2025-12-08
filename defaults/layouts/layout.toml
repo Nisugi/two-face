@@ -85,3 +85,4 @@ show_border = true
 border_style = "single"
 border_color = "#9370DB"
 visible = false
+

@@ -59,6 +59,26 @@ pub struct MessageProcessor {
 }
 
 impl MessageProcessor {
+    /// Update any countdown windows whose id matches the provided id (case-sensitive).
+    /// Falls back to window name for backward compatibility.
+    fn update_countdown_by_id(
+        &mut self,
+        ui_state: &mut crate::data::UiState,
+        countdown_id: &str,
+        end_time: i64,
+    ) {
+        for (name, window) in ui_state
+            .windows
+            .iter_mut()
+            .filter(|(_, w)| matches!(w.content, WindowContent::Countdown(_)))
+        {
+            if let WindowContent::Countdown(ref mut cd) = window.content {
+                if cd.countdown_id == countdown_id || name == countdown_id {
+                    cd.end_time = end_time;
+                }
+            }
+        }
+    }
     pub fn new(config: Config) -> Self {
         // Create parser with presets from config
         let preset_list = config
@@ -361,14 +381,8 @@ impl MessageProcessor {
                 let end_time_local = *value as i64 - self.server_time_offset;
                 game_state.roundtime_end = Some(end_time_local);
 
-                // Update roundtime widget if it exists
-                if let Some(rt_window) = ui_state
-                    .get_window_by_type_mut(crate::data::WidgetType::Countdown, Some("roundtime"))
-                {
-                    if let WindowContent::Countdown(ref mut countdown_data) = rt_window.content {
-                        countdown_data.end_time = end_time_local;
-                    }
-                }
+                // Update countdowns that listen for "roundtime"
+                self.update_countdown_by_id(ui_state, "roundtime", end_time_local);
             }
             ParsedElement::CastTime { value } => {
                 // value is the server timestamp when casttime ends
@@ -376,14 +390,8 @@ impl MessageProcessor {
                 let end_time_local = *value as i64 - self.server_time_offset;
                 game_state.casttime_end = Some(end_time_local);
 
-                // Update casttime widget if it exists
-                if let Some(ct_window) = ui_state
-                    .get_window_by_type_mut(crate::data::WidgetType::Countdown, Some("casttime"))
-                {
-                    if let WindowContent::Countdown(ref mut countdown_data) = ct_window.content {
-                        countdown_data.end_time = end_time_local;
-                    }
-                }
+                // Update countdowns that listen for "casttime"
+                self.update_countdown_by_id(ui_state, "casttime", end_time_local);
             }
             ParsedElement::LeftHand { item, link } => {
                 self.chunk_has_silent_updates = true; // Mark as silent update
@@ -394,17 +402,20 @@ impl MessageProcessor {
                     Some(item.clone())
                 };
 
-                // Update left_hand widget if it exists
-                if let Some(left_hand_window) = ui_state
-                    .get_window_by_type_mut(crate::data::WidgetType::Hand, Some("left_hand"))
-                {
-                    if let WindowContent::Hand {
-                        item: ref mut window_item,
-                        link: ref mut window_link,
-                    } = left_hand_window.content
+                // Update left hand widget if it exists (support legacy and new names)
+                for name in ["left", "left_hand"] {
+                    if let Some(left_hand_window) =
+                        ui_state.get_window_by_type_mut(crate::data::WidgetType::Hand, Some(name))
                     {
-                        *window_item = game_state.left_hand.clone();
-                        *window_link = link.clone();
+                        if let WindowContent::Hand {
+                            item: ref mut window_item,
+                            link: ref mut window_link,
+                        } = left_hand_window.content
+                        {
+                            *window_item = game_state.left_hand.clone();
+                            *window_link = link.clone();
+                        }
+                        break;
                     }
                 }
             }
@@ -417,17 +428,20 @@ impl MessageProcessor {
                     Some(item.clone())
                 };
 
-                // Update right_hand widget if it exists
-                if let Some(right_hand_window) = ui_state
-                    .get_window_by_type_mut(crate::data::WidgetType::Hand, Some("right_hand"))
-                {
-                    if let WindowContent::Hand {
-                        item: ref mut window_item,
-                        link: ref mut window_link,
-                    } = right_hand_window.content
+                // Update right hand widget if it exists (support legacy and new names)
+                for name in ["right", "right_hand"] {
+                    if let Some(right_hand_window) =
+                        ui_state.get_window_by_type_mut(crate::data::WidgetType::Hand, Some(name))
                     {
-                        *window_item = game_state.right_hand.clone();
-                        *window_link = link.clone();
+                        if let WindowContent::Hand {
+                            item: ref mut window_item,
+                            link: ref mut window_link,
+                        } = right_hand_window.content
+                        {
+                            *window_item = game_state.right_hand.clone();
+                            *window_link = link.clone();
+                        }
+                        break;
                     }
                 }
             }
@@ -440,12 +454,16 @@ impl MessageProcessor {
                     Some(spell.clone())
                 };
 
-                // Update spell_hand widget if it exists
-                if let Some(spell_hand_window) = ui_state
-                    .get_window_by_type_mut(crate::data::WidgetType::Hand, Some("spell_hand"))
-                {
-                    if let WindowContent::Hand { ref mut item, .. } = spell_hand_window.content {
-                        *item = game_state.spell.clone();
+                // Update spell hand widget if it exists (support legacy and new names)
+                for name in ["spell", "spell_hand"] {
+                    if let Some(spell_hand_window) =
+                        ui_state.get_window_by_type_mut(crate::data::WidgetType::Hand, Some(name))
+                    {
+                        if let WindowContent::Hand { ref mut item, .. } = spell_hand_window.content
+                        {
+                            *item = game_state.spell.clone();
+                        }
+                        break;
                     }
                 }
 
@@ -508,12 +526,18 @@ impl MessageProcessor {
             } => {
                 self.chunk_has_silent_updates = true; // Mark as silent update
 
-                // Update progress bar widget
-                if let Some(window) = ui_state.get_window_mut(id) {
+                // Update progress bar widget(s) whose progress_id matches the incoming id
+                for window in ui_state
+                    .windows
+                    .values_mut()
+                    .filter(|w| matches!(w.content, WindowContent::Progress(_)))
+                {
                     if let WindowContent::Progress(ref mut data) = window.content {
-                        data.value = *value; // Store actual values, not percentages
-                        data.max = *max;
-                        data.label = text.clone();
+                        if data.progress_id == *id {
+                            data.value = *value; // Store actual values, not percentages
+                            data.max = *max;
+                            data.label = text.clone();
+                        }
                     }
                 }
 
@@ -544,29 +568,36 @@ impl MessageProcessor {
                     _ => {}
                 }
 
-                // Update Indicator windows that match this status
-                // Try multiple naming conventions: "hidden", "icon_hidden", "indicator_hidden"
-                let possible_names = vec![
-                    id.clone(),
-                    format!("icon_{}", id),
-                    format!("indicator_{}", id),
-                ];
-
-                for name in possible_names {
-                    if let Some(window) = ui_state.get_window_mut(&name) {
-                        if let crate::data::WindowContent::Indicator(ref mut indicator_data) =
-                            window.content
-                        {
-                            // Set status to the id when active, empty when inactive
-                            indicator_data.status =
-                                if *active { id.clone() } else { String::new() };
-                            tracing::trace!(
-                                "Updated indicator window '{}': active={}",
-                                name,
-                                active
-                            );
-                            break; // Found and updated, stop searching
+                // Update Indicator windows whose indicator_id matches
+                for (_name, window) in ui_state.windows.iter_mut() {
+                    match &mut window.content {
+                        crate::data::WindowContent::Indicator(ref mut indicator_data) => {
+                            if indicator_data
+                                .indicator_id
+                                .eq_ignore_ascii_case(id.as_str())
+                            {
+                                indicator_data.active = *active;
+                                tracing::trace!(
+                                    "Updated indicator '{}' active={}",
+                                    indicator_data.indicator_id,
+                                    active
+                                );
+                            }
                         }
+                        crate::data::WindowContent::Dashboard { indicators } => {
+                            let mut found = false;
+                            for (indicator_id, value) in indicators.iter_mut() {
+                                if indicator_id.eq_ignore_ascii_case(id.as_str()) {
+                                    *value = if *active { 1 } else { 0 };
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                indicators.push((id.clone(), if *active { 1 } else { 0 }));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -936,9 +967,18 @@ impl MessageProcessor {
             segments: std::mem::take(&mut self.current_segments),
         };
 
-        // Filter out Speech-typed segments if no speech window exists
+        // Filter out Speech-typed segments only if no window consumes the speech stream
         // This prevents duplicate speech text when the game sends it both in speech preset AND normally
-        if !ui_state.windows.contains_key("speech") {
+        let has_speech_consumer = ui_state.windows.iter().any(|(name, window)| {
+            if name == "speech" {
+                return true;
+            }
+            matches!(&window.content, WindowContent::TabbedText(tabbed) if tabbed.tabs.iter().any(
+                |t| t.definition.streams.iter().any(|s| s == "speech")
+            ))
+        });
+
+        if !has_speech_consumer {
             let original_count = line.segments.len();
             line.segments
                 .retain(|seg| seg.span_type != crate::data::SpanType::Speech);
@@ -1026,6 +1066,72 @@ impl MessageProcessor {
             let num_segments = line.segments.len();
             self.playerlist_buffer.push(line.segments);
             tracing::trace!("Buffered playerlist line ({} segments)", num_segments);
+            return;
+        }
+
+        // Special handling for targetcount stream - update targets window titles/counts
+        if ui_state
+            .windows
+            .values()
+            .filter_map(|w| {
+                if let WindowContent::Targets { entity_id, .. } = &w.content {
+                    Some(entity_id)
+                } else {
+                    None
+                }
+            })
+            .any(|id| id == &self.current_stream)
+        {
+            self.chunk_has_silent_updates = true;
+            let count_text: String = line
+                .segments
+                .iter()
+                .map(|seg| seg.text.as_str())
+                .collect::<String>()
+                .trim()
+                .to_string();
+
+            for (_name, window) in ui_state.windows.iter_mut() {
+                if let WindowContent::Targets { count, entity_id, .. } = &mut window.content {
+                    if *entity_id != self.current_stream {
+                        continue;
+                    }
+                    *count = Some(count_text.clone());
+                }
+            }
+            return;
+        }
+
+        // Special handling for playercount stream - update players window titles/counts
+        if ui_state
+            .windows
+            .values()
+            .filter_map(|w| {
+                if let WindowContent::Players { entity_id, .. } = &w.content {
+                    Some(entity_id)
+                } else {
+                    None
+                }
+            })
+            .any(|id| id == &self.current_stream)
+        {
+            self.chunk_has_silent_updates = true;
+            let count_text: String = line
+                .segments
+                .iter()
+                .map(|seg| seg.text.as_str())
+                .collect::<String>()
+                .trim()
+                .to_string();
+
+            for (_name, window) in ui_state.windows.iter_mut() {
+                if let WindowContent::Players { count, entity_id, .. } = &mut window.content {
+                    if *entity_id != self.current_stream {
+                        continue;
+                    }
+                    *count = Some(count_text.clone());
+                }
+            }
             return;
         }
 
@@ -1223,6 +1329,7 @@ impl MessageProcessor {
         for (name, window) in ui_state.windows.iter_mut() {
             if let WindowContent::Targets {
                 ref mut targets_text,
+                ..
             } = window.content
             {
                 *targets_text = full_text.clone();
@@ -1271,6 +1378,7 @@ impl MessageProcessor {
         for (name, window) in ui_state.windows.iter_mut() {
             if let WindowContent::Players {
                 ref mut players_text,
+                ..
             } = window.content
             {
                 *players_text = full_text.clone();

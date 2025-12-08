@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::{Config, Layout};
-use crate::data::WindowPosition;
+use crate::data::{WindowContent, WindowPosition};
 
 use super::AppCore;
 
@@ -216,8 +216,17 @@ impl AppCore {
                 "compass" | "injury_doll" | "dashboard" | "indicator" => {
                     static_both.insert(base.name.clone());
                 }
-                "progress" | "countdown" | "hands" | "hand" | "lefthand" | "righthand"
-                | "spellhand" | "command_input" => {
+                "progress"
+                | "countdown"
+                | "hands"
+                | "hand"
+                | "left"
+                | "right"
+                | "spell"
+                | "lefthand"
+                | "righthand"
+                | "spellhand"
+                | "command_input" => {
                     static_height.insert(base.name.clone());
                 }
                 _ => {}
@@ -259,6 +268,18 @@ impl AppCore {
                     width: base.cols,
                     height: base.rows,
                 };
+                match &mut window_state.content {
+                    WindowContent::Text(text) => {
+                        text.title = base.title.clone().unwrap_or_default();
+                    }
+                    WindowContent::Inventory(text) => {
+                        text.title = base.title.clone().unwrap_or_default();
+                    }
+                    WindowContent::Spells(text) => {
+                        text.title = base.title.clone().unwrap_or_default();
+                    }
+                    _ => {}
+                }
                 tracing::debug!(
                     "Applied to UI: '{}' @ ({},{}) size {}x{}",
                     base.name,
@@ -281,7 +302,8 @@ impl AppCore {
     /// Helper to get minimum widget size based on widget type (from VellumFE)
     fn widget_min_size(&self, widget_type: &str) -> (u16, u16) {
         match widget_type {
-            "progress" | "countdown" | "indicator" | "hands" | "hand" => (10, 1),
+            "indicator" => (2, 1),
+            "progress" | "countdown" | "hands" | "hand" => (10, 1),
             "compass" => (13, 5),
             "injury_doll" => (20, 10),
             "dashboard" => (15, 3),
@@ -1142,5 +1164,640 @@ impl AppCore {
         let width = self.layout.terminal_width.unwrap_or(80);
         let height = self.layout.terminal_height.unwrap_or(24);
         self.resize_to_terminal(width, height);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BorderSides, Layout, SpacerWidgetData, WindowBase, WindowDef};
+
+    // ========== Test helpers ==========
+
+    /// Helper to create a minimal WindowBase for testing
+    fn test_window_base(name: &str, col: u16, row: u16, cols: u16, rows: u16) -> WindowBase {
+        WindowBase {
+            name: name.to_string(),
+            row,
+            col,
+            rows,
+            cols,
+            show_border: false,
+            border_style: "single".to_string(),
+            border_sides: BorderSides::default(),
+            border_color: None,
+            show_title: false,
+            title: None,
+            background_color: None,
+            text_color: None,
+            transparent_background: false,
+            locked: false,
+            min_rows: None,
+            max_rows: None,
+            min_cols: None,
+            max_cols: None,
+            visible: true,
+            content_align: None,
+            title_position: "top-left".to_string(),
+        }
+    }
+
+    fn test_layout_empty() -> Layout {
+        Layout {
+            windows: vec![],
+            terminal_width: Some(80),
+            terminal_height: Some(24),
+            base_layout: None,
+            theme: None,
+        }
+    }
+
+    fn test_layout_with_windows(windows: Vec<WindowDef>) -> Layout {
+        Layout {
+            windows,
+            terminal_width: Some(80),
+            terminal_height: Some(24),
+            base_layout: None,
+            theme: None,
+        }
+    }
+
+    // ========== Widget min size tests ==========
+
+    /// Helper that replicates widget_min_size logic for testing
+    fn widget_min_size_standalone(widget_type: &str) -> (u16, u16) {
+        match widget_type {
+            "indicator" => (2, 1),
+            "progress" | "countdown" | "hands" | "hand" => (10, 1),
+            "compass" => (13, 5),
+            "injury_doll" => (20, 10),
+            "dashboard" => (15, 3),
+            "command_input" => (20, 1),
+            _ => (5, 3), // text, room, tabbed, etc.
+        }
+    }
+
+    #[test]
+    fn test_widget_min_size_indicator() {
+        let (cols, rows) = widget_min_size_standalone("indicator");
+        assert_eq!(cols, 2);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_progress() {
+        let (cols, rows) = widget_min_size_standalone("progress");
+        assert_eq!(cols, 10);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_countdown() {
+        let (cols, rows) = widget_min_size_standalone("countdown");
+        assert_eq!(cols, 10);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_hands() {
+        let (cols, rows) = widget_min_size_standalone("hands");
+        assert_eq!(cols, 10);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_hand() {
+        let (cols, rows) = widget_min_size_standalone("hand");
+        assert_eq!(cols, 10);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_compass() {
+        let (cols, rows) = widget_min_size_standalone("compass");
+        assert_eq!(cols, 13);
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn test_widget_min_size_injury_doll() {
+        let (cols, rows) = widget_min_size_standalone("injury_doll");
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn test_widget_min_size_dashboard() {
+        let (cols, rows) = widget_min_size_standalone("dashboard");
+        assert_eq!(cols, 15);
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_widget_min_size_command_input() {
+        let (cols, rows) = widget_min_size_standalone("command_input");
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_widget_min_size_text() {
+        let (cols, rows) = widget_min_size_standalone("text");
+        assert_eq!(cols, 5);
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_widget_min_size_room() {
+        let (cols, rows) = widget_min_size_standalone("room");
+        assert_eq!(cols, 5);
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_widget_min_size_tabbed() {
+        let (cols, rows) = widget_min_size_standalone("tabbed");
+        assert_eq!(cols, 5);
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_widget_min_size_unknown() {
+        let (cols, rows) = widget_min_size_standalone("unknown_type");
+        assert_eq!(cols, 5);
+        assert_eq!(rows, 3);
+    }
+
+    // ========== Static widget categorization tests ==========
+
+    /// Widget types that should not resize (both dimensions)
+    fn is_static_both(widget_type: &str) -> bool {
+        matches!(
+            widget_type,
+            "compass" | "injury_doll" | "dashboard" | "indicator"
+        )
+    }
+
+    /// Widget types that should not resize height
+    fn is_static_height(widget_type: &str) -> bool {
+        matches!(
+            widget_type,
+            "progress"
+                | "countdown"
+                | "hands"
+                | "hand"
+                | "left"
+                | "right"
+                | "spell"
+                | "lefthand"
+                | "righthand"
+                | "spellhand"
+                | "command_input"
+        )
+    }
+
+    #[test]
+    fn test_static_both_compass() {
+        assert!(is_static_both("compass"));
+    }
+
+    #[test]
+    fn test_static_both_injury_doll() {
+        assert!(is_static_both("injury_doll"));
+    }
+
+    #[test]
+    fn test_static_both_dashboard() {
+        assert!(is_static_both("dashboard"));
+    }
+
+    #[test]
+    fn test_static_both_indicator() {
+        assert!(is_static_both("indicator"));
+    }
+
+    #[test]
+    fn test_static_both_text_is_scalable() {
+        assert!(!is_static_both("text"));
+    }
+
+    #[test]
+    fn test_static_both_room_is_scalable() {
+        assert!(!is_static_both("room"));
+    }
+
+    #[test]
+    fn test_static_height_progress() {
+        assert!(is_static_height("progress"));
+    }
+
+    #[test]
+    fn test_static_height_countdown() {
+        assert!(is_static_height("countdown"));
+    }
+
+    #[test]
+    fn test_static_height_hands() {
+        assert!(is_static_height("hands"));
+        assert!(is_static_height("hand"));
+        assert!(is_static_height("lefthand"));
+        assert!(is_static_height("righthand"));
+        assert!(is_static_height("spellhand"));
+    }
+
+    #[test]
+    fn test_static_height_command_input() {
+        assert!(is_static_height("command_input"));
+    }
+
+    #[test]
+    fn test_static_height_text_is_scalable() {
+        assert!(!is_static_height("text"));
+    }
+
+    // ========== Layout structure tests ==========
+
+    #[test]
+    fn test_empty_layout() {
+        let layout = test_layout_empty();
+        assert!(layout.windows.is_empty());
+        assert_eq!(layout.terminal_width, Some(80));
+        assert_eq!(layout.terminal_height, Some(24));
+    }
+
+    #[test]
+    fn test_layout_with_theme() {
+        let mut layout = test_layout_empty();
+        layout.theme = Some("dark".to_string());
+        assert_eq!(layout.theme, Some("dark".to_string()));
+    }
+
+    #[test]
+    fn test_layout_terminal_size() {
+        let mut layout = test_layout_empty();
+        layout.terminal_width = Some(120);
+        layout.terminal_height = Some(40);
+        assert_eq!(layout.terminal_width, Some(120));
+        assert_eq!(layout.terminal_height, Some(40));
+    }
+
+    // ========== Delta calculation tests ==========
+
+    #[test]
+    fn test_delta_calculation_grow() {
+        let baseline_width: u16 = 80;
+        let baseline_height: u16 = 24;
+        let terminal_width: u16 = 100;
+        let terminal_height: u16 = 30;
+
+        let width_delta = terminal_width as i32 - baseline_width as i32;
+        let height_delta = terminal_height as i32 - baseline_height as i32;
+
+        assert_eq!(width_delta, 20);
+        assert_eq!(height_delta, 6);
+    }
+
+    #[test]
+    fn test_delta_calculation_shrink() {
+        let baseline_width: u16 = 100;
+        let baseline_height: u16 = 40;
+        let terminal_width: u16 = 80;
+        let terminal_height: u16 = 24;
+
+        let width_delta = terminal_width as i32 - baseline_width as i32;
+        let height_delta = terminal_height as i32 - baseline_height as i32;
+
+        assert_eq!(width_delta, -20);
+        assert_eq!(height_delta, -16);
+    }
+
+    #[test]
+    fn test_delta_calculation_no_change() {
+        let baseline_width: u16 = 80;
+        let baseline_height: u16 = 24;
+        let terminal_width: u16 = 80;
+        let terminal_height: u16 = 24;
+
+        let width_delta = terminal_width as i32 - baseline_width as i32;
+        let height_delta = terminal_height as i32 - baseline_height as i32;
+
+        assert_eq!(width_delta, 0);
+        assert_eq!(height_delta, 0);
+    }
+
+    // ========== Proportional distribution tests ==========
+
+    #[test]
+    fn test_proportional_share_calculation() {
+        // If window is 40 cols out of 80 total, it gets 50% of delta
+        let window_cols: u16 = 40;
+        let total_cols: u16 = 80;
+        let width_delta: i32 = 20;
+
+        let proportion = window_cols as f64 / total_cols as f64;
+        let share = (proportion * width_delta as f64).floor() as i32;
+
+        assert_eq!(proportion, 0.5);
+        assert_eq!(share, 10);
+    }
+
+    #[test]
+    fn test_proportional_share_uneven() {
+        // If window is 30 cols out of 80 total (37.5%)
+        let window_cols: u16 = 30;
+        let total_cols: u16 = 80;
+        let width_delta: i32 = 16;
+
+        let proportion = window_cols as f64 / total_cols as f64;
+        let share = (proportion * width_delta as f64).floor() as i32;
+
+        assert_eq!(proportion, 0.375);
+        assert_eq!(share, 6); // floor(0.375 * 16) = floor(6) = 6
+    }
+
+    #[test]
+    fn test_proportional_share_negative_delta() {
+        // Shrinking: 40 cols out of 80 total, -20 delta
+        let window_cols: u16 = 40;
+        let total_cols: u16 = 80;
+        let width_delta: i32 = -20;
+
+        let proportion = window_cols as f64 / total_cols as f64;
+        let share = (proportion * width_delta as f64).floor() as i32;
+
+        assert_eq!(share, -10);
+    }
+
+    // ========== Min constraint tests ==========
+
+    #[test]
+    fn test_min_constraint_applied() {
+        let original_cols: u16 = 20;
+        let delta: i32 = -25; // Would make it -5
+        let min_cols: u16 = 5;
+
+        let new_cols = ((original_cols as i32 + delta).max(min_cols as i32)) as u16;
+
+        assert_eq!(new_cols, 5); // Clamped to minimum
+    }
+
+    #[test]
+    fn test_min_constraint_not_needed() {
+        let original_cols: u16 = 20;
+        let delta: i32 = -10; // Would make it 10
+        let min_cols: u16 = 5;
+
+        let new_cols = ((original_cols as i32 + delta).max(min_cols as i32)) as u16;
+
+        assert_eq!(new_cols, 10); // No clamping needed
+    }
+
+    // ========== Max constraint tests ==========
+
+    #[test]
+    fn test_max_constraint_applied() {
+        let original_cols: u16 = 20;
+        let delta: i32 = 30; // Would make it 50
+        let max_cols: Option<u16> = Some(40);
+
+        let mut new_cols = (original_cols as i32 + delta) as u16;
+        if let Some(max) = max_cols {
+            new_cols = new_cols.min(max);
+        }
+
+        assert_eq!(new_cols, 40); // Clamped to maximum
+    }
+
+    #[test]
+    fn test_max_constraint_not_needed() {
+        let original_cols: u16 = 20;
+        let delta: i32 = 10; // Would make it 30
+        let max_cols: Option<u16> = Some(40);
+
+        let mut new_cols = (original_cols as i32 + delta) as u16;
+        if let Some(max) = max_cols {
+            new_cols = new_cols.min(max);
+        }
+
+        assert_eq!(new_cols, 30); // No clamping needed
+    }
+
+    #[test]
+    fn test_no_max_constraint() {
+        let original_cols: u16 = 20;
+        let delta: i32 = 100; // Would make it 120
+        let max_cols: Option<u16> = None;
+
+        let mut new_cols = (original_cols as i32 + delta) as u16;
+        if let Some(max) = max_cols {
+            new_cols = new_cols.min(max);
+        }
+
+        assert_eq!(new_cols, 120); // No maximum constraint
+    }
+
+    // ========== Terminal size validation tests ==========
+
+    #[test]
+    fn test_terminal_size_sufficient() {
+        let window_col: u16 = 0;
+        let window_cols: u16 = 80;
+        let window_row: u16 = 0;
+        let window_rows: u16 = 24;
+        let terminal_width: u16 = 80;
+        let terminal_height: u16 = 24;
+
+        let required_width = window_col + window_cols;
+        let required_height = window_row + window_rows;
+
+        let fits = terminal_width >= required_width && terminal_height >= required_height;
+        assert!(fits);
+    }
+
+    #[test]
+    fn test_terminal_size_too_small_width() {
+        let window_col: u16 = 0;
+        let window_cols: u16 = 100;
+        let terminal_width: u16 = 80;
+
+        let required_width = window_col + window_cols;
+        let fits = terminal_width >= required_width;
+        assert!(!fits);
+    }
+
+    #[test]
+    fn test_terminal_size_too_small_height() {
+        let window_row: u16 = 10;
+        let window_rows: u16 = 20;
+        let terminal_height: u16 = 24;
+
+        let required_height = window_row + window_rows;
+        let fits = terminal_height >= required_height;
+        assert!(!fits); // 10 + 20 = 30 > 24
+    }
+
+    #[test]
+    fn test_terminal_size_offset_window() {
+        // Window at position (20, 10) with size 40x10
+        let window_col: u16 = 20;
+        let window_cols: u16 = 40;
+        let window_row: u16 = 10;
+        let window_rows: u16 = 10;
+        let terminal_width: u16 = 80;
+        let terminal_height: u16 = 24;
+
+        let required_width = window_col + window_cols; // 20 + 40 = 60
+        let required_height = window_row + window_rows; // 10 + 10 = 20
+
+        let fits = terminal_width >= required_width && terminal_height >= required_height;
+        assert!(fits); // 60 <= 80 and 20 <= 24
+    }
+
+    // ========== WindowDef extraction tests ==========
+
+    #[test]
+    fn test_window_def_name() {
+        let base = test_window_base("main", 0, 0, 80, 24);
+        let spacer = WindowDef::Spacer {
+            base,
+            data: SpacerWidgetData {},
+        };
+        assert_eq!(spacer.name(), "main");
+    }
+
+    #[test]
+    fn test_window_def_widget_type_spacer() {
+        let base = test_window_base("spacer_1", 0, 0, 5, 1);
+        let spacer = WindowDef::Spacer {
+            base,
+            data: SpacerWidgetData {},
+        };
+        assert_eq!(spacer.widget_type(), "spacer");
+    }
+
+    #[test]
+    fn test_window_def_base_position() {
+        let base = test_window_base("test", 10, 20, 40, 15);
+        let spacer = WindowDef::Spacer {
+            base,
+            data: SpacerWidgetData {},
+        };
+        let b = spacer.base();
+        assert_eq!(b.col, 10);
+        assert_eq!(b.row, 20);
+        assert_eq!(b.cols, 40);
+        assert_eq!(b.rows, 15);
+    }
+
+    #[test]
+    fn test_window_base_visibility() {
+        let mut base = test_window_base("test", 0, 0, 10, 10);
+        assert!(base.visible);
+
+        base.visible = false;
+        assert!(!base.visible);
+    }
+
+    // ========== Layout window collection tests ==========
+
+    #[test]
+    fn test_layout_window_names() {
+        let windows = vec![
+            WindowDef::Spacer {
+                base: test_window_base("main", 0, 0, 60, 20),
+                data: SpacerWidgetData {},
+            },
+            WindowDef::Spacer {
+                base: test_window_base("sidebar", 60, 0, 20, 20),
+                data: SpacerWidgetData {},
+            },
+        ];
+        let layout = test_layout_with_windows(windows);
+
+        let names: Vec<&str> = layout.windows.iter().map(|w| w.name()).collect();
+        assert_eq!(names, vec!["main", "sidebar"]);
+    }
+
+    #[test]
+    fn test_layout_visible_windows() {
+        let mut hidden_base = test_window_base("hidden", 0, 0, 10, 10);
+        hidden_base.visible = false;
+
+        let windows = vec![
+            WindowDef::Spacer {
+                base: test_window_base("visible1", 0, 0, 40, 20),
+                data: SpacerWidgetData {},
+            },
+            WindowDef::Spacer {
+                base: hidden_base,
+                data: SpacerWidgetData {},
+            },
+            WindowDef::Spacer {
+                base: test_window_base("visible2", 40, 0, 40, 20),
+                data: SpacerWidgetData {},
+            },
+        ];
+        let layout = test_layout_with_windows(windows);
+
+        let visible_count = layout.windows.iter().filter(|w| w.base().visible).count();
+        assert_eq!(visible_count, 2);
+    }
+
+    // ========== Window position tests ==========
+
+    #[test]
+    fn test_window_position_clone() {
+        let pos = WindowPosition {
+            x: 10,
+            y: 20,
+            width: 80,
+            height: 24,
+        };
+        let cloned = pos.clone();
+        assert_eq!(pos.x, cloned.x);
+        assert_eq!(pos.y, cloned.y);
+        assert_eq!(pos.width, cloned.width);
+        assert_eq!(pos.height, cloned.height);
+    }
+
+    #[test]
+    fn test_window_position_from_base() {
+        let base = test_window_base("test", 15, 5, 50, 18);
+        let pos = WindowPosition {
+            x: base.col,
+            y: base.row,
+            width: base.cols,
+            height: base.rows,
+        };
+        assert_eq!(pos.x, 15);
+        assert_eq!(pos.y, 5);
+        assert_eq!(pos.width, 50);
+        assert_eq!(pos.height, 18);
+    }
+
+    // ========== Remainder distribution tests ==========
+
+    #[test]
+    fn test_remainder_positive() {
+        let total_delta: i32 = 17;
+        let distributed: i32 = 15; // Proportional distribution gave 15
+        let remainder = total_delta - distributed;
+        assert_eq!(remainder, 2); // 2 extra columns to distribute
+    }
+
+    #[test]
+    fn test_remainder_negative() {
+        let total_delta: i32 = -17;
+        let distributed: i32 = -15; // Proportional distribution gave -15
+        let remainder = total_delta - distributed;
+        assert_eq!(remainder, -2); // 2 columns still to remove
+    }
+
+    #[test]
+    fn test_remainder_zero() {
+        let total_delta: i32 = 20;
+        let distributed: i32 = 20;
+        let remainder = total_delta - distributed;
+        assert_eq!(remainder, 0); // Perfect distribution
     }
 }

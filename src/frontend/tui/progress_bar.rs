@@ -105,6 +105,41 @@ impl ProgressBar {
         Some(Color::Rgb(r, g, b))
     }
 
+    fn luminance(color: Color) -> f32 {
+        match color {
+            Color::Rgb(r, g, b) => {
+                let to_lin = |c: u8| {
+                    let c = c as f32 / 255.0;
+                    if c <= 0.03928 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                0.2126 * to_lin(r) + 0.7152 * to_lin(g) + 0.0722 * to_lin(b)
+            }
+            Color::Black => 0.0,
+            Color::White => 1.0,
+            _ => 0.5, // reasonable mid fallback
+        }
+    }
+
+    fn ensure_contrast(text: Color, bg: Option<Color>) -> Color {
+        let Some(bg) = bg else { return text };
+        let l_text = Self::luminance(text);
+        let l_bg = Self::luminance(bg);
+        let (max, min) = if l_text > l_bg { (l_text, l_bg) } else { (l_bg, l_text) };
+        let contrast = (max + 0.05) / (min + 0.05);
+
+        if contrast >= 3.0 {
+            text
+        } else if l_bg > 0.5 {
+            Color::Black
+        } else {
+            Color::White
+        }
+    }
+
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         if (self.show_border && area.width < 3) || area.height < 1 {
             return;
@@ -208,7 +243,8 @@ impl ProgressBar {
         // Render text centered on the bar
         if text_width > 0 && text_width <= available_width {
             let text_start_x = inner_area.x + (available_width.saturating_sub(text_width)) / 2;
-            let text_fg = self.text_color.unwrap_or(Color::White);
+            let text_fg_base = self.text_color.unwrap_or(Color::White);
+            let text_fg = Self::ensure_contrast(text_fg_base, Some(bar_color));
 
             for (i, c) in display_text.chars().enumerate() {
                 let x = text_start_x + i as u16;
