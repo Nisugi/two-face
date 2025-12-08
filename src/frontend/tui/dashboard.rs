@@ -162,10 +162,18 @@ impl Dashboard {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        // Clear area
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                buf[(x, y)].reset();
+        // Clear area first
+        ratatui::widgets::Clear.render(area, buf);
+
+        // Fill background if not transparent (covers borders + content)
+        if !self.transparent_background {
+            if let Some(ref bg_hex) = self.background_color {
+                let bg_color = Self::parse_color(bg_hex);
+                for y in area.top()..area.bottom() {
+                    for x in area.left()..area.right() {
+                        buf[(x, y)].set_bg(bg_color);
+                    }
+                }
             }
         }
 
@@ -189,7 +197,8 @@ impl Dashboard {
                 block = block.border_style(Style::default().fg(color));
             }
 
-            if !self.label.is_empty() {
+            // Only show a title if at least one horizontal border is present; otherwise it eats the row
+            if (self.border_sides.top || self.border_sides.bottom) && !self.label.is_empty() {
                 block = block.title(self.label.clone());
             }
 

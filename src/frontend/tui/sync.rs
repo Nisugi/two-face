@@ -543,6 +543,7 @@ fn decode_icon(icon_str: &str) -> Option<String> {
                             def.base().show_border,
                             Some(def.base().border_style.clone()),
                             colors.border.clone(),
+                            def.base().border_sides.clone(),
                         );
 
                         // Update title visibility

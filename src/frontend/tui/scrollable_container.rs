@@ -376,7 +376,17 @@ impl ScrollableContainer {
                 pb.set_text_color(row_text_color);
 
                 pb.set_transparent_background(self.transparent_background);
-                pb.set_border_config(false, None, None); // No borders on individual items
+                pb.set_border_config(
+                    false,
+                    None,
+                    None,
+                    crate::config::BorderSides {
+                        top: false,
+                        bottom: false,
+                        left: false,
+                        right: false,
+                    },
+                ); // No borders on individual items
 
                 // Calculate the area for this item (single row)
                 let item_area = Rect {

@@ -1,82 +1,156 @@
 # Two-Face
 
-Multi-frontend (TUI/GUI) client for GemStone IV - Refactored architecture from VellumFE.
+A modern, feature-rich terminal client for [GemStone IV](https://www.play.net/gs4/).
 
-## Project Status
+![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
+![Tests](https://img.shields.io/badge/tests-1%2C003%20passing-brightgreen)
+![Rust](https://img.shields.io/badge/rust-stable-orange)
 
-**Code Name:** Two-Face
-**Status:** In Development - Phase 1+2 (Architecture Refactoring)
-**Parent Project:** [VellumFE](https://github.com/Nisugi/VellumFE)
+## Features
 
-## Goals
+- **Customizable Widget System** - Progress bars, countdowns, compass, hands, indicators, injury doll, active effects, and more
+- **Tabbed Text Windows** - Route game streams to organized tabs (thoughts, combat, loot, etc.)
+- **Highlight System** - Regex-based text highlighting with Aho-Corasick fast matching
+- **Sound Alerts** - Play sounds on pattern matches with volume control
+- **Direct eAccess Authentication** - Connect directly to GemStone IV without Lich proxy
+- **Fully Themeable** - Complete color customization with preset themes
+- **Layout Editor** - Interactive widget positioning and resizing (F2)
+- **Comprehensive Testing** - 1,003 tests including end-to-end UI integration tests
 
-1. Refactor VellumFE into a clean frontend-agnostic architecture
-2. Implement TUI frontend (ratatui) maintaining all existing functionality
-3. Implement GUI frontend (egui) with proportional font support
-4. Allow users to choose between TUI (`--tui`) or GUI (`--gui`) modes
-5. Support direct eAccess authentication (standalone mode without Lich)
+## Quick Start
+
+### Via Lich Proxy (Recommended)
+
+```bash
+# Start Lich with your character, then:
+two-face --port 8000 --character YourCharacter
+```
+
+### Direct Connection (Standalone)
+
+```bash
+two-face --direct \
+  --account YOUR_ACCOUNT \
+  --password YOUR_PASSWORD \
+  --game prime \
+  --character CHARACTER_NAME
+```
+
+## Installation
+
+### Pre-built Binaries
+
+Download from [Releases](https://github.com/Nisugi/two-face/releases).
+
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/Nisugi/two-face.git
+cd two-face
+
+# Build release binary
+cargo build --release
+
+# Binary is at target/release/two-face.exe
+```
+
+**Requirements:**
+- Rust 1.70+ (stable)
+- OpenSSL (for direct mode) - install via vcpkg on Windows
+
+## Documentation
+
+**[Full Documentation](https://nisugi.github.io/two-face/)** - Comprehensive guides, tutorials, and reference
+
+Quick links:
+- [Getting Started](https://nisugi.github.io/two-face/getting-started/)
+- [Configuration Guide](https://nisugi.github.io/two-face/configuration/)
+- [Widget Reference](https://nisugi.github.io/two-face/widgets/)
+- [Keybind Actions](https://nisugi.github.io/two-face/reference/keybind-actions.html)
+- [Troubleshooting](https://nisugi.github.io/two-face/troubleshooting/)
+
+## Default Keybinds
+
+| Key | Action |
+|-----|--------|
+| `F2` | Toggle layout editor |
+| `F3` | Toggle highlight browser |
+| `Page Up/Down` | Scroll main window |
+| `Tab` | Cycle focus between widgets |
+| `Ctrl+C` | Copy selected text |
+| `Escape` | Close popups / cancel |
+
+See [Keybind Reference](https://nisugi.github.io/two-face/reference/keybind-actions.html) for complete list.
+
+## Configuration
+
+Two-Face uses TOML configuration files stored in `~/.two-face/`:
+
+```
+~/.two-face/
+├── config.toml        # Main configuration
+├── layout.toml        # Widget layout
+├── keybinds.toml      # Key bindings
+├── highlights.toml    # Text highlighting rules
+└── colors.toml        # Theme colors
+```
+
+Example highlight:
+```toml
+[[highlights]]
+pattern = "You are stunned"
+fg = "bright_red"
+bold = true
+sound = "alert.wav"
+```
 
 ## Architecture
 
 ```
-two-face/
-├── src/
-│   ├── core/           # Business logic (frontend-agnostic)
-│   ├── widgets/        # Widget state (data only)
-│   ├── frontend/
-│   │   ├── tui/       # Ratatui rendering
-│   │   └── gui/       # egui rendering (future)
-│   ├── config.rs
-│   ├── network.rs
-│   ├── parser.rs
-│   └── main.rs
+┌─────────────────────────────────────────────────────────┐
+│                      Network Layer                       │
+│            (Lich Proxy / Direct eAccess)                │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│                    Parser (XML)                          │
+│              Stormfront Protocol Handler                 │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│                  Core (AppCore)                          │
+│         State Management & Message Processing            │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│                 TUI Frontend (Ratatui)                   │
+│              Widget Rendering & Input                    │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## Building
+## Contributing
+
+Contributions welcome! Please see [Contributing Guide](https://nisugi.github.io/two-face/development/contributing.html).
 
 ```bash
-cargo build --release
+# Run tests
+cargo test
+
+# Run with logging
+RUST_LOG=debug cargo run -- --port 8000
 ```
-
-## Running
-
-```bash
-# Direct connection (standalone - no Lich required)
-two-face.exe --direct \
-  --direct-account YOUR_ACCOUNT \
-  --direct-password YOUR_PASSWORD \
-  --direct-game prime \
-  --direct-character CHARACTER_NAME
-
-# Via Lich proxy (traditional)
-two-face.exe --character Zoleta --port 8000
-
-# GUI mode (future)
-two-face.exe --gui --character Zoleta --port 8000
-```
-
-See [docs/wiki/getting_connected.md](docs/wiki/getting_connected.md) for detailed connection options.
-
-## Development Roadmap
-
-**Phase 1+2: TUI Refactor (Foundation)**
-- [x] Milestone 1: Project Setup & Bootstrap
-- [x] Milestone 2: Create Abstraction Layer
-- [x] Milestone 3: Extract AppCore (Initial Structure)
-- [x] Milestone 4: Create Widget State Structs (Core Widgets)
-- [x] Milestone 5: Create TUI Frontend Module
-- [ ] Milestone 6: Wire Everything Together (IN PROGRESS)
-- [ ] Milestone 7: Testing & Verification
-
-**Phase 3: GUI Frontend (Future)**
-- [ ] Add egui dependencies
-- [ ] Create GUI frontend module
-- [ ] Implement GUI rendering
-- [ ] Add --gui flag
-- [ ] Polish and release
-
-See [PROGRESS.md](PROGRESS.md) for detailed status and next steps.
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of:
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
+
+## Acknowledgments
+
+- Forked from [VellumFE](https://github.com/Nisugi/VellumFE)
+- Built with [Ratatui](https://ratatui.rs/) for terminal UI
+- Inspired by [Profanity](https://github.com/jkindwall/profanity-beta)

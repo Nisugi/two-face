@@ -19,6 +19,7 @@ pub struct ProgressBar {
     show_border: bool,
     border_style: Option<String>,
     border_color: Option<Color>,
+    border_sides: crate::config::BorderSides,
     bar_fill: Option<Color>,
     bar_background: Option<Color>,
     window_background: Option<Color>,
@@ -36,6 +37,7 @@ impl ProgressBar {
             show_border: false,
             border_style: None,
             border_color: None,
+            border_sides: crate::config::BorderSides::default(),
             bar_fill: Some(Color::Rgb(0, 255, 0)), // Green by default
             bar_background: None,
             window_background: None,
@@ -49,10 +51,12 @@ impl ProgressBar {
         show_border: bool,
         border_style: Option<String>,
         border_color: Option<String>,
+        border_sides: crate::config::BorderSides,
     ) {
         self.show_border = show_border;
         self.border_style = border_style;
         self.border_color = border_color.and_then(|c| Self::parse_color(&c));
+        self.border_sides = border_sides;
     }
 
     pub fn set_title(&mut self, title: String) {
@@ -168,7 +172,21 @@ impl ProgressBar {
         }
 
         let inner_area = if self.show_border {
-            let mut block = Block::default().borders(Borders::ALL);
+            let mut borders = Borders::NONE;
+            if self.border_sides.left {
+                borders |= Borders::LEFT;
+            }
+            if self.border_sides.right {
+                borders |= Borders::RIGHT;
+            }
+            if self.border_sides.top {
+                borders |= Borders::TOP;
+            }
+            if self.border_sides.bottom {
+                borders |= Borders::BOTTOM;
+            }
+
+            let mut block = Block::default().borders(borders);
 
             if let Some(ref style) = self.border_style {
                 let border_type = match style.as_str() {

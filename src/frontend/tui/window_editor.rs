@@ -89,7 +89,6 @@ enum FieldRef {
     ShowPlayers,
     ShowExits,
     ShowName,
-    ProgressLabel,
     ProgressId,
     ProgressColor,
     ProgressNumbersOnly,
@@ -177,28 +176,27 @@ impl FieldRef {
             FieldRef::ShowExits => 35,
             FieldRef::ShowName => 36,
             FieldRef::ProgressId => 37,
-            FieldRef::ProgressLabel => 38,
-            FieldRef::ProgressColor => 39,
-            FieldRef::ProgressNumbersOnly => 40,
-            FieldRef::ProgressCurrentOnly => 41,
-            FieldRef::CountdownIcon => 42,
-            FieldRef::CountdownColor => 43,
-            FieldRef::CountdownBgColor => 44,
-            FieldRef::CompassActiveColor => 45,
-            FieldRef::CompassInactiveColor => 46,
-            FieldRef::InjuryDefaultColor => 47,
-            FieldRef::Injury1Color => 48,
-            FieldRef::Injury2Color => 49,
-            FieldRef::Injury3Color => 50,
-            FieldRef::Scar1Color => 51,
-            FieldRef::Scar2Color => 52,
-            FieldRef::Scar3Color => 53,
-            FieldRef::ActiveEffectsCategory => 56,
-            FieldRef::EditTabs => 57,
-            FieldRef::EditIndicators => 58,
-            FieldRef::DashboardLayout => 59,
-            FieldRef::DashboardSpacing => 60,
-            FieldRef::DashboardHideInactive => 61,
+            FieldRef::ProgressColor => 38,
+            FieldRef::ProgressNumbersOnly => 39,
+            FieldRef::ProgressCurrentOnly => 40,
+            FieldRef::CountdownIcon => 41,
+            FieldRef::CountdownColor => 42,
+            FieldRef::CountdownBgColor => 43,
+            FieldRef::CompassActiveColor => 44,
+            FieldRef::CompassInactiveColor => 45,
+            FieldRef::InjuryDefaultColor => 46,
+            FieldRef::Injury1Color => 47,
+            FieldRef::Injury2Color => 48,
+            FieldRef::Injury3Color => 49,
+            FieldRef::Scar1Color => 50,
+            FieldRef::Scar2Color => 51,
+            FieldRef::Scar3Color => 52,
+            FieldRef::ActiveEffectsCategory => 53,
+            FieldRef::EditTabs => 54,
+            FieldRef::EditIndicators => 55,
+            FieldRef::DashboardLayout => 56,
+            FieldRef::DashboardSpacing => 57,
+            FieldRef::DashboardHideInactive => 58,
             FieldRef::PerfShowFps => 62,
             FieldRef::PerfShowFrameTimes => 63,
             FieldRef::PerfShowRenderTimes => 64,
@@ -703,7 +701,6 @@ pub struct WindowEditor {
     tab_unread_prefix_input: TextArea<'static>,
     tab_separator: bool,
     progress_id_input: TextArea<'static>,
-    progress_label_input: TextArea<'static>,
     progress_color_input: TextArea<'static>,
     progress_numbers_only: bool,
     progress_current_only: bool,
@@ -875,7 +872,6 @@ impl WindowEditor {
             }
             WindowDef::Progress { .. } => {
                 fields.push(FieldRef::ProgressId);
-                fields.push(FieldRef::ProgressLabel);
                 fields.push(FieldRef::ProgressColor);
                 fields.push(FieldRef::ProgressNumbersOnly);
                 fields.push(FieldRef::ProgressCurrentOnly);
@@ -1053,7 +1049,6 @@ impl WindowEditor {
         let mut tab_unread_prefix_input = Self::create_textarea();
         let mut tab_separator = false;
         let mut progress_id_input = Self::create_textarea();
-        let mut progress_label_input = Self::create_textarea();
         let mut progress_color_input = Self::create_textarea();
         let mut countdown_icon_input = Self::create_textarea();
         let mut countdown_color_input = Self::create_textarea();
@@ -1140,9 +1135,6 @@ impl WindowEditor {
                 progress_id_input.insert_str(id);
             } else {
                 progress_id_input.insert_str(&window_def.base().name);
-            }
-            if let Some(ref label) = data.label {
-                progress_label_input.insert_str(label);
             }
             if let Some(ref color) = data.color {
                 progress_color_input.insert_str(color);
@@ -1324,7 +1316,6 @@ impl WindowEditor {
             tab_unread_prefix_input,
             tab_separator,
             progress_id_input,
-            progress_label_input,
             progress_color_input,
             progress_numbers_only,
             progress_current_only,
@@ -1533,7 +1524,6 @@ impl WindowEditor {
         if let crate::config::WindowDef::Progress { .. } = &window_def {
             progress_id_input.insert_str(&window_def.base().name);
         }
-        let progress_label_input = Self::create_textarea();
         let progress_color_input = Self::create_textarea();
         let progress_numbers_only = false;
         let progress_current_only = false;
@@ -1625,7 +1615,6 @@ impl WindowEditor {
             tab_unread_prefix_input,
             tab_separator,
             progress_id_input,
-            progress_label_input,
             progress_color_input,
             progress_numbers_only,
             progress_current_only,
@@ -2079,9 +2068,6 @@ impl WindowEditor {
             }
             _ if id == FieldRef::TabUnreadPrefix.legacy_field_id() => {
                 self.tab_unread_prefix_input.input(input);
-            }
-            _ if id == FieldRef::ProgressLabel.legacy_field_id() => {
-                self.progress_label_input.input(input);
             }
             _ if id == FieldRef::ProgressId.legacy_field_id() => {
                 self.progress_id_input.input(input);
@@ -2753,12 +2739,6 @@ impl WindowEditor {
         if let crate::config::WindowDef::Progress { data, .. } = &mut self.window_def {
             data.id = self
                 .progress_id_input
-                .lines()
-                .get(0)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            data.label = self
-                .progress_label_input
                 .lines()
                 .get(0)
                 .map(|s| s.trim().to_string())
@@ -3932,18 +3912,6 @@ impl WindowEditor {
                     buf,
                     theme,
                     is_focus(FieldRef::ProgressColor, self.focused_field),
-                );
-                special_row += 1;
-                self.render_textarea_compact(
-                    FieldRef::ProgressLabel.legacy_field_id(),
-                    "Label:",
-                    &self.progress_label_input,
-                    left_x,
-                    special_row,
-                    column_width as usize,
-                    buf,
-                    theme,
-                    is_focus(FieldRef::ProgressLabel, self.focused_field),
                 );
                 self.render_checkbox_compact(
                     FieldRef::ProgressNumbersOnly.legacy_field_id(),
